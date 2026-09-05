@@ -2,13 +2,18 @@ import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { ModelRouterEmbeddingModel } from "@mastra/core/llm";
 import { MDocument } from "@mastra/rag";
 import { z } from "zod";
-import { POLICY_DOCUMENTS } from "../knowledge/policy-docs";
 import {
   EMBEDDING_DIMENSION,
   EMBEDDING_MODEL,
   KNOWLEDGE_INDEX,
   vectorStore,
 } from "../lib/vector-store";
+import { defaultLocalBinding } from "../runtime/local-runtime";
+import {
+  ensureProviderFixtures,
+  providerRegistry,
+  resolveConfiguredBinding,
+} from "../providers/registry";
 
 const chunkAndEmbedStep = createStep({
   id: "chunk-and-embed-docs",
@@ -31,7 +36,20 @@ const chunkAndEmbedStep = createStep({
 
     const chunks: Array<{ text: string; metadata: Record<string, unknown> }> =
       [];
-    for (const doc of POLICY_DOCUMENTS) {
+    const binding = resolveConfiguredBinding(defaultLocalBinding());
+    await ensureProviderFixtures(binding);
+    const knowledge = providerRegistry(binding).knowledge(binding);
+    const documents = await Promise.all(
+      (await knowledge.listChanged(binding)).map(async ({ source }) => {
+        const document = await knowledge.fetchDocument(binding, source);
+        if (!document)
+          throw new Error(
+            `Knowledge document ${source} disappeared during indexing.`,
+          );
+        return document;
+      }),
+    );
+    for (const doc of documents) {
       const mdoc = MDocument.fromText(doc.text, {
         title: doc.title,
         source: doc.source,

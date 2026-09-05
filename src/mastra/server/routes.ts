@@ -154,11 +154,39 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
 
   const mastra = c.get("mastra");
   const resolveWorkflow = mastra.getWorkflow("resolveSupportCaseWorkflow");
+  const dispatch = await caseStore.claimDispatchForResume(
+    caseId,
+    supportCase.workflowRunId,
+  );
+  if (!dispatch)
+    return c.json(
+      {
+        error:
+          "This approval is already being resumed or is no longer resumable.",
+      },
+      409,
+    );
   const run = await resolveWorkflow.createRun({
     runId: supportCase.workflowRunId,
   });
 
+  let leaseLost = false;
+  const renewLease = async () => {
+    try {
+      if (
+        !(await caseStore.renewDispatchLease(dispatch.id, dispatch.leaseToken!))
+      )
+        leaseLost = true;
+    } catch {
+      // A renewal failure means the caller can no longer safely project the
+      // resume result onto the case.  Do not turn it into a detached rejection.
+      leaseLost = true;
+    }
+  };
+  const heartbeat = setInterval(() => void renewLease(), 10_000);
+  heartbeat.unref();
   try {
+    await caseStore.update(caseId, { status: "processing" });
     const result = await run.resume({
       step: REQUEST_APPROVAL_STEP_ID,
       resumeData: {
@@ -168,20 +196,59 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
       },
       requestContext: c.get("requestContext"),
     });
+    if (leaseLost)
+      return c.json(
+        { error: "Approval resume lost its dispatch lease; reload the case." },
+        409,
+      );
 
     if (result.status === "failed") {
+      const failed = await caseStore.failDispatchAndCase(
+        dispatch.id,
+        caseId,
+        "Resolution failed after approval resume.",
+        dispatch.leaseToken,
+      );
+      if (!failed)
+        return c.json(
+          {
+            error: "Approval resume lost its dispatch lease; reload the case.",
+          },
+          409,
+        );
       return c.json({ error: "Resolution failed after resume.", result }, 500);
     }
+
+    await caseStore.completeDispatch(
+      dispatch.id,
+      result.status === "suspended" ? "suspended" : "completed",
+      undefined,
+      dispatch.leaseToken,
+    );
 
     return c.json(await caseStore.get(caseId));
   } catch (error: any) {
     if (error?.id === "WORKFLOW_RESUME_ALREADY_CLAIMED") {
       return c.json({ error: "This approval was already submitted." }, 409);
     }
+    if (!leaseLost) {
+      const failed = await caseStore
+        .failDispatchAndCase(dispatch.id, caseId, error, dispatch.leaseToken)
+        .catch(() => false);
+      if (!failed)
+        return c.json(
+          {
+            error: "Approval resume lost its dispatch lease; reload the case.",
+          },
+          409,
+        );
+    }
     return c.json(
       { error: error instanceof Error ? error.message : String(error) },
       500,
     );
+  } finally {
+    clearInterval(heartbeat);
   }
 }
 

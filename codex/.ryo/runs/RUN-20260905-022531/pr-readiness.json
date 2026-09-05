@@ -1,0 +1,40 @@
+{
+  "stage": "PR_READY",
+  "status": "success",
+  "run_id": "RUN-20260905-022531",
+  "phase": "PHASE-002",
+  "branch": "ryo/phase-002-local-runtime",
+  "repository": "drantunes/template-customer-refund-agent",
+  "base": "main",
+  "verified_remote_base": "9dba654bc4f6515ec31ffd78abfd411e92107c89",
+  "title": "feat: add persistent local provider runtime",
+  "body_file": "pr-body.md",
+  "gates": {
+    "passed": 20,
+    "total": 20,
+    "evidence": "gates-20260905-083237.json"
+  },
+  "findings": {
+    "resolved": 18,
+    "open": 0,
+    "gate": "findings-gate-after-fix5.json"
+  },
+  "reviews": [
+    "internal-review-3.json",
+    "security-review-3.json"
+  ],
+  "smoke": "built-start-smoke-fix5.json",
+  "acceptance_evidence": {
+    "AC-002-01": "Registry/contracts and approved integration/contract gates; independent scoped account probes.",
+    "AC-002-02": "Migration up/down/up, rollback, reopen and CAS integration tests; security3 legacy replay.",
+    "AC-002-03": "Exact money, concurrent refund, idempotency/restart tests and security2 exponent proof.",
+    "AC-002-04": "Tamper/bypass tests; security3 four real recovered-command rejection scenarios.",
+    "AC-002-05": "Seed/reset/reseed and concurrency integration tests; security3 durable-history preservation and binding isolation.",
+    "AC-002-06": "Concurrent inbound tests, bounded claim probes and actual two-process workflow recovery.",
+    "AC-002-07": "Outbox replay/retry/concurrency tests; independent heartbeat real31seconds and stale-token probes.",
+    "AC-002-08": "Shared in-process/TCP loopback conformance; independent malformed request/response probes.",
+    "AC-002-09": "Documented quickstart, previous dev smoke, current built smoke, context tests and E2E gates."
+  },
+  "remote_preflight": "Read-only GitHub search found no existing PR for branch; git ls-remote confirms main unchanged and phase branch not published.",
+  "next_recommendation": "Publication authorization HITL before pushing branch and opening PR; independent published-SHA review and separate final merge HITL remain."
+}

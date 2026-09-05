@@ -1,0 +1,247 @@
+{
+  "schema_version": 1,
+  "run_id": "RUN-20260905-022531",
+  "findings": [
+    {
+      "id": "R1-001",
+      "severity": "P1",
+      "status": "resolved",
+      "file": "src/mastra/runtime/local-runtime.ts",
+      "line": 648,
+      "body": "Pre-start recovery omits case.workflowRunId; approve/reject409. Persist ID and test recovered API approval.",
+      "review_evidence": "internal-review-2.json",
+      "resolution_evidence": "Actual prestart recovery persisted workflowRunId, suspended and accepted resume through financial effect.",
+      "resolved_by": "supervisor after fresh independent review"
+    },
+    {
+      "id": "R1-002",
+      "severity": "P1",
+      "status": "resolved",
+      "file": "src/mastra/runtime/local-runtime.ts",
+      "line": 737,
+      "body": "Actual post-refund recovery restarts a running snapshot whose request-approval checkpoint is still suspended. Restart reexecutes approval without resumeData, producing waiting_approval despite approval.approved=true and refund already persisted. Expected automatic completion using approved decision and original effect; observed refunds=1,outbox=0,deliveries=0.",
+      "review_evidence": [
+        "internal-review-3.json",
+        "security-review-3.json"
+      ],
+      "resolution_evidence": "Actual approved and rejected crash/restart preserve decisions/run/effect. Recovered branch returns before requote/saveAction/suspend and checks immutable command. Bounded backfill and concurrent claims have one winner.",
+      "additional_locations": [
+        {
+          "file": "src/mastra/lib/case-store.ts",
+          "line": 858,
+          "body": "claimDispatchForResume recursively retries forever when an existing nonsuspended dispatch causes UNIQUE failure. Second claim never returned; child externally terminated after700ms."
+        }
+      ],
+      "resolved_by": "supervisor after fresh independent internal and security reviews"
+    },
+    {
+      "id": "R1-003",
+      "severity": "P1",
+      "status": "resolved",
+      "file": "src/mastra/workflows/resolve-support-case.ts",
+      "line": 471,
+      "body": "Random message/outbox IDs duplicate replies on active-step replay; split commits. Stable identities and atomic case/message/outbox finalization, conflict-checked replay.",
+      "review_evidence": "internal-review-2.json",
+      "resolution_evidence": "Deterministic final message/outbox IDs; transaction includes case/message/outbox and rejects conflicting replay.",
+      "resolved_by": "supervisor after fresh independent review"
+    },
+    {
+      "id": "R1-004",
+      "severity": "P1",
+      "status": "resolved",
+      "file": "src/mastra/runtime/local-runtime.ts",
+      "line": 582,
+      "body": "Production deliverOutbox bypasses registered accounts for localRuntime. Repro0 registered calls while local receipt appeared. Resolve each persisted binding.",
+      "review_evidence": "internal-review-2.json",
+      "resolution_evidence": "deliverOutbox resolves registry per persisted item binding.",
+      "resolved_by": "supervisor after fresh independent review"
+    },
+    {
+      "id": "R1-005",
+      "severity": "P2",
+      "status": "resolved",
+      "file": "src/mastra/runtime/local-runtime.ts",
+      "line": 645,
+      "body": "deliverOutbox claims up to10items with30s leases but only heartbeats the current item. Waitingitems can be reclaimed/exhausted while firstdelivery is slow. Oldworker then invokes deliver without validating ownership; completeOutbox silently rejects stale token. Realrepro leaves newlocalreceipt while outboxfailed/receiptnull and casefailed.",
+      "review_evidence": [
+        "internal-review-4.json",
+        "security-review-4.json"
+      ],
+      "additional_locations": [
+        {
+          "file": "src/mastra/runtime/local-runtime.ts",
+          "line": 660
+        }
+      ],
+      "history": [
+        {
+          "status": "resolved",
+          "severity": "P1",
+          "resolution_evidence": "Real31s heartbeat; renewal failure409 without failure projection; stale dispatch/outbox probes pass. failDispatchAndCase, terminal retryOutbox and exhausted paths project only after winning fenced UPDATE within write transaction.",
+          "review_evidence": [
+            "internal-review-3.json",
+            "security-review-3.json"
+          ],
+          "note": "P1 heartbeat/stale-projection facets resolved byfix5; publishedSHA review demonstrated residual batch-effect ownership P2."
+        }
+      ],
+      "title": "Stale worker delivers item after lost lease and terminal failure",
+      "impact": "Delivery occurs after terminalfailure and operational state remains inconsistent. No financial duplication or duplicate idempotentreceipt demonstrated.",
+      "recommendation": "Claim work as execution capacity becomes available or maintain queued leases; require validownership before initiating effect. Add slowfirst/revokedsecond batch regression.",
+      "resolved_by": "supervisor after independent internal-review-4 and security-review-4",
+      "resolution_evidence": "Just-in-time execution capacity, pre-effect lease validation, bounded sweep exclusions; independent exact stale-terminal schedule and security SQL probes pass."
+    },
+    {
+      "id": "R1-006",
+      "severity": "P2",
+      "status": "resolved",
+      "file": "src/mastra/lib/case-store.ts",
+      "line": 596,
+      "body": "Third crashed claim remains claimed forever, attempts>=3 excluded. Reconcile receipts or visibly fail exhausted expired dispatch/outbox; crash exhaustion tests.",
+      "review_evidence": "internal-review-2.json",
+      "resolution_evidence": "Expired exhausted claims now visibly terminalize; corresponding final regression passes.",
+      "resolved_by": "supervisor after fresh independent review"
+    },
+    {
+      "id": "R1-007",
+      "severity": "P2",
+      "status": "resolved",
+      "file": "src/mastra/runtime/local-runtime.ts",
+      "line": 654,
+      "body": "Recovered failure updates dispatch only; case stays new/processing, failed outbox hidden by resolved case. Persist workflow failure, expose workflow/action/delivery status.",
+      "review_evidence": "internal-review-2.json",
+      "resolution_evidence": "Explicit workflow/delivery failures persist public case status and metadata; stale inconsistency remains R1-005.",
+      "resolved_by": "supervisor after fresh independent review"
+    },
+    {
+      "id": "R1-008",
+      "severity": "P2",
+      "status": "resolved",
+      "file": "src/mastra/workflows/ingest-support-case.ts",
+      "line": 61,
+      "body": "Production event_${source}_${externalId} identity remains globally keyed without tenant/account. Second acceptance in a different binding fails UNIQUE support_events.id.",
+      "review_evidence": [
+        "internal-review-3.json",
+        "security-review-3.json"
+      ],
+      "resolution_evidence": "Same input physical ID accepted across accounts; scoped hash and logical lookup/legacy fallback preserved.",
+      "resolved_by": "supervisor after fresh independent internal and security reviews"
+    },
+    {
+      "id": "R1-009",
+      "severity": "P2",
+      "status": "resolved",
+      "file": "src/mastra/lib/case-store.ts",
+      "line": 423,
+      "body": "Message insertion failure commits case JSON alone; replay returns early leaving missing row. Atomic CAS create/update/append; trigger rollback/retry tests.",
+      "review_evidence": "internal-review-2.json",
+      "resolution_evidence": "create/update/append/finalization transact case JSON with message rows and roll back on insertion failure.",
+      "resolved_by": "supervisor after fresh independent review"
+    },
+    {
+      "id": "R1-010",
+      "severity": "P1",
+      "status": "resolved",
+      "file": "src/mastra/runtime/local-runtime.ts",
+      "line": 305,
+      "body": "Mutable command with recomputed hash executes under old boolean approval; immutable action unused. Repro100 approved replaced200 executed. Bind decision to immutable action/hash; reject replacement.",
+      "review_evidence": "internal-review-2.json",
+      "resolution_evidence": "Refund requires matching immutable support_actions payload; metadata hash alone cannot replace action.",
+      "resolved_by": "supervisor after fresh independent review"
+    },
+    {
+      "id": "R1-011",
+      "severity": "P2",
+      "status": "resolved",
+      "file": "src/mastra/providers/loopback-http.ts",
+      "line": 169,
+      "body": "Delivery facade coerces malformed body object/status17 with String and persists receipt HTTP200. normalizeInbound/listChanged adapter results also lack schemas. Reject malformed request before effect.",
+      "review_evidence": [
+        "internal-review-3.json",
+        "security-review-3.json"
+      ],
+      "resolution_evidence": "Malformed inputs rejected before effect, malformed adapter normalize/list outputs rejected; all four-port schemas inspected.",
+      "resolved_by": "supervisor after fresh independent internal and security reviews"
+    },
+    {
+      "id": "R1-012",
+      "severity": "P2",
+      "status": "resolved",
+      "file": "src/mastra/runtime/local-runtime.ts",
+      "line": 169,
+      "body": "Reset deletes receipts but preserves outbox, enabling new effect on same key. Preserve receipt history or refuse reset after effects; runtime+CLI test.",
+      "review_evidence": "internal-review-2.json",
+      "resolution_evidence": "Runtime and CLI guard/deletion share transaction and refuse durable refunds/deliveries; new memo issue separateR2-001.",
+      "resolved_by": "supervisor after fresh independent review"
+    },
+    {
+      "id": "S1-001",
+      "severity": "P1",
+      "status": "resolved",
+      "file": "src/mastra/runtime/local-runtime.ts",
+      "line": 157,
+      "body": "Refund can commit between reset COUNT and delete batch, then reset erases refund/order but keeps idempotency. Repro refunds0 ledger1 orders0. Guard+mutations one write transaction runtime and CLI, concurrent reset/refund test.",
+      "resolved_by": "supervisor after fresh independent security review",
+      "review_evidence": "security-review-2.json",
+      "resolution_evidence": "Runtime/CLI guard and deletes are inside write transaction. Runtime refund queued after COUNT waited then failed missing order (refunds0/ledger0). Inverse order durable refund made runtime/CLI refuse reset preserving refunds1/ledger1/orders4."
+    },
+    {
+      "id": "S1-002",
+      "severity": "P2",
+      "status": "resolved",
+      "file": "src/mastra/lib/case-store.ts",
+      "line": 452,
+      "body": "Migrated Phase001 case has no event backfill; original inbound replay attempts duplicate case and UNIQUE fails. Backfill compatible acceptance identity or scoped legacy fallback atomically, no duplicate dispatch.",
+      "resolved_by": "supervisor after fresh independent security review",
+      "review_evidence": "security-review-2.json",
+      "resolution_evidence": "Schema v1 legacy case migrated; two original-event replays returned original case isNew=false, exactly1event and0dispatch."
+    },
+    {
+      "id": "S1-003",
+      "severity": "P2",
+      "status": "resolved",
+      "file": "src/mastra/workflows/ingest-support-case.ts",
+      "line": 34,
+      "body": "Normalizer conversation123/event456 is persisted with conversation=event456. Preserve authoritative support conversation ref independent event ID; actual ingestion\u2192outbox test.",
+      "resolved_by": "supervisor after fresh independent security review",
+      "review_evidence": "security-review-2.json",
+      "resolution_evidence": "Production normalize/resolve/finalize/deliver preserved conversation-123 while event identity was event-456; outbox delivered."
+    },
+    {
+      "id": "S1-004",
+      "severity": "P2",
+      "status": "resolved",
+      "file": "src/mastra/lib/money.ts",
+      "line": 18,
+      "body": "Compatibility conversion unconditionally x100: JPY100\u219210000, KWD1.23\u2192123. Checked currency exponents both directions or explicit supported2decimal allowlist; zero/three exponent and unknown tests.",
+      "resolved_by": "supervisor after fresh independent security review",
+      "review_evidence": "security-review-2.json",
+      "resolution_evidence": "JPY100\u2192100,USD1.23\u2192123,KWD1.23\u21921230 roundtrip; JPY1.1,KWD1.2345,ZZZ rejected including reverse unknown currency conversion."
+    },
+    {
+      "id": "GATE-002-001",
+      "severity": "P1",
+      "status": "resolved",
+      "file": "test/integration/resolve-support-case.characterization.test.ts",
+      "line": 372,
+      "body": "Final required backend integration gate fails duplicate-inbound test with SQLITE_BUSY and unhandled rejection; 44/45 tests passed, one timed out. Evidence gates-20260905-041341.json. Three fix cycles exhausted; additional cycle needs HITL.",
+      "review_evidence": "internal-review-2.json",
+      "resolution_evidence": "Shared client serializes interactive transactions; official integration and actual workflow reproduction had no SQLITE_BUSY.",
+      "resolved_by": "supervisor after fresh independent review"
+    },
+    {
+      "id": "R2-001",
+      "severity": "P2",
+      "status": "resolved",
+      "file": "src/mastra/runtime/local-runtime.ts",
+      "line": 110,
+      "body": "Fix4 seed memo is not invalidated by reset. seed/reset/seed in same instance returns success but ORD-1001 remains undefined; fixtures unavailable until process restart.",
+      "review_evidence": [
+        "internal-review-3.json",
+        "security-review-3.json"
+      ],
+      "resolved_by": "supervisor after fresh independent internal and security reviews",
+      "resolution_evidence": "Same-runtime seed/reset/seed and concurrent reset/seed restore order; queue per binding invalidates memo only after reset commit; refused reset keeps guard and rollback."
+    }
+  ]
+}

@@ -1,28 +1,44 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import { findOrderById, recordRefund } from "../lib/mock-commerce";
+import { caseStore } from "../lib/case-store";
+import {
+  legacyAmountToMoney,
+  moneyToLegacyAmount,
+  refundFingerprint,
+} from "../lib/money";
+import { bindingsForPersistedCase } from "../runtime/local-runtime";
+import {
+  ensureProviderFixtures,
+  providerRegistry,
+  resolveConfiguredBinding,
+} from "../providers/registry";
 
 export const MAX_AUTO_APPROVABLE_REFUND = 1000;
+const commandSchema = z.object({
+  approvalCaseId: z.string(),
+  orderId: z.string(),
+  amount: z.number().positive(),
+  currency: z.string(),
+  reason: z.string(),
+  idempotencyKey: z.string(),
+  fingerprint: z.string(),
+});
 
-const issuedIdempotencyKeys = new Map<
-  string,
-  { refundId: string; executedAt: string }
->();
-
+/**
+ * A Phase-002 local decision bridge: callers must reference the immutable
+ * command persisted at suspension. Native approval/RBAC belongs to Phase 003.
+ */
 export const issueRefundTool = createTool({
   id: "issue_refund",
-  description:
-    "Execute a refund against an order. Requires human approval. Idempotent on idempotencyKey - safe to call more than once for the same case.",
+  description: "Execute the already-approved persisted local refund command.",
   inputSchema: z.object({
+    caseId: z.string(),
     orderId: z.string(),
     amount: z.number().positive(),
     currency: z.string().default("USD"),
     reason: z.string(),
-    idempotencyKey: z
-      .string()
-      .describe(
-        "Stable key (e.g. the case id) so retries never double-refund.",
-      ),
+    idempotencyKey: z.string(),
+    fingerprint: z.string(),
   }),
   outputSchema: z.object({
     refundId: z.string(),
@@ -34,53 +50,63 @@ export const issueRefundTool = createTool({
     executedAt: z.string(),
   }),
   requireApproval: true,
-  execute: async ({ orderId, amount, currency, reason, idempotencyKey }) => {
-    const existing = issuedIdempotencyKeys.get(idempotencyKey);
-    if (existing) {
-      return {
-        refundId: existing.refundId,
-        orderId,
-        amount,
-        currency,
-        status: "skipped" as const,
-        idempotencyKey,
-        executedAt: existing.executedAt,
-      };
-    }
-
-    const order = findOrderById(orderId);
-    if (!order) {
-      throw new Error(`Cannot issue refund: order ${orderId} not found.`);
-    }
-    if (amount > order.amount) {
+  execute: async (input) => {
+    const supportCase = await caseStore.get(input.caseId);
+    if (!supportCase?.approval?.approved)
       throw new Error(
-        `Refund amount ${amount} ${currency} exceeds the original charge of ${order.amount} ${order.currency} for order ${orderId}.`,
+        "A persisted approved local decision is required before issuing a refund.",
       );
-    }
-
-    const refundId = `REF-${Math.floor(1000 + Math.random() * 9000)}`;
-    const executedAt = new Date().toISOString();
-
-    // Mock execution: in production this calls the payment processor
-    // (Stripe Refunds API, PayPal, etc.) and the commerce backend.
-    recordRefund({
-      refundId,
-      orderId,
+    const stored = commandSchema.safeParse(
+      (supportCase.metadata as Record<string, unknown>).refundCommand,
+    );
+    if (!stored.success)
+      throw new Error("The persisted refund command is missing.");
+    const command = stored.data;
+    const bindings = bindingsForPersistedCase(supportCase);
+    if (
+      command.approvalCaseId !== input.caseId ||
+      command.orderId !== input.orderId ||
+      command.amount !== input.amount ||
+      command.currency !== input.currency ||
+      command.reason !== input.reason ||
+      command.idempotencyKey !== input.idempotencyKey ||
+      command.fingerprint !== input.fingerprint
+    )
+      throw new Error(
+        "Refund execution must exactly match the persisted command.",
+      );
+    const amount = legacyAmountToMoney(command.amount, command.currency);
+    const expected = refundFingerprint({
+      binding: bindings.transactions,
+      approvalCaseId: input.caseId,
+      orderId: command.orderId,
       amount,
-      currency,
-      reason,
-      issuedAt: executedAt,
+      reason: command.reason,
+      idempotencyKey: command.idempotencyKey,
     });
-    issuedIdempotencyKeys.set(idempotencyKey, { refundId, executedAt });
-
+    if (expected !== command.fingerprint)
+      throw new Error("The persisted refund command fingerprint is invalid.");
+    const binding = resolveConfiguredBinding(bindings.transactions);
+    await ensureProviderFixtures(binding);
+    const effect = await providerRegistry(binding)
+      .transactions(binding)
+      .issueRefund({
+        binding,
+        approvalCaseId: input.caseId,
+        orderId: command.orderId,
+        amount,
+        reason: command.reason,
+        idempotencyKey: command.idempotencyKey,
+        fingerprint: command.fingerprint,
+      });
     return {
-      refundId,
-      orderId,
-      amount,
-      currency,
-      status: "executed" as const,
-      idempotencyKey,
-      executedAt,
+      refundId: effect.refundId,
+      orderId: effect.orderId,
+      amount: moneyToLegacyAmount(effect.amount),
+      currency: effect.amount.currency,
+      status: effect.replayed ? ("skipped" as const) : ("executed" as const),
+      idempotencyKey: effect.idempotencyKey,
+      executedAt: effect.executedAt,
     };
   },
 });

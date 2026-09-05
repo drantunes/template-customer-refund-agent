@@ -1,0 +1,10 @@
+{
+  "errors": [
+    "R1-002 is blocking and must be resolved",
+    "R1-005 is blocking and must be resolved",
+    "R1-008 P2 requires resolution or a recorded deferral",
+    "R1-011 P2 requires resolution or a recorded deferral",
+    "R2-001 P2 requires resolution or a recorded deferral"
+  ],
+  "ok": false
+}

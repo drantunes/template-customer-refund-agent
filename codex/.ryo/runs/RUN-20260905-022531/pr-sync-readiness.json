@@ -1,0 +1,24 @@
+{
+  "stage": "PR_SYNC",
+  "status": "success",
+  "phase": "PHASE-002",
+  "run_id": "RUN-20260905-022531",
+  "pr_url": "https://github.com/drantunes/template-customer-refund-agent/pull/2",
+  "branch": "ryo/phase-002-local-runtime",
+  "base": "main",
+  "previous_published_sha": "77519b2bfdd85beccadb5489e73710ee122495c3",
+  "authorization": "HITL-CYCLES-002-003 approved sixthcycle and samePRsync",
+  "gates_passed": 20,
+  "gates_total": 20,
+  "findings_open": 0,
+  "findings_resolved": 18,
+  "evidence": [
+    "gates-20260905-094916.json",
+    "built-start-smoke-fix6.json",
+    "internal-review-4.json",
+    "security-review-4.json",
+    "findings-gate-after-fix6.json"
+  ],
+  "body_file": "pr-body.md",
+  "next_recommendation": "Commit reviewedfix6, syncsamePR2, thenfreshPR_REVIEW ofactualpublishedSHA. No mergeauthorizationyet."
+}

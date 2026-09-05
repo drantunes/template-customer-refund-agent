@@ -1,0 +1,10 @@
+{
+  "stage": "VERIFYING",
+  "status": "success",
+  "revision": "a67cb98 plus reviewed-pending fix4 working tree",
+  "command": "env PATH=/private/tmp/ryo-phase001-runtime/bin:$PATH PORT=4187 TURSO_DATABASE_URL=file:/private/tmp/phase002-built-smoke-fix4.db MASTRA_TELEMETRY_DISABLED=1 timeout 15 npm run start",
+  "result": "Built Mastra API reported ready at localhost:4187/api. SIGTERM after15 seconds completed server, MastraStorageExporter, observability and Mastra shutdown without errors.",
+  "exit_code": 124,
+  "exit_explanation": "Expected bounded smoke timeout after startup; graceful shutdown observed.",
+  "scope": "Temporary local database; no inference calls. Preexisting unrelated server4111 preserved."
+}

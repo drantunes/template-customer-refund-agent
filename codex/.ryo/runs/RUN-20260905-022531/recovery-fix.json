@@ -1,0 +1,25 @@
+{
+  "stage": "RECOVERY-FIX",
+  "status": "success",
+  "run_id": "RUN-20260905-022531",
+  "phase": "PHASE-002",
+  "role": { "model": "gpt-5.6-terra", "effort": "high" },
+  "failure": {
+    "command": "PATH=/private/tmp/ryo-phase001-runtime/bin:$PATH MASTRA_TELEMETRY_DISABLED=1 npm run test:integration -- --run test/integration/resolve-support-case.characterization.test.ts",
+    "error": "Mastra observational-storage initialization raised SQLITE_BUSY on a fresh shared file when app-owned CaseStore migrations had initialized independently before Mastra composite storage."
+  },
+  "fix": [
+    "Use installed MastraCompositeStore.init() from mastra.getStorage() as the canonical initialization promise.",
+    "CaseStore waits for that promise before its own migrations and applies PRAGMA busy_timeout=30000.",
+    "LibSQLStore uses the supported connectionTimeoutMs=30000 configuration.",
+    "Characterization cleanup calls mastra.shutdown() before deleting each temporary database, preventing old module instances from retaining file handles."
+  ],
+  "success": {
+    "command": "PATH=/private/tmp/ryo-phase001-runtime/bin:$PATH MASTRA_TELEMETRY_DISABLED=1 npm run test:integration -- --run test/integration/phase002-local-runtime.test.ts test/integration/resolve-support-case.characterization.test.ts",
+    "result": "passed: 2 files, 22 tests. The restored actual recovery test persists a pre-start dispatch, recovers through installed getWorkflowRunById/createRun/start behavior, observes Mastra status suspended, and verifies durable dispatch state suspended."
+  },
+  "startup_smoke": {
+    "command": "TURSO_DATABASE_URL=file:/private/tmp/phase002-dev-smoke-5.db MASTRA_TELEMETRY_DISABLED=1 timeout 15 npm run dev",
+    "result": "passed: Mastra Studio/API ready; shutdown clean on timeout."
+  }
+}

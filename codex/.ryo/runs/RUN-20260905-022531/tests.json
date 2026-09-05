@@ -1,0 +1,47 @@
+{
+  "stage": "TESTS",
+  "status": "success",
+  "run_id": "RUN-20260905-022531",
+  "phase": "PHASE-002",
+  "role": { "model": "gpt-5.6-terra", "effort": "high" },
+  "summary": "Focused implementation verification closes the provider-binding, local-fixture, and durable recovery findings. Mastra composite storage initialization now precedes app-owned migration DDL, and the real persisted-workflow recovery regression passes.",
+  "commands": [
+    {
+      "command": "PATH=/private/tmp/ryo-phase001-runtime/bin:$PATH npm run typecheck",
+      "result": "passed"
+    },
+    {
+      "command": "PATH=/private/tmp/ryo-phase001-runtime/bin:$PATH npm run test:integration -- --run test/integration/phase002-local-runtime.test.ts test/integration/resolve-support-case.characterization.test.ts",
+      "result": "passed: 2 files, 19 tests; executed with elevated permission solely to bind a temporary 127.0.0.1 loopback listener and use disposable SQLite databases"
+    },
+    {
+      "command": "PATH=/private/tmp/ryo-phase001-runtime/bin:$PATH npm run format:check",
+      "result": "passed after formatting touched files"
+    },
+    {
+      "command": "TURSO_DATABASE_URL=file:/private/tmp/phase002-dev-smoke-4.db MASTRA_TELEMETRY_DISABLED=1 timeout 15 npm run dev",
+      "result": "passed: Mastra 1.27.2 Studio/API became ready and shut down cleanly"
+    },
+    {
+      "command": "TURSO_DATABASE_URL=file:/private/tmp/phase002-fixture-smoke.db npm run local:seed && TURSO_DATABASE_URL=file:/private/tmp/phase002-fixture-smoke.db npm run local:reset",
+      "result": "passed: deterministic scoped fixture seed/reset"
+    },
+    {
+      "command": "PATH=/private/tmp/ryo-phase001-runtime/bin:$PATH MASTRA_TELEMETRY_DISABLED=1 npm run test:integration -- --run test/integration/phase002-local-runtime.test.ts test/integration/resolve-support-case.characterization.test.ts",
+      "result": "passed: 2 files, 22 tests; includes actual Mastra getWorkflowRunById pre-start recovery to suspended state; elevated permission only bound disposable 127.0.0.1 loopback transport"
+    }
+  ],
+  "acceptance_evidence": {
+    "AC-002-01": "New inbound cases persist independent support/commerce/transactions/knowledge bindings. CaseStore rejects binding mutation; keyed registry routes by persisted tenant/kind/account and loopback rejects command/request binding mismatch. Focused integration adds immutable-binding and conversation-bound receipt replay coverage.",
+    "AC-002-02": "CaseStore migration v4 scopes case identity by tenant/account/source/external id; reopen, failed-migration rollback, stale CAS, and scoped duplicate event tests pass.",
+    "AC-002-03": "Two SQLite clients concurrently attempt partial refunds; exactly one succeeds. Positive safe-integer money, over-refund, persisted replay, conflicting reuse, and dropped HTTP response replay are tested.",
+    "AC-002-04": "A real suspended Mastra workflow rejects direct pre-approval tool execution; tampering the persisted command makes approved resume fail without a refund. Local provider now requires the matching persisted approved command.",
+    "AC-002-05": "Local seed/reset isolation, deterministic scoped knowledge, ambiguous lookup, provider-backed knowledge indexing, and file-only npm local:seed/local:reset commands are covered. Remote URLs are explicitly refused.",
+    "AC-002-06": "Inbound dedup/reopen and pre-start versus active recovery branches are covered; the real Mastra regression persists a pre-start dispatch, uses getWorkflowRunById, starts it with stable run id, and observes the suspended approval state without automatic approval.",
+    "AC-002-07": "Outbox 429 is retryable, permanent 400 fails visibly, lease reclaim after an effect-before-receipt crash reuses a payload-bound durable receipt.",
+    "AC-002-08": "All four ports are exercised through in-process and actual 127.0.0.1 HTTP loopback adapters, including timeout, 429, validation, refund dropped response, and receipt replay.",
+    "AC-002-09": "Source-mode Mastra Studio startup with a temporary file database reached ready state. App migrations await Mastra composite storage initialization before local recovery starts, and file-only runtime fixture protection prevents remote seeding."
+  },
+  "findings": [],
+  "next_recommendation": "Run mandatory supervisor gates and independent review before VERIFYING."
+}

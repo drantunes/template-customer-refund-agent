@@ -11,9 +11,20 @@ import {
   threadIdForCase,
   triageResultSchema,
   type PolicyMatch,
+  type SupportCase,
 } from "../domain/support-case";
 import { MAX_AUTO_APPROVABLE_REFUND } from "../tools/issue-refund";
-import { getActiveSupportAdapter } from "../integrations/active-adapter";
+import { caseStore as persistentCaseStore } from "../lib/case-store";
+import { legacyAmountToMoney, refundFingerprint } from "../lib/money";
+import {
+  bindingsForPersistedCase,
+  deliverOutbox,
+} from "../runtime/local-runtime";
+import {
+  ensureProviderFixtures,
+  providerRegistry,
+  resolveConfiguredBinding,
+} from "../providers/registry";
 
 const caseIdSchema = z.object({ caseId: z.string() });
 
@@ -84,6 +95,7 @@ const retrievePolicyStep = createStep({
   outputSchema: caseIdSchema,
   execute: async ({ inputData, mastra, requestContext, tracingContext }) => {
     const supportCase = await getCaseOrThrow(inputData.caseId);
+    const bindings = bindingsForPersistedCase(supportCase);
     const latestMessage = supportCase.messages[supportCase.messages.length - 1];
     const queryText =
       `${supportCase.triage?.intent ?? ""} ${supportCase.subject} ${latestMessage.body}`.trim();
@@ -98,7 +110,11 @@ const retrievePolicyStep = createStep({
       );
 
     const result = await searchTool.execute(
-      { queryText, topK: 5 },
+      {
+        queryText,
+        topK: 5,
+        binding: resolveConfiguredBinding(bindings.knowledge),
+      },
       { mastra, requestContext, tracingContext },
     );
     const sources: Array<{
@@ -134,6 +150,7 @@ const inspectOrderStep = createStep({
   outputSchema: caseIdSchema,
   execute: async ({ inputData, mastra, requestContext, tracingContext }) => {
     const supportCase = await getCaseOrThrow(inputData.caseId);
+    const bindings = bindingsForPersistedCase(supportCase);
     if (!mastra)
       throw new Error(
         "The resolve workflow must run through a registered Mastra instance.",
@@ -153,14 +170,20 @@ const inspectOrderStep = createStep({
 
     const orderLookup = orderLookupSchema.parse(
       await orderTool.execute(
-        { customerEmail: supportCase.customer.email },
+        {
+          customerEmail: supportCase.customer.email,
+          binding: resolveConfiguredBinding(bindings.commerce),
+        },
         { mastra, requestContext, tracingContext },
       ),
     );
 
     const subscriptionLookup = subscriptionLookupSchema.parse(
       await subscriptionTool.execute(
-        { customerEmail: supportCase.customer.email },
+        {
+          customerEmail: supportCase.customer.email,
+          binding: resolveConfiguredBinding(bindings.commerce),
+        },
         { mastra, requestContext, tracingContext },
       ),
     );
@@ -168,7 +191,10 @@ const inspectOrderStep = createStep({
     const refundHistory = orderLookup.found
       ? refundHistorySchema.parse(
           await refundHistoryTool.execute(
-            { orderId: orderLookup.order?.orderId ?? "" },
+            {
+              orderId: orderLookup.order?.orderId ?? "",
+              binding: resolveConfiguredBinding(bindings.commerce),
+            },
             { mastra, requestContext, tracingContext },
           ),
         )
@@ -253,6 +279,70 @@ const approvalOutputSchema = z.object({
   note: z.string().optional(),
 });
 
+const persistedRefundCommandSchema = z.object({
+  approvalCaseId: z.string().min(1),
+  orderId: z.string().min(1),
+  amount: z.number().positive(),
+  currency: z.string().min(1),
+  reason: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+  fingerprint: z.string().min(1),
+});
+
+/** A running snapshot can be restarted after the API accepted a decision but
+ * before Mastra persisted the downstream step.  The restarted checkpoint has
+ * no resumeData, so recover only an already durable decision.  Approval is
+ * tied to the immutable action row, never just mutable case metadata. */
+async function recoveredApprovalDecision(supportCase: SupportCase) {
+  const decision = supportCase.approval;
+  if (!decision) return undefined;
+  if (!decision.approverId)
+    throw new Error("The persisted approval decision is missing its approver.");
+  if (decision.approved) {
+    const stored = persistedRefundCommandSchema.safeParse(
+      (supportCase.metadata as Record<string, unknown>).refundCommand,
+    );
+    if (!stored.success)
+      throw new Error("The persisted refund command is missing.");
+    const command = stored.data;
+    const binding = resolveConfiguredBinding(
+      bindingsForPersistedCase(supportCase).transactions,
+    );
+    const immutable = {
+      binding,
+      approvalCaseId: supportCase.id,
+      orderId: command.orderId,
+      amount: legacyAmountToMoney(command.amount, command.currency),
+      reason: command.reason,
+      idempotencyKey: command.idempotencyKey,
+    };
+    const fingerprint = refundFingerprint(immutable);
+    if (
+      command.approvalCaseId !== supportCase.id ||
+      command.fingerprint !== fingerprint
+    )
+      throw new Error("The persisted refund command fingerprint is invalid.");
+    const action = await persistentCaseStore.getAction(
+      supportCase.id,
+      "refund-command",
+      fingerprint,
+    );
+    if (
+      !action ||
+      JSON.stringify(action) !== JSON.stringify({ ...immutable, fingerprint })
+    )
+      throw new Error(
+        "The persisted approved refund command does not match its immutable action.",
+      );
+  }
+  return {
+    caseId: supportCase.id,
+    approved: decision.approved,
+    approverId: decision.approverId,
+    note: decision.note,
+  };
+}
+
 const requestApprovalStep = createStep({
   id: "request-approval",
   description:
@@ -274,6 +364,7 @@ const requestApprovalStep = createStep({
   outputSchema: approvalOutputSchema,
   execute: async ({ inputData, resumeData, suspend }) => {
     const supportCase = await getCaseOrThrow(inputData.caseId);
+    const bindings = bindingsForPersistedCase(supportCase);
     const draft = supportCase.draft;
 
     if (!draft?.recommendRefund) {
@@ -281,7 +372,52 @@ const requestApprovalStep = createStep({
     }
 
     if (!resumeData) {
-      await caseStore.update(supportCase.id, { status: "waiting_approval" });
+      const recovered = await recoveredApprovalDecision(supportCase);
+      if (recovered) return recovered;
+      const amount = draft.refundAmount ?? 0;
+      const currency = draft.refundCurrency ?? "USD";
+      const command = {
+        approvalCaseId: supportCase.id,
+        orderId: supportCase.orderLookup?.order?.orderId ?? "",
+        amount,
+        currency,
+        reason: draft.refundReason ?? "Approved support refund",
+        idempotencyKey: supportCase.id,
+        fingerprint: "",
+      };
+      if (!command.orderId)
+        throw new Error(
+          "A refund recommendation requires an unambiguous order id.",
+        );
+      const money = legacyAmountToMoney(amount, currency);
+      const binding = resolveConfiguredBinding(bindings.transactions);
+      const immutableCommand = {
+        binding,
+        approvalCaseId: supportCase.id,
+        orderId: command.orderId,
+        amount: money,
+        reason: command.reason,
+        idempotencyKey: command.idempotencyKey,
+      };
+      command.fingerprint = refundFingerprint(immutableCommand);
+      await ensureProviderFixtures(binding);
+      const approvedCommand = {
+        ...immutableCommand,
+        fingerprint: command.fingerprint,
+      };
+      await providerRegistry(binding)
+        .transactions(binding)
+        .quoteRefund(approvedCommand);
+      await persistentCaseStore.saveAction(
+        supportCase.id,
+        "refund-command",
+        command.fingerprint,
+        approvedCommand,
+      );
+      await caseStore.update(supportCase.id, {
+        status: "waiting_approval",
+        metadata: { ...supportCase.metadata, refundCommand: command },
+      });
       return await suspend({
         caseId: supportCase.id,
         refundAmount: draft.refundAmount ?? 0,
@@ -292,6 +428,8 @@ const requestApprovalStep = createStep({
       });
     }
 
+    if (!(supportCase.metadata as Record<string, unknown>).refundCommand)
+      throw new Error("The persisted refund command is missing.");
     await caseStore.update(supportCase.id, {
       approval: {
         approved: resumeData.approved,
@@ -354,11 +492,20 @@ const resolveCaseStep = createStep({
           const refundResult = refundResultSchema.parse(
             await refundTool.execute(
               {
+                caseId: supportCase.id,
                 orderId,
                 amount: draft.refundAmount ?? 0,
                 currency: draft.refundCurrency ?? "USD",
                 reason: draft.refundReason ?? "Approved support refund",
                 idempotencyKey: supportCase.id,
+                fingerprint: String(
+                  (supportCase.metadata as Record<string, unknown>)
+                    .refundCommand &&
+                    (
+                      (supportCase.metadata as Record<string, unknown>)
+                        .refundCommand as { fingerprint?: string }
+                    ).fingerprint,
+                ),
               },
               { mastra, requestContext, tracingContext },
             ),
@@ -369,46 +516,39 @@ const resolveCaseStep = createStep({
       }
     }
 
-    await caseStore.update(supportCase.id, {
+    const message = {
+      // Deterministic identities make an active-step replay converge on the
+      // already finalized message/outbox pair.
+      id: `msg_${supportCase.id}_final`,
+      author: "agent" as const,
+      authorName: "Support Agent",
+      body: finalResponse,
+      createdAt: new Date().toISOString(),
+    };
+    await persistentCaseStore.finalizeCaseAndEnqueue({
+      caseId: supportCase.id,
       status,
       finalResponse,
       escalationReason,
-      messages: [
-        ...supportCase.messages,
-        {
-          id: `msg_${crypto.randomUUID().slice(0, 8)}`,
-          author: "agent" as const,
-          authorName: "Support Agent",
-          body: finalResponse,
-          createdAt: new Date().toISOString(),
-        },
-      ],
+      message,
+      outbox: {
+        id: `outbox_${supportCase.id}_final`,
+        caseId: supportCase.id,
+        binding: resolveConfiguredBinding(
+          bindingsForPersistedCase(supportCase).support,
+        ),
+        body: finalResponse,
+        status,
+      },
     });
-
-    // Sync the outcome back through the active adapter.
-    // This is best-effort so a provider hiccup escalates loudly in the logs rather than failing a
-    // resolution that's already been decided.
-    const adapter = getActiveSupportAdapter();
-    const sourceCaseId = supportCase.externalId;
-    const syncBack = async () => {
-      await adapter.sendReply(sourceCaseId, finalResponse);
-      if (status === "escalated" && escalationReason) {
-        await adapter.addInternalNote(
-          sourceCaseId,
-          `Escalated by support-refund-agent: ${escalationReason}`,
-        );
-      }
-      await adapter.updateStatus(sourceCaseId, status);
-    };
-    await syncBack().catch((error) => {
+    await deliverOutbox().catch((error) =>
       mastra
         ?.getLogger()
-        ?.warn("Failed to sync case resolution back to source system", {
+        ?.warn("Local outbox delivery failed; recovery will retry it.", {
           error,
           caseId: supportCase.id,
-          source: supportCase.source,
-        });
-    });
+        }),
+    );
 
     return { caseId: supportCase.id, status };
   },

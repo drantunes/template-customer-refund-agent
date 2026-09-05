@@ -1,0 +1,214 @@
+{
+  "created_at": "2026-09-05T02:25:31+00:00",
+  "events": [
+    {
+      "at": "2026-09-05T02:25:31+00:00",
+      "evidence": "run-created",
+      "from": null,
+      "to": "STARTED"
+    },
+    {
+      "at": "2026-09-05T02:25:37+00:00",
+      "evidence": "Drift absent; gates valid; PHASE-001 archived; planning uses configured gpt-6-astra medium.",
+      "from": "STARTED",
+      "to": "PLANNING"
+    },
+    {
+      "at": "2026-09-05T02:29:12+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/planning.json",
+      "from": "PLANNING",
+      "to": "GOAL"
+    },
+    {
+      "at": "2026-09-05T02:31:15+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/goal.json",
+      "from": "GOAL",
+      "to": "IMPLEMENTING"
+    },
+    {
+      "at": "2026-09-05T03:27:31+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/recovery-fix.json",
+      "from": "IMPLEMENTING",
+      "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T03:28:32+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/gates-20260905-032812.json",
+      "from": "VERIFYING",
+      "to": "FIXING"
+    },
+    {
+      "at": "2026-09-05T03:32:46+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/fix-1.json",
+      "from": "FIXING",
+      "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T03:38:50+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/gates-20260905-033321.json",
+      "from": "VERIFYING",
+      "to": "FIXING"
+    },
+    {
+      "at": "2026-09-05T03:39:52+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/fix-2.json",
+      "from": "FIXING",
+      "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T03:40:53+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/gates-20260905-034028.json",
+      "from": "VERIFYING",
+      "to": "INTERNAL_REVIEW"
+    },
+    {
+      "at": "2026-09-05T03:51:31+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/security-review-1.json",
+      "from": "INTERNAL_REVIEW",
+      "to": "FIXING"
+    },
+    {
+      "at": "2026-09-05T04:12:33+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/fix-3.json",
+      "from": "FIXING",
+      "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T04:14:51+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/cycle-limit-hitl.json",
+      "from": "VERIFYING",
+      "to": "PAUSED_HITL"
+    },
+    {
+      "approved_by": "Diego Antunes",
+      "at": "2026-09-05T05:05:54+00:00",
+      "evidence": "HITL-CYCLES-002-001 approved: explicit Sim for max_fix_cycles3 to4",
+      "from": "PAUSED_HITL",
+      "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T05:05:54+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/decisions.json",
+      "from": "VERIFYING",
+      "to": "FIXING"
+    },
+    {
+      "at": "2026-09-05T05:29:54+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/fix-4.json",
+      "from": "FIXING",
+      "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T05:30:55+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/gates-20260905-053042.json",
+      "from": "VERIFYING",
+      "to": "INTERNAL_REVIEW"
+    },
+    {
+      "at": "2026-09-05T05:43:43+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/cycle-limit-hitl-2.json",
+      "from": "INTERNAL_REVIEW",
+      "to": "PAUSED_HITL"
+    },
+    {
+      "approved_by": "Diego Antunes",
+      "at": "2026-09-05T08:13:42+00:00",
+      "evidence": "HITL-CYCLES-002-002 approved: user Sim authorizes max_fix_cycles4 to5",
+      "from": "PAUSED_HITL",
+      "to": "INTERNAL_REVIEW"
+    },
+    {
+      "at": "2026-09-05T08:13:42+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/decisions.json",
+      "from": "INTERNAL_REVIEW",
+      "to": "FIXING"
+    },
+    {
+      "at": "2026-09-05T08:31:43+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/fix-5.json",
+      "from": "FIXING",
+      "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T08:32:50+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/gates-20260905-083237.json",
+      "from": "VERIFYING",
+      "to": "INTERNAL_REVIEW"
+    },
+    {
+      "at": "2026-09-05T08:44:02+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/pr-readiness.json",
+      "from": "INTERNAL_REVIEW",
+      "to": "PR_READY"
+    },
+    {
+      "at": "2026-09-05T08:44:32+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/publication-hitl.json",
+      "from": "PR_READY",
+      "to": "PAUSED_HITL"
+    },
+    {
+      "approved_by": "Diego Antunes",
+      "at": "2026-09-05T09:31:36+00:00",
+      "evidence": "HITL-PUBLISH-002-001 approved: explicit user Sim for branch publication and prepared PR; reviewed SHA77519b2",
+      "from": "PAUSED_HITL",
+      "to": "PR_READY"
+    },
+    {
+      "at": "2026-09-05T09:32:34+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/publication.json",
+      "from": "PR_READY",
+      "to": "PR_OPENED"
+    },
+    {
+      "at": "2026-09-05T09:32:34+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/publication.json",
+      "from": "PR_OPENED",
+      "to": "PR_REVIEW"
+    },
+    {
+      "at": "2026-09-05T09:39:11+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/cycle-limit-hitl-3.json",
+      "from": "PR_REVIEW",
+      "to": "PAUSED_HITL"
+    },
+    {
+      "approved_by": "Diego Antunes",
+      "at": "2026-09-05T09:41:26+00:00",
+      "evidence": "HITL-CYCLES-002-003 approved: user Sim for sixth cycle and same PR2 sync",
+      "from": "PAUSED_HITL",
+      "to": "PR_REVIEW"
+    },
+    {
+      "at": "2026-09-05T09:41:26+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/decisions.json",
+      "from": "PR_REVIEW",
+      "to": "PR_FIXING"
+    },
+    {
+      "at": "2026-09-05T09:48:36+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/fix-6.json",
+      "from": "PR_FIXING",
+      "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T09:49:42+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/gates-20260905-094916.json",
+      "from": "VERIFYING",
+      "to": "INTERNAL_REVIEW"
+    },
+    {
+      "at": "2026-09-05T09:56:51+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/pr-sync-readiness.json",
+      "from": "INTERNAL_REVIEW",
+      "to": "PR_SYNC"
+    }
+  ],
+  "fix_cycles": 6,
+  "phase": "PHASE-002",
+  "pr_opened": true,
+  "run_id": "RUN-20260905-022531",
+  "schema_version": 1,
+  "state": "PR_SYNC",
+  "updated_at": "2026-09-05T09:56:51+00:00"
+}

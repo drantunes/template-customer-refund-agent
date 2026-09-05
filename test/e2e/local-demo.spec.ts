@@ -39,12 +39,15 @@ async function loadDeterministicRuntime() {
     }) as never;
   responseAgent.generate = async (messages) => {
     const noRefund = JSON.stringify(messages).includes("update my address");
+    // The approved first journey intentionally leaves a balance for the
+    // independent rejection journey, while the runtime still rejects any
+    // quote above that balance.
     return {
       object: {
         draftResponse: "A deterministic refund response.",
         citedSources: ["duplicate-charge-policy"],
         recommendRefund: !noRefund,
-        refundAmount: noRefund ? undefined : 49,
+        refundAmount: noRefund ? undefined : 20,
         refundCurrency: noRefund ? undefined : "USD",
         refundReason: noRefund ? undefined : "duplicate charge",
         requiresEscalation: false,

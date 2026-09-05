@@ -1,0 +1,28 @@
+{
+  "stage": "PR_READY",
+  "status": "decision_required",
+  "run_id": "RUN-20260905-022531",
+  "phase": "PHASE-002",
+  "summary": "Local implementation and review complete; publication prepared and waiting mandatory human authorization.",
+  "gates_passed": 20,
+  "gates_total": 20,
+  "findings_resolved": 18,
+  "findings_open": 0,
+  "decisions_required": [
+    "HITL-PUBLISH-002-001"
+  ],
+  "requested_action": "Push reviewed branch ryo/phase-002-local-runtime to origin https://github.com/drantunes/template-customer-refund-agent and open PHASE-002 PR targeting main with title feat: add persistent local provider runtime and body pr-body.md.",
+  "evidence": [
+    "pr-readiness.json",
+    "pr-body.md",
+    "gates-20260905-083237.json",
+    "internal-review-3.json",
+    "security-review-3.json",
+    "findings-gate-after-fix5.json"
+  ],
+  "policy_sources": [
+    "codex/project-instructions.md Human-only decisions: Autorizar credenciais/contas externas, testes em sandbox e qualquer opera\u00e7\u00e3o remota mut\u00e1vel.",
+    "ryo-orchestrate-phase/references/hitl-policy.md: publishing, deployment, or other external side effects not already authorized."
+  ],
+  "next_recommendation": "PAUSED_HITL"
+}

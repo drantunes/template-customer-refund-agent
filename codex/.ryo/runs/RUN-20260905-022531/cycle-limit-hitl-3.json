@@ -1,0 +1,31 @@
+{
+  "stage": "PR_REVIEW",
+  "status": "decision_required",
+  "run_id": "RUN-20260905-022531",
+  "phase": "PHASE-002",
+  "pr_url": "https://github.com/drantunes/template-customer-refund-agent/pull/2",
+  "published_sha": "77519b2bfdd85beccadb5489e73710ee122495c3",
+  "summary": "Publicationauthorized andcompleted; independentpublished-SHA review reopened residualR1-005 asP2. Merge readiness blocked.",
+  "gates_passed": 20,
+  "gates_total": 20,
+  "findings_resolved": 17,
+  "findings_open": 1,
+  "blocking_severity": "P2",
+  "blocking_finding": "R1-005",
+  "failure": "Queued batch item loses lease and terminallyfails while waiting; staleworker still invokes deliver. Localreceipt exists but outboxfailed/receiptnull and casefailure remain. No duplicate financialeffect proven.",
+  "fix_cycles": 5,
+  "max_fix_cycles": 5,
+  "decisions_required": [
+    "HITL-CYCLES-002-003"
+  ],
+  "requested_next_step": "Authorize one additional PHASE-002 correction cycle (max_fix_cycles5 to6) to fix residual R1-005 batch lease ownership, rerun deterministic gates and fresh independent reviews, and synchronize the corrected commits to existing PR2.",
+  "evidence": [
+    "publication.json",
+    "remote-checks.json",
+    "pr-review-1.json",
+    "pr-findings-gate-1.json"
+  ],
+  "policy_source": "ryo-orchestrate-phase/SKILL.md: If the limit is reached with blocking findings, pause for HITL.",
+  "next_recommendation": "PAUSED_HITL; afterapproval resumePR_REVIEW thenPR_FIXING; laterPR_SYNC samePR and newpublishedSHAreview.",
+  "merge": "Not authorized or performed."
+}

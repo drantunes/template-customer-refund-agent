@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import {ingestSupportCaseWorkflow} from '/Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/src/mastra/workflows/ingest-support-case';
+import {resolveSupportCaseWorkflow} from '/Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/src/mastra/workflows/resolve-support-case';
+import {localRuntime,defaultLocalBinding} from '/Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/src/mastra/runtime/local-runtime';
+import {caseStore} from '/Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/src/mastra/lib/case-store';
+const support=localRuntime.support(defaultLocalBinding());let received:any;
+localRuntime.support=(()=>({...support,normalizeInbound:async()=>({binding:defaultLocalBinding('conversation-123'),externalId:'event-456',source:'mock-email',customer:{email:'a@example.com'},subject:'Test',message:{id:'message-456',author:'customer',body:'hi',createdAt:new Date().toISOString()},rawPayload:{}}),deliver:async(...args:any[])=>{received=args[0];return support.deliver(...args);}})) as any;
+const ingress:any=ingestSupportCaseWorkflow;
+const result=await ingress.steps['normalize-inbound-message'].execute({inputData:{payload:{}},mastra:{getWorkflow:()=>({createRun:async()=>({runId:'run-test'})})}});
+assert.equal((await caseStore.get(result.caseId))?.metadata.providerBindings.support.externalConversationId,'conversation-123');
+await caseStore.update(result.caseId,{draft:{draftResponse:'Reply',recommendRefund:false,requiresEscalation:false,citedSources:[]}});
+const resolve:any=resolveSupportCaseWorkflow;
+await resolve.steps['resolve-case'].execute({inputData:{caseId:result.caseId}});
+assert.equal(received.externalConversationId,'conversation-123');
+const rows=await caseStore.getClientForTests().execute('SELECT binding,state FROM support_outbox');assert.equal(JSON.parse(String(rows.rows[0].binding)).externalConversationId,'conversation-123');assert.equal(rows.rows[0].state,'delivered');
+console.log('S1-003 PASS production normalize/persist + resolution/finalize/deliver steps: event-456 distinct from conversation-123 across case, outbox, provider call');

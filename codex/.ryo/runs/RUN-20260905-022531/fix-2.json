@@ -1,0 +1,28 @@
+{
+  "stage": "FIXING",
+  "status": "success",
+  "run_id": "RUN-20260905-022531",
+  "phase": "PHASE-002",
+  "role": { "model": "gpt-5.6-terra", "effort": "high" },
+  "gate_evidence": "codex/.ryo/runs/RUN-20260905-022531/gates-20260905-033321.json",
+  "summary": "Applied Prettier only to the mandatory-gate-reported characterization test; no behavior, configuration, dependency, model, or gate-state changes were made.",
+  "changes": [
+    "Formatted test/integration/resolve-support-case.characterization.test.ts with the repository's installed Prettier."
+  ],
+  "verification": [
+    {
+      "command": "PATH=/private/tmp/ryo-phase001-runtime/bin:$PATH ./node_modules/.bin/prettier --write test/integration/resolve-support-case.characterization.test.ts",
+      "result": "passed"
+    },
+    {
+      "command": "PATH=/private/tmp/ryo-phase001-runtime/bin:$PATH MASTRA_TELEMETRY_DISABLED=1 npm run format:check",
+      "result": "passed"
+    },
+    {
+      "command": "PATH=/private/tmp/ryo-phase001-runtime/bin:$PATH MASTRA_TELEMETRY_DISABLED=1 npm run lint",
+      "result": "passed"
+    }
+  ],
+  "decisions_required": [],
+  "next_recommendation": "Re-run mandatory gates and independent review."
+}
