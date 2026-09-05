@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { readFile, readdir } from "node:fs/promises";
 
 const files = (await readdir(new URL("../evals/datasets/", import.meta.url)))
@@ -18,7 +19,9 @@ const datasetHashes = Object.fromEntries(
     createHash("sha256").update(bytes).digest("hex"),
   ]),
 );
-const implementationSha = process.env.GIT_SHA ?? "working-tree";
+const implementationSha = execFileSync("git", ["rev-parse", "HEAD"], {
+  encoding: "utf8",
+}).trim();
 const report = {
   kind: "support-eval-candidate",
   runner: "deterministic-native-targets-v1",

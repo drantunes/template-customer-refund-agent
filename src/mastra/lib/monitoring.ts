@@ -50,6 +50,59 @@ export interface MonitoringSummary {
   funnel: CaseFunnelMetrics;
   refunds: RefundApprovalMetrics;
   feedback: FeedbackMetrics;
+  telemetry: {
+    observedTraces: number;
+    observedSpans: number;
+    providerOrToolErrorRate: number | null;
+    providerOrToolP95Ms: number | null;
+  };
+}
+
+async function readTrustedSpanMetrics(mastra: Mastra, cases: SupportCase[]) {
+  const observability = await mastra.getStorage()?.getStore("observability");
+  if (!observability)
+    return {
+      observedTraces: 0,
+      observedSpans: 0,
+      providerOrToolErrorRate: null,
+      providerOrToolP95Ms: null,
+    };
+  const traces = await Promise.all(
+    cases
+      .filter((supportCase) => !!supportCase.traceId)
+      .map(async (supportCase) =>
+        observability.getTrace({ traceId: supportCase.traceId! }),
+      ),
+  );
+  const spans = traces
+    .flatMap((trace) => trace?.spans ?? [])
+    .filter((span) =>
+      ["tool_call", "provider_tool_call", "model_inference"].includes(
+        span.spanType,
+      ),
+    );
+  if (spans.length === 0)
+    return {
+      observedTraces: traces.filter(Boolean).length,
+      observedSpans: 0,
+      providerOrToolErrorRate: null,
+      providerOrToolP95Ms: null,
+    };
+  const durations = spans
+    .map((span) =>
+      span.endedAt ? span.endedAt.getTime() - span.startedAt.getTime() : NaN,
+    )
+    .filter((duration) => Number.isFinite(duration))
+    .sort((a, b) => a - b);
+  return {
+    observedTraces: traces.filter(Boolean).length,
+    observedSpans: spans.length,
+    providerOrToolErrorRate:
+      spans.filter((span) => !!span.error).length / spans.length,
+    providerOrToolP95Ms: durations.length
+      ? durations[Math.ceil(durations.length * 0.95) - 1]!
+      : null,
+  };
 }
 
 export function computeCaseFunnelMetrics(
@@ -166,5 +219,6 @@ export async function computeMonitoringSummary(
     funnel: computeCaseFunnelMetrics(cases),
     refunds: computeRefundApprovalMetrics(cases),
     feedback: computeFeedbackMetrics(cases),
+    telemetry: await readTrustedSpanMetrics(_mastra, cases),
   };
 }

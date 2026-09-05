@@ -91,6 +91,12 @@ export const monitoringSummarySchema = z.object({
       }),
     ),
   }),
+  telemetry: z.object({
+    observedTraces: z.number().int().nonnegative(),
+    observedSpans: z.number().int().nonnegative(),
+    providerOrToolErrorRate: z.number().nullable(),
+    providerOrToolP95Ms: z.number().nullable(),
+  }),
 });
 
 const caseIdParameter = {
