@@ -24,6 +24,12 @@ const approverHeaders = {
 const customerHeaders = {
   authorization: `Bearer ${issueLocalSession({ id: "customer-alex" })}`,
 };
+const jordanHeaders = {
+  authorization: `Bearer ${issueLocalSession({ id: "customer-jordan" })}`,
+};
+const otherTenantHeaders = {
+  authorization: `Bearer ${issueLocalSession({ id: "other-tenant-agent" })}`,
+};
 
 async function bindApprovalFixture(store: typeof caseStore, caseId: string) {
   const fingerprint = `fingerprint-${caseId}`;
@@ -105,6 +111,8 @@ async function loadDeterministicRuntime() {
     await import("../../src/mastra/lib/sqlite-client");
   const { issueRefundTool } =
     await import("../../src/mastra/tools/issue-refund");
+  const { lookupOrderTool } =
+    await import("../../src/mastra/tools/lookup-order");
   const { responseAgent } =
     await import("../../src/mastra/agents/response-agent");
   const { searchSupportKnowledgeTool } =
@@ -190,6 +198,7 @@ async function loadDeterministicRuntime() {
 
   const app = supportApp(mastra);
   app.post("/support/inbound", routes.supportInboundRoute.handler);
+  app.get("/support/cases/:caseId", routes.supportCaseDetailRoute.handler);
   app.post(
     "/support/cases/:caseId/approve",
     routes.supportCaseApproveRoute.handler,
@@ -199,6 +208,7 @@ async function loadDeterministicRuntime() {
     mastra,
     caseStore: (await import("../../src/mastra/lib/case-store")).caseStore,
     issueRefundTool,
+    lookupOrderTool,
     responseAgent,
     searchSupportKnowledgeTool,
     triageAgent,
@@ -308,6 +318,116 @@ describe("support approval HTTP boundary", () => {
 });
 
 describe("support workflow HTTP context propagation", () => {
+  it("rejects cross-tenant and cross-owner inbound conversation mutation before dispatch", async () => {
+    const { app, caseStore: runtimeCaseStore } =
+      await loadDeterministicRuntime();
+    const conversationId = `owner-scope-${crypto.randomUUID()}`;
+    const alex = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `owner-scope-alex-${crypto.randomUUID()}`,
+        conversationId,
+        from: "alex@example.com",
+        subject: "Alex request",
+        body: "Please help with my duplicate charge.",
+      }),
+    });
+    expect(alex.status).toBe(200);
+    const alexBody = inboundSupportResponseSchema.parse(await alex.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(alexBody.caseId))?.status).toBe(
+        "waiting_approval",
+      ),
+    );
+
+    const crossOwner = await app.request(
+      "http://support.test/support/inbound",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...jordanHeaders },
+        body: JSON.stringify({
+          externalId: `owner-scope-jordan-${crypto.randomUUID()}`,
+          conversationId,
+          from: "jordan@example.com",
+          subject: "Jordan request",
+          body: "Append this to Alex's conversation.",
+        }),
+      },
+    );
+    expect(crossOwner.status).toBe(403);
+
+    const crossTenant = await app.request(
+      "http://support.test/support/inbound",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...otherTenantHeaders,
+        },
+        body: JSON.stringify({
+          externalId: `tenant-scope-${crypto.randomUUID()}`,
+          from: "alex@example.com",
+          subject: "Wrong tenant",
+          body: "This must not allocate a run.",
+        }),
+      },
+    );
+    expect(crossTenant.status).toBe(403);
+  });
+
+  it("uses verified workflow scope for commerce reads and omits staff-only fields from the customer case DTO", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      lookupOrderTool,
+    } = await loadDeterministicRuntime();
+    await expect(
+      lookupOrderTool.execute({ customerEmail: "alex@example.com" }),
+    ).rejects.toThrow("verified workflow turn scope");
+
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `customer-dto-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "DTO projection",
+        body: "Please help with a duplicate charge.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe(
+        "waiting_approval",
+      ),
+    );
+    const current = await runtimeCaseStore.get(caseId);
+    const { withTrustedCommerceScope } =
+      await import("../../src/mastra/lib/trusted-run-scope");
+    await expect(
+      withTrustedCommerceScope(
+        { caseId, ownerId: "customer-alex", tenantId: "local-demo" },
+        () => lookupOrderTool.execute({ orderId: "ORD-1002" }),
+      ),
+    ).resolves.toEqual({ found: false });
+    await runtimeCaseStore.update(caseId, {
+      escalationReason: "Internal staff-only reason",
+      metadata: {
+        ...current!.metadata,
+        rawPayload: { secret: "must not leak" },
+      },
+    });
+    const detail = await app.request(
+      `http://support.test/support/cases/${caseId}`,
+      { headers: customerHeaders },
+    );
+    expect(detail.status).toBe(200);
+    const dto = (await detail.json()) as Record<string, unknown>;
+    expect(dto).not.toHaveProperty("escalationReason");
+    expect(dto.metadata).toEqual({});
+  });
+
   it("renews the persisted approval dispatch lease while a real API resume is slow", async () => {
     const {
       app,
@@ -336,6 +456,7 @@ describe("support workflow HTTP context propagation", () => {
         createdAt,
         updatedAt: createdAt,
         metadata: {
+          ownerId: "customer-alex",
           providerBinding: {
             tenantId: "local-demo",
             providerKind: "local",
@@ -546,6 +667,7 @@ describe("support workflow HTTP context propagation", () => {
             providerAccountId: "local-demo",
             externalConversationId: `conversation-${id}`,
           },
+          ownerId: "customer-alex",
         },
       },
       `event-${id}`,

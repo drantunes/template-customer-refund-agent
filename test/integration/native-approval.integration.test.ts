@@ -113,6 +113,7 @@ describe("native issue_refund approval", () => {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       metadata: {
+        ownerId: "customer-alex",
         providerBinding: binding,
         refundCommand: {
           approvalCaseId: "native-case",
@@ -169,11 +170,41 @@ describe("native issue_refund approval", () => {
       nativeToolCallId: call.toolCallId,
       turnId: "legacy:native-case",
     });
-    const approved = await agent.approveToolCallGenerate({
-      runId: suspended.runId,
-      toolCallId: call.toolCallId,
-      model: model as never,
+    await caseStore.update("native-case", {
+      workflowRunId: "native-workflow-run",
     });
+    const dispatch = await caseStore.claimDispatchForResume(
+      "native-case",
+      "native-workflow-run",
+      "legacy:native-case",
+    );
+    const { withDispatchLeaseScope } =
+      await import("../../src/mastra/lib/dispatch-lease-scope");
+    const { resumeApprovedNativeTool } =
+      await import("../../src/mastra/providers/native-execution");
+    const approved = await withDispatchLeaseScope(
+      {
+        dispatchId: dispatch!.id,
+        caseId: "native-case",
+        turnId: "legacy:native-case",
+        leaseToken: dispatch!.leaseToken!,
+      },
+      () =>
+        resumeApprovedNativeTool({
+          mastra,
+          approved: true,
+          scope: {
+            caseId: "native-case",
+            turnId: "legacy:native-case",
+            nativeRunId: suspended.runId!,
+            nativeToolCallId: call.toolCallId!,
+            commandFingerprint: fingerprint,
+            dispatchId: dispatch!.id,
+            leaseToken: dispatch!.leaseToken!,
+          },
+          model: model as never,
+        }),
+    );
     expect(approved.finishReason).toBe("stop");
     expect((await caseStore.get("native-case"))?.refundResult).toMatchObject({
       status: "executed",
@@ -230,6 +261,7 @@ describe("native issue_refund approval", () => {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       metadata: {
+        ownerId: "customer-alex",
         providerBinding: binding,
         refundCommand: {
           approvalCaseId: caseId,

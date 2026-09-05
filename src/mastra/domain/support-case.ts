@@ -185,6 +185,8 @@ export type SupportCase = z.infer<typeof supportCaseSchema>;
 export function threadIdForCase(caseId: string, tenantId: string): string {
   return `tenant_${tenantId}_conversation_${caseId}`;
 }
-export function resourceIdForCase(caseId: string, tenantId: string): string {
-  return `tenant_${tenantId}_case_${caseId}`;
+/** Memory is scoped to the authenticated owner, never to a model-provided
+ * case identifier. Conversations remain separate threads under this resource. */
+export function resourceIdForOwner(ownerId: string, tenantId: string): string {
+  return `tenant_${tenantId}_owner_${ownerId}`;
 }

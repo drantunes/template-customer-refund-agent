@@ -183,20 +183,79 @@ export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipa
   async authenticateToken(token: string) {
     return verifyLocalSession(token) ?? null;
   }
+  async signIn(email: string, password: string, _request: Request) {
+    const token = authenticateSeededCredentials(email, password);
+    const user = token ? verifyLocalSession(token) : undefined;
+    if (!token || !user) throw new Error("Invalid local credentials.");
+    return { user, token };
+  }
+  async getCurrentUser(request: Request) {
+    return principalFromHeaders(request.headers) ?? null;
+  }
+  isSignUpEnabled() {
+    return false;
+  }
   async authorizeUser(user: SupportPrincipal, request: unknown) {
     const expires = Date.parse(user.expiresAt);
     if (!Number.isFinite(expires) || expires <= Date.now()) return false;
+    const rawRequest =
+      typeof request === "object" && request !== null && "raw" in request
+        ? request.raw
+        : request;
     const requestUrl =
-      typeof request === "object" && request !== null && "url" in request
-        ? String(request.url)
+      typeof rawRequest === "object" &&
+      rawRequest !== null &&
+      "url" in rawRequest
+        ? String(rawRequest.url)
         : "/";
     const path = new URL(requestUrl, "http://local").pathname;
-    // Custom support routes enforce their own tenant/owner checks. Built-in
-    // surfaces lack the tenant-qualified resource model required here, so no
-    // identity may use agents, tools, workflow runs, approvals, snapshots,
-    // memory, storage or traces directly. Studio is deliberately metadata-only
-    // for this phase; operational actions stay behind scoped support routes.
+    // Custom support routes enforce their own tenant/owner checks. Studio has
+    // one explicit local, staff-only metadata scope. Every data-bearing or
+    // executable built-in route remains denied because it has no tenant-safe
+    // generic scoping contract in this phase.
     if (path.startsWith("/support/")) return true;
+    const method =
+      typeof rawRequest === "object" &&
+      rawRequest !== null &&
+      "method" in rawRequest
+        ? String(rawRequest.method).toUpperCase()
+        : "GET";
+    const studioRegistryIds = {
+      agents: new Set([
+        "triage-agent",
+        "response-agent",
+        "support-supervisor",
+        "refund-execution-agent",
+      ]),
+      tools: new Set([
+        "search_support_knowledge",
+        "lookup_order",
+        "lookup_subscription",
+        "lookup_customer_refund_history",
+        "issue_refund",
+      ]),
+      workflows: new Set([
+        "ingest-support-case",
+        "resolve-support-case",
+        "index-support-knowledge",
+      ]),
+    };
+    const metadataRoute = path.match(
+      /^(?:\/api)?\/(agents|tools|workflows)(?:\/([^/]+))?$/,
+    );
+    const isRegistryMetadata =
+      metadataRoute !== null &&
+      (metadataRoute[2] === undefined ||
+        studioRegistryIds[
+          metadataRoute[1] as keyof typeof studioRegistryIds
+        ].has(metadataRoute[2]));
+    if (
+      method === "GET" &&
+      user.tenantId === "local-demo" &&
+      user.roles.some((role) => role === "support-agent" || role === "admin") &&
+      isRegistryMetadata
+    )
+      return true;
     return false;
   }
   mapUserToResourceId(user: SupportPrincipal) {

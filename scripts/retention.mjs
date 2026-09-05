@@ -60,7 +60,16 @@ async function sweepCases(client, policy, current = new Date()) {
     tracesRedacted: 0,
     auditsDeleted: 0,
     messagesDeleted: 0,
+    turnsRedacted: 0,
+    outboxRecordsRedacted: 0,
+    dispatchesExpired: 0,
+    decisionsRedacted: 0,
+    actionsRedacted: 0,
+    auditPayloadsRedacted: 0,
+    financialReasonsRedacted: 0,
     pendingCasesExpired: 0,
+    rawWorkflowSnapshotBefore: rawCutoff,
+    expiredCaseIds: [],
     expiredWorkflowRunIds: [],
   };
   const rows = await client.execute({
@@ -71,6 +80,8 @@ async function sweepCases(client, policy, current = new Date()) {
     const data = JSON.parse(String(row.data));
     const createdAt = String(row.created_at);
     const metadata = { ...(data.metadata ?? {}) };
+    if (metadata.retentionRedactedAt !== undefined)
+      result.expiredCaseIds.push(String(row.id));
     let updated = { ...data, metadata };
     let changed = false;
     let redactedCase = false;
@@ -134,9 +145,12 @@ async function sweepCases(client, policy, current = new Date()) {
         },
       };
       result.casesRedacted += 1;
+      result.expiredCaseIds.push(String(row.id));
       if (wasPending) result.pendingCasesExpired += 1;
       if (data.workflowRunId)
         result.expiredWorkflowRunIds.push(data.workflowRunId);
+      if (typeof metadata.nativeApproval?.runId === "string")
+        result.expiredWorkflowRunIds.push(metadata.nativeApproval.runId);
       if (await tableExists(client, "support_dispatch")) {
         const dispatches = await client.execute({
           sql: "SELECT run_id FROM support_dispatch WHERE case_id = ?",
@@ -145,6 +159,18 @@ async function sweepCases(client, policy, current = new Date()) {
         for (const dispatch of dispatches.rows)
           result.expiredWorkflowRunIds.push(String(dispatch.run_id));
       }
+      const nativeRuns = await client.execute({
+        sql: "SELECT native_run_id FROM support_decisions WHERE case_id = ? AND native_run_id IS NOT NULL",
+        args: [String(row.id)],
+      });
+      for (const native of nativeRuns.rows)
+        result.expiredWorkflowRunIds.push(String(native.native_run_id));
+      const turnRuns = await client.execute({
+        sql: "SELECT run_id FROM support_turns WHERE case_id = ? AND run_id IS NOT NULL",
+        args: [String(row.id)],
+      });
+      for (const turn of turnRuns.rows)
+        result.expiredWorkflowRunIds.push(String(turn.run_id));
       changed = true;
       redactedCase = true;
     }
@@ -171,6 +197,31 @@ async function sweepCases(client, policy, current = new Date()) {
           args: [String(row.id)],
         });
         result.messagesDeleted += Number(deleted.rowsAffected ?? 0);
+        const turns = await transaction.execute({
+          sql: "UPDATE support_turns SET message_data = NULL, outcome_data = NULL, updated_at = ? WHERE case_id = ? AND (message_data IS NOT NULL OR outcome_data IS NOT NULL)",
+          args: [current.toISOString(), String(row.id)],
+        });
+        result.turnsRedacted += Number(turns.rowsAffected ?? 0);
+        const dispatches = await transaction.execute({
+          sql: "UPDATE support_dispatch SET state = CASE WHEN state IN ('pending', 'claimed', 'started', 'suspended') THEN 'failed' ELSE state END, lease_until = NULL, lease_token = NULL, last_error = NULL, updated_at = ? WHERE case_id = ?",
+          args: [current.toISOString(), String(row.id)],
+        });
+        result.dispatchesExpired += Number(dispatches.rowsAffected ?? 0);
+        const outbox = await transaction.execute({
+          sql: "UPDATE support_outbox SET body = '[redacted]', receipt = NULL, last_error = NULL, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE case_id = ? AND (body <> '[redacted]' OR receipt IS NOT NULL OR last_error IS NOT NULL)",
+          args: [current.toISOString(), String(row.id)],
+        });
+        result.outboxRecordsRedacted += Number(outbox.rowsAffected ?? 0);
+        const decisions = await transaction.execute({
+          sql: "UPDATE support_decisions SET note = NULL WHERE case_id = ? AND note IS NOT NULL",
+          args: [String(row.id)],
+        });
+        result.decisionsRedacted += Number(decisions.rowsAffected ?? 0);
+        const actions = await transaction.execute({
+          sql: "UPDATE support_actions SET data = '{}' WHERE case_id = ? AND data <> '{}'",
+          args: [String(row.id)],
+        });
+        result.actionsRedacted += Number(actions.rowsAffected ?? 0);
       }
       await transaction.commit();
     } catch (error) {
@@ -185,6 +236,15 @@ async function sweepCases(client, policy, current = new Date()) {
     args: [auditCutoff],
   });
   result.auditsDeleted = Number(audits.rowsAffected ?? 0);
+  if (await tableExists(client, "local_refunds")) {
+    const reasons = await client.execute({
+      sql: "UPDATE local_refunds SET reason = '[redacted]' WHERE issued_at < ? AND reason <> '[redacted]'",
+      args: [caseCutoff],
+    });
+    result.financialReasonsRedacted = Number(reasons.rowsAffected ?? 0);
+  }
+  result.expiredCaseIds = [...new Set(result.expiredCaseIds)];
+  result.expiredWorkflowRunIds = [...new Set(result.expiredWorkflowRunIds)];
   return result;
 }
 
@@ -198,7 +258,16 @@ const policy = policyFromEnvironment();
 const client = createClient({ url, timeout: 0 });
 
 try {
-  for (const table of ["support_cases", "support_messages", "support_audit"])
+  for (const table of [
+    "support_cases",
+    "support_messages",
+    "support_turns",
+    "support_dispatch",
+    "support_outbox",
+    "support_decisions",
+    "support_actions",
+    "support_audit",
+  ])
     if (!(await tableExists(client, table)))
       throw new Error(
         `Refusing retention cleanup: ${table} is missing. Start the local app once so its supported migrations finish first.`,
@@ -223,13 +292,60 @@ try {
   });
   await storage.init();
   const workflows = await storage.getStore("workflows");
-  for (const runId of new Set(cases.expiredWorkflowRunIds))
+  const expiredRuns = new Set(cases.expiredWorkflowRunIds);
+  const expiredCaseIds = new Set(cases.expiredCaseIds);
+  const inboundNames = new Set([
+    "ingest-support-case",
+    "ingestSupportCaseWorkflow",
+  ]);
+  const recoverableNames = new Set([
+    "resolve-support-case",
+    "resolveSupportCaseWorkflow",
+    "agentic-loop",
+    "durable-agentic-loop",
+    "executionWorkflow",
+  ]);
+  const snapshotsDeleted = [];
+  const workflowRuns = await workflows?.listWorkflowRuns({ perPage: false });
+  const snapshotContainsExpiredCase = (snapshot) => {
+    const visit = (value) => {
+      if (!value || typeof value !== "object") return false;
+      if (Array.isArray(value)) return value.some(visit);
+      for (const [key, nested] of Object.entries(value)) {
+        if (key === "caseId" && expiredCaseIds.has(String(nested))) return true;
+        if (visit(nested)) return true;
+      }
+      return false;
+    };
+    try {
+      return visit(
+        typeof snapshot === "string" ? JSON.parse(snapshot) : snapshot,
+      );
+    } catch {
+      return false;
+    }
+  };
+  for (const run of workflowRuns?.runs ?? []) {
+    if (
+      !(
+        inboundNames.has(run.workflowName) &&
+        run.createdAt.toISOString() < cases.rawWorkflowSnapshotBefore
+      ) &&
+      !(
+        recoverableNames.has(run.workflowName) &&
+        (expiredRuns.has(run.runId) ||
+          snapshotContainsExpiredCase(run.snapshot))
+      )
+    )
+      continue;
     await workflows?.deleteWorkflowRunById({
-      workflowName: "resolveSupportCaseWorkflow",
-      runId,
+      workflowName: run.workflowName,
+      runId: run.runId,
     });
+    snapshotsDeleted.push(`${run.workflowName}:${run.runId}`);
+  }
   const mastra = await storage.prune({ maxBatches: 10, maxRows: 5_000 });
-  console.log(JSON.stringify({ policy, cases, mastra }));
+  console.log(JSON.stringify({ policy, cases, snapshotsDeleted, mastra }));
 } finally {
   client.close();
 }

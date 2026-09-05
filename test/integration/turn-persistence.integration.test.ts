@@ -3,6 +3,7 @@ import { rm } from "node:fs/promises";
 import { CaseStore } from "../../src/mastra/lib/case-store";
 import { defaultLocalBinding } from "../../src/mastra/runtime/local-runtime";
 import type { SupportCase } from "../../src/mastra/domain/support-case";
+import { withDispatchLeaseScope } from "../../src/mastra/lib/dispatch-lease-scope";
 
 const files: string[] = [];
 const stores: CaseStore[] = [];
@@ -199,5 +200,160 @@ describe("per-turn conversation persistence", () => {
     expect(
       (await store.approvalDecision("case-turns", secondTurn.id))?.approved,
     ).toBe(true);
+  });
+
+  it("preserves a terminal turn outcome while a follow-up becomes the only active projection", async () => {
+    const { store } = await createConversation();
+    const [firstTurn] = await store.turns("case-turns");
+    await store.update("case-turns", {
+      status: "escalated",
+      draft: { draftResponse: "Staff must investigate.", citedSources: [] },
+      escalationReason: "Policy requires staff review.",
+      finalResponse: "We escalated your case.",
+      metadata: {
+        ...(await store.get("case-turns"))!.metadata,
+        activeTurnId: firstTurn.id,
+        refundCommand: { fingerprint: "terminal-command" },
+      },
+    });
+    const followUp = await store.appendFollowUp({
+      caseId: "case-turns",
+      eventId: "event-after-escalation",
+      runId: "run-after-escalation",
+      message: {
+        id: "message-after-escalation",
+        author: "customer",
+        body: "I have another question about this order.",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    expect(followUp.appended).toBe(true);
+    const turns = await store.turns("case-turns");
+    expect(turns[0]).toMatchObject({
+      message: { body: "I need a refund" },
+      outcome: {
+        status: "escalated",
+        escalationReason: "Policy requires staff review.",
+      },
+    });
+    expect(turns[1]).toMatchObject({
+      message: { body: "I have another question about this order." },
+      state: "pending",
+    });
+    const reopened = await store.get("case-turns");
+    expect(reopened?.status).toBe("new");
+    expect(reopened?.finalResponse).toBeUndefined();
+    expect(reopened?.escalationReason).toBeUndefined();
+    const metadata = reopened
+      ? (reopened.metadata as Record<string, unknown>)
+      : {};
+    expect(metadata.refundCommand).toBeUndefined();
+  });
+
+  it("allows exactly one worker to atomically claim and activate a queued turn", async () => {
+    const { store, path } = await createConversation();
+    const competing = new CaseStore({ url: `file:${path}` });
+    stores.push(competing);
+    const [left, right] = await Promise.all([
+      store.claimDispatch(),
+      competing.claimDispatch(),
+    ]);
+    const claims = [...left, ...right];
+    expect(claims).toHaveLength(1);
+    expect(await store.activateDispatch(claims[0]!)).toBe(true);
+    expect(await competing.activateDispatch(claims[0]!)).toBe(false);
+    expect(
+      await competing.completeDispatch(
+        claims[0]!.id,
+        "completed",
+        undefined,
+        "stale-worker-fence",
+      ),
+    ).toBe(false);
+    const active = await store.get("case-turns");
+    expect(active).toMatchObject({
+      status: "processing",
+      metadata: { activeTurnId: claims[0]!.turnId },
+    });
+    expect((await store.turn("case-turns", claims[0]!.turnId))?.state).toBe(
+      "processing",
+    );
+  });
+
+  it("does not let a follow-up queued during processing inherit the completed turn projection", async () => {
+    const { store } = await createConversation();
+    const [first] = await store.claimDispatch();
+    expect(await store.activateDispatch(first!)).toBe(true);
+    await store.update("case-turns", {
+      triage: {
+        intent: "duplicate_charge",
+        urgency: "normal",
+        sentiment: "negative",
+        requiresHumanReview: true,
+        confidence: 1,
+        rationale: "First immutable turn.",
+      },
+      draft: { draftResponse: "First result", citedSources: [] },
+    });
+    const queued = await store.appendFollowUp({
+      caseId: "case-turns",
+      eventId: "event-queued-while-processing",
+      runId: "run-queued-while-processing",
+      message: {
+        id: "message-queued-while-processing",
+        author: "customer",
+        body: "This is a distinct second request.",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    await store.update("case-turns", {
+      status: "resolved",
+      finalResponse: "First result is complete.",
+    });
+    expect(
+      await store.completeDispatch(
+        first!.id,
+        "completed",
+        undefined,
+        first!.leaseToken,
+      ),
+    ).toBe(true);
+    const [second] = await store.claimDispatch();
+    expect(second?.turnId).toBe(queued.turnId);
+    expect(await store.activateDispatch(second!)).toBe(true);
+    const active = await store.get("case-turns");
+    expect(active).toMatchObject({
+      status: "processing",
+      metadata: { activeTurnId: queued.turnId },
+    });
+    expect(active?.triage).toBeUndefined();
+    expect(active?.draft).toBeUndefined();
+    expect(active?.finalResponse).toBeUndefined();
+    expect((await store.turns("case-turns"))[0]?.outcome).toMatchObject({
+      status: "resolved",
+      finalResponse: "First result is complete.",
+    });
+  });
+
+  it("rejects a stale worker projection after its durable lease token is replaced", async () => {
+    const { store } = await createConversation();
+    const [claim] = await store.claimDispatch();
+    expect(await store.activateDispatch(claim!)).toBe(true);
+    await store.getClientForTests().execute({
+      sql: "UPDATE support_dispatch SET lease_token = ? WHERE id = ?",
+      args: ["new-worker-token", claim!.id],
+    });
+    await expect(
+      withDispatchLeaseScope(
+        {
+          dispatchId: claim!.id,
+          caseId: claim!.caseId,
+          turnId: claim!.turnId,
+          leaseToken: claim!.leaseToken!,
+        },
+        () => store.update("case-turns", { status: "failed" }),
+      ),
+    ).rejects.toThrow("Dispatch lease is no longer current");
+    expect((await store.get("case-turns"))?.status).toBe("processing");
   });
 });

@@ -1,6 +1,7 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { caseStore } from "../lib/case-store";
+import { activeDispatchLeaseScope } from "../lib/dispatch-lease-scope";
 import {
   legacyAmountToMoney,
   moneyToLegacyAmount,
@@ -58,6 +59,15 @@ export const issueRefundTool = createTool({
     if (!supportCase?.approval?.approved)
       throw new Error(
         "A persisted approved local decision is required before issuing a refund.",
+      );
+    const lease = activeDispatchLeaseScope();
+    if (
+      !lease ||
+      lease.caseId !== input.caseId ||
+      !(await caseStore.hasDispatchLease(lease))
+    )
+      throw new Error(
+        "Refund execution requires the current durable workflow dispatch lease.",
       );
     const decision = await caseStore.approvalDecision(
       input.caseId,

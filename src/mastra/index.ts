@@ -1,6 +1,5 @@
 import { Mastra } from "@mastra/core/mastra";
 import { LibSQLStore } from "@mastra/libsql";
-import { PinoLogger } from "@mastra/loggers";
 import {
   MastraPlatformExporter,
   MastraStorageExporter,
@@ -32,6 +31,10 @@ import { startLocalRuntimeWorkers } from "./runtime/local-runtime";
 import { setMastraStorageReady } from "./runtime/storage-lifecycle";
 import { LocalSupportAuthProvider } from "./server/auth";
 import { retentionPolicyFromEnvironment } from "./lib/case-store";
+import {
+  ApplicationSpanRedactor,
+  RedactingPinoLogger,
+} from "./lib/observability-redaction";
 
 const retentionPolicy = retentionPolicyFromEnvironment();
 
@@ -85,13 +88,19 @@ export const mastra = new Mastra({
     // approval, memory and storage routes as well as our custom API routes.
     auth: new LocalSupportAuthProvider(),
   },
-  logger: new PinoLogger({ name: "support-refund-agent", level: "info" }),
+  logger: new RedactingPinoLogger({
+    name: "support-refund-agent",
+    level: "info",
+  }),
   observability: new Observability({
     configs: {
       default: {
         serviceName: "support-refund-agent",
         exporters: [new MastraStorageExporter(), new MastraPlatformExporter()],
-        spanOutputProcessors: [new SensitiveDataFilter()],
+        spanOutputProcessors: [
+          new ApplicationSpanRedactor(),
+          new SensitiveDataFilter(),
+        ],
       },
     },
   }),

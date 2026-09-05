@@ -159,7 +159,7 @@ afterEach(async () => {
 });
 
 describe("Phase 002 persistent local runtime", () => {
-  it("migrates legacy data down and up without touching unrelated tables, then rejects stale writes", async () => {
+  it("preserves unrelated tables while refusing an unsupported durable-schema downgrade and rejecting stale writes", async () => {
     const { store } = await runtime();
     await store
       .getClientForTests()
@@ -168,8 +168,9 @@ describe("Phase 002 persistent local runtime", () => {
       .getClientForTests()
       .execute("INSERT INTO mastra_owned_probe VALUES ('keep')");
     await store.create(supportCase("legacy"));
-    await store.migrate(1);
-    await store.migrate(2);
+    await expect(store.migrate(1)).rejects.toThrow(
+      "Refusing unsupported downgrade from support schema v8 to v1.",
+    );
     expect((await store.get("legacy"))?.externalId).toBe("legacy");
     expect(
       (
@@ -248,21 +249,20 @@ describe("Phase 002 persistent local runtime", () => {
     await store.close();
   });
 
-  it("rolls a failed case-identity migration back without recording a completed version", async () => {
+  it("refuses a pre-v6 target before touching the current durable migration marker", async () => {
     const { store } = await runtime();
     await store.create(supportCase("bad-migration"));
-    await store.migrate(3);
-    await store.getClientForTests().execute({
-      sql: "UPDATE support_cases SET provider_binding = 'not-json' WHERE id = ?",
-      args: ["bad-migration"],
-    });
-    await expect(store.migrate(4)).rejects.toThrow();
+    await expect(store.migrate(3)).rejects.toThrow(
+      "Refusing unsupported downgrade from support schema v8 to v3.",
+    );
     const versions = await store
       .getClientForTests()
       .execute(
         "SELECT version FROM support_schema_migrations ORDER BY version",
       );
-    expect(versions.rows.map((row) => Number(row.version))).toEqual([1, 2, 3]);
+    expect(versions.rows.map((row) => Number(row.version))).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8,
+    ]);
     expect(
       await store
         .getClientForTests()
@@ -689,7 +689,9 @@ describe("Phase 002 persistent local runtime", () => {
       10,
       store,
     );
-    expect(start).toHaveBeenCalledWith({ inputData: { caseId: pending.id } });
+    expect(start).toHaveBeenCalledWith({
+      inputData: { caseId: pending.id, turnId: expect.any(String) },
+    });
     expect(restart).not.toHaveBeenCalled();
     expect((await store.get(pending.id))?.workflowRunId).toBe(
       `run-${pending.id}`,

@@ -101,7 +101,11 @@ async function loadCharacterizationRuntime(draft: {
   if (!turn) throw new Error("Expected an immutable inbound turn.");
   await caseStore.update(supportCase.id, {
     workflowRunId: runId,
-    metadata: { ...supportCase.metadata, activeTurnId: turn.id },
+    metadata: {
+      ...supportCase.metadata,
+      ownerId: "customer-alex",
+      activeTurnId: turn.id,
+    },
   });
   const executionModel = async () => {
     const action = await caseStore.getClientForTests().execute({
@@ -136,6 +140,7 @@ async function loadCharacterizationRuntime(draft: {
     caseStore,
     supportCase,
     issueRefundTool,
+    responseAgent,
   };
 }
 
@@ -221,6 +226,7 @@ describe("resolve support case WIP characterization", () => {
           ...message,
           id: `message_${crypto.randomUUID()}`,
         })),
+        metadata: { ...supportCase.metadata, ownerId: "customer-alex" },
       },
       `event_${crypto.randomUUID()}`,
       runId,
@@ -275,6 +281,148 @@ describe("resolve support case WIP characterization", () => {
     expect(await caseStore.get(supportCase.id)).toMatchObject({
       status: "escalated",
       approval: { approved: false, approverId: "approver-demo" },
+    });
+  });
+
+  it("suspends a distinct second refund command after the first command is rejected", async () => {
+    const runtime = await loadCharacterizationRuntime({
+      recommendRefund: true,
+      requiresEscalation: false,
+      refundAmount: 49,
+    });
+    const { caseStore, supportCase } = runtime;
+    const firstSuspended = await startQueuedWorkflow(runtime);
+    const firstNative = (firstSuspended.metadata as Record<string, unknown>)
+      .nativeApproval as { turnId: string; fingerprint: string };
+    await decideNativeApproval(runtime, false);
+    expect((await caseStore.get(supportCase.id))?.status).toBe("escalated");
+    const followUp = await caseStore.appendFollowUp({
+      caseId: supportCase.id,
+      eventId: `second-refund-command-${crypto.randomUUID()}`,
+      runId: `second-refund-run-${crypto.randomUUID()}`,
+      message: {
+        id: `second-refund-message-${crypto.randomUUID()}`,
+        author: "customer",
+        body: "Please review a distinct second refund request.",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    const { recoverLocalWorkflows } =
+      await import("../../src/mastra/runtime/local-runtime");
+    expect(await recoverLocalWorkflows(runtime.mastra, 1, caseStore)).toBe(1);
+    const secondSuspended = await caseStore.get(supportCase.id);
+    const secondNative = (secondSuspended!.metadata as Record<string, unknown>)
+      .nativeApproval as { turnId: string; fingerprint: string };
+    expect(secondSuspended?.status).toBe("waiting_approval");
+    expect(secondNative.turnId).toBe(followUp.turnId);
+    expect(secondNative.fingerprint).not.toBe(firstNative.fingerprint);
+    expect(
+      (await caseStore.approvalDecision(supportCase.id, firstNative.turnId))
+        ?.approved,
+    ).toBe(false);
+  });
+
+  it("runs a queued follow-up after completion with its own model input, output, and outbox", async () => {
+    const runtime = await loadCharacterizationRuntime({
+      recommendRefund: false,
+      requiresEscalation: false,
+    });
+    const { caseStore, supportCase, responseAgent } = runtime;
+    const { recoverLocalWorkflows } =
+      await import("../../src/mastra/runtime/local-runtime");
+    expect(await recoverLocalWorkflows(runtime.mastra, 1, caseStore)).toBe(1);
+    const first = await caseStore.get(supportCase.id);
+    expect(first?.status).toBe("resolved");
+    responseAgent.__updateModel({
+      model: deterministicJsonModel({
+        draftResponse: "A distinct response for the queued second request.",
+        citedSources: ["duplicate-charge-policy"],
+        recommendRefund: false,
+        requiresEscalation: true,
+        escalationReason: "Second-turn escalation.",
+      }),
+    });
+    const followUp = await caseStore.appendFollowUp({
+      caseId: supportCase.id,
+      eventId: `queued-after-completion-${crypto.randomUUID()}`,
+      runId: `queued-after-completion-run-${crypto.randomUUID()}`,
+      message: {
+        id: `queued-after-completion-message-${crypto.randomUUID()}`,
+        author: "customer",
+        body: "A separate second request must be escalated.",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    expect(followUp.appended).toBe(true);
+    expect(await recoverLocalWorkflows(runtime.mastra, 1, caseStore)).toBe(1);
+    const second = await caseStore.get(supportCase.id);
+    expect(second).toMatchObject({
+      status: "escalated",
+      finalResponse: "A distinct response for the queued second request.",
+      escalationReason: "Second-turn escalation.",
+    });
+    const turns = await caseStore.turns(supportCase.id);
+    expect(turns).toHaveLength(2);
+    expect(turns[0]).toMatchObject({
+      outcome: { status: "resolved" },
+      message: { body: "Please refund the duplicate subscription charge." },
+    });
+    expect(turns[1]).toMatchObject({
+      message: { body: "A separate second request must be escalated." },
+      outcome: { status: "escalated" },
+    });
+    const outbox = await caseStore.getClientForTests().execute({
+      sql: "SELECT id, body FROM support_outbox WHERE case_id = ? ORDER BY created_at, id",
+      args: [supportCase.id],
+    });
+    expect(outbox.rows).toHaveLength(2);
+    expect(outbox.rows.map((row) => String(row.id))).toEqual([
+      `outbox_${supportCase.id}_${turns[0]!.id}_final`,
+      `outbox_${supportCase.id}_${turns[1]!.id}_final`,
+    ]);
+  });
+
+  it("runs a queued follow-up after escalation without retaining the prior output", async () => {
+    const runtime = await loadCharacterizationRuntime({
+      recommendRefund: false,
+      requiresEscalation: true,
+    });
+    const { caseStore, supportCase, responseAgent } = runtime;
+    const { recoverLocalWorkflows } =
+      await import("../../src/mastra/runtime/local-runtime");
+    expect(await recoverLocalWorkflows(runtime.mastra, 1, caseStore)).toBe(1);
+    expect((await caseStore.get(supportCase.id))?.status).toBe("escalated");
+    responseAgent.__updateModel({
+      model: deterministicJsonModel({
+        draftResponse: "A clean resolved answer for the second request.",
+        citedSources: ["duplicate-charge-policy"],
+        recommendRefund: false,
+        requiresEscalation: false,
+      }),
+    });
+    const followUp = await caseStore.appendFollowUp({
+      caseId: supportCase.id,
+      eventId: `queued-after-escalation-${crypto.randomUUID()}`,
+      runId: `queued-after-escalation-run-${crypto.randomUUID()}`,
+      message: {
+        id: `queued-after-escalation-message-${crypto.randomUUID()}`,
+        author: "customer",
+        body: "A second request can now be resolved.",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    await recoverLocalWorkflows(runtime.mastra, 1, caseStore);
+    const second = await caseStore.get(supportCase.id);
+    expect(second).toMatchObject({
+      status: "resolved",
+      finalResponse: "A clean resolved answer for the second request.",
+    });
+    expect(second?.escalationReason).toBeUndefined();
+    const turns = await caseStore.turns(supportCase.id);
+    expect(turns[0]).toMatchObject({ outcome: { status: "escalated" } });
+    expect(turns[1]).toMatchObject({
+      id: followUp.turnId,
+      outcome: { status: "resolved" },
     });
   });
 
@@ -343,7 +491,17 @@ describe("resolve support case WIP characterization", () => {
     };
     const ingested = await (
       await mastra.getWorkflow("ingestSupportCaseWorkflow").createRun()
-    ).start({ inputData: { payload } });
+    ).start({
+      inputData: {
+        payload,
+        ingress: {
+          id: "customer-alex",
+          email: "alex@example.com",
+          tenantId: "local-demo",
+          roles: ["customer"],
+        },
+      },
+    });
 
     expect(ingested.status).toBe("success");
     await vi.waitFor(async () => {
@@ -369,7 +527,10 @@ describe("resolve support case WIP characterization", () => {
       .getWorkflow("resolveSupportCaseWorkflow")
       .createRun({ runId: supportCase.workflowRunId!, disableScorers: true });
 
-    const result = await run.start({ inputData: { caseId: supportCase.id } });
+    const [turn] = await caseStore.turns(supportCase.id);
+    const result = await run.start({
+      inputData: { caseId: supportCase.id, turnId: turn!.id },
+    });
 
     expect(result.status).toBe("success");
     expect(await caseStore.get(supportCase.id)).toMatchObject({
@@ -379,10 +540,11 @@ describe("resolve support case WIP characterization", () => {
   });
 
   it("reports a failed workflow when the deterministic triage transport returns an invalid result", async () => {
-    const { mastra, supportCase } = await loadCharacterizationRuntime({
-      recommendRefund: false,
-      requiresEscalation: false,
-    });
+    const { mastra, caseStore, supportCase } =
+      await loadCharacterizationRuntime({
+        recommendRefund: false,
+        requiresEscalation: false,
+      });
     const { triageAgent } =
       await import("../../src/mastra/agents/triage-agent");
     triageAgent.__updateModel({ model: deterministicJsonModel({}) });
@@ -390,7 +552,10 @@ describe("resolve support case WIP characterization", () => {
       .getWorkflow("resolveSupportCaseWorkflow")
       .createRun({ runId: supportCase.workflowRunId!, disableScorers: true });
 
-    const result = await run.start({ inputData: { caseId: supportCase.id } });
+    const [turn] = await caseStore.turns(supportCase.id);
+    const result = await run.start({
+      inputData: { caseId: supportCase.id, turnId: turn!.id },
+    });
 
     expect(result.status).toBe("failed");
   });
@@ -409,8 +574,28 @@ describe("resolve support case WIP characterization", () => {
     };
 
     const [first, second] = await Promise.all([
-      (await workflow.createRun()).start({ inputData: { payload } }),
-      (await workflow.createRun()).start({ inputData: { payload } }),
+      (await workflow.createRun()).start({
+        inputData: {
+          payload,
+          ingress: {
+            id: "customer-alex",
+            email: "alex@example.com",
+            tenantId: "local-demo",
+            roles: ["customer"],
+          },
+        },
+      }),
+      (await workflow.createRun()).start({
+        inputData: {
+          payload,
+          ingress: {
+            id: "customer-alex",
+            email: "alex@example.com",
+            tenantId: "local-demo",
+            roles: ["customer"],
+          },
+        },
+      }),
     ]);
 
     expect(first.status).toBe("success");

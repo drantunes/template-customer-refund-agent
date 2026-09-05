@@ -25,8 +25,6 @@ async function loadDeterministicRuntime() {
   const { mastra, shutdownLocalMastra } =
     await import("../../src/mastra/index");
   const { caseStore } = await import("../../src/mastra/lib/case-store");
-  const { threadIdForCase, resourceIdForCase } =
-    await import("../../src/mastra/domain/support-case");
   const triageAgent = mastra.getAgent("triageAgent");
   const responseAgent = mastra.getAgent("responseAgent");
   const refundExecutionAgent = mastra.getAgent("refundExecutionAgent");
@@ -86,9 +84,7 @@ async function loadDeterministicRuntime() {
     caseStore,
     databasePath,
     mastra,
-    resourceIdForCase,
     shutdownLocalMastra,
-    threadIdForCase,
   };
 }
 
@@ -222,12 +218,26 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
         }
       ).externalConversationId,
     ).toBe(conversation);
-    expect(runtime.threadIdForCase(supportCase.id, "local-demo")).toContain(
-      supportCase.id,
+    const triageMemory = await runtime.mastra
+      .getAgent("triageAgent")
+      .getMemory();
+    expect(triageMemory).toBeDefined();
+    await triageMemory!.settled();
+    const alexResourceId = "tenant_local-demo_owner_customer-alex";
+    const supportThreadId = `tenant_local-demo_conversation_${supportCase.id}`;
+    const supportThread = await triageMemory!.getThreadById({
+      threadId: supportThreadId,
+    });
+    // These values come from Mastra's persisted thread record, not an ID helper.
+    // The owner itself is a trusted case-store binding, established from the
+    // signed browser session rather than the inbound payload.
+    expect((supportCase.metadata as Record<string, unknown>).ownerId).toBe(
+      "customer-alex",
     );
-    expect(runtime.resourceIdForCase(supportCase.id, "local-demo")).toContain(
-      supportCase.id,
-    );
+    expect(supportThread).toMatchObject({
+      id: supportThreadId,
+      resourceId: alexResourceId,
+    });
     const fingerprint = (
       (afterFollowUp.metadata as Record<string, unknown>).refundCommand as {
         fingerprint: string;
@@ -349,6 +359,21 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
         >
       ).refundCommand as { fingerprint: string }
     ).fingerprint;
+    const rejectedThreadId = `tenant_local-demo_conversation_${rejected.id}`;
+    const rejectedThread = await triageMemory!.getThreadById({
+      threadId: rejectedThreadId,
+    });
+    expect(rejectedThread).toMatchObject({
+      id: rejectedThreadId,
+      resourceId: alexResourceId,
+    });
+    const alexThreads = await triageMemory!.listThreads({
+      filter: { resourceId: alexResourceId },
+      perPage: false,
+    });
+    expect(alexThreads.threads.map((thread) => thread.id)).toEqual(
+      expect.arrayContaining([supportThreadId, rejectedThreadId]),
+    );
     await page.getByRole("button", { name: "Sign out" }).click();
     await page.goto(`/admin/${rejected.id}`);
     await signIn(page, "approver@local.test", "local-approver");
@@ -374,6 +399,47 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
         ["local-demo", "local-demo"],
       );
     expect(Number(effectsAfterRejection.rows[0]?.count)).toBe(1);
+
+    await page.getByLabel("More admin actions").click();
+    await page.getByRole("menuitem", { name: "Sign out" }).click();
+    await page.goto("/portal");
+    await signIn(page, "jordan@example.com", "local-customer-jordan");
+    await createCustomerCase(page, "Jordan's separate refund request");
+    await expect
+      .poll(
+        async () =>
+          (await runtime.caseStore.list()).filter((entry) =>
+            entry.id.startsWith("case_"),
+          ).length,
+      )
+      .toBe(3);
+    const jordanCase = (await runtime.caseStore.list()).find(
+      (entry) =>
+        entry.id.startsWith("case_") &&
+        entry.customer.email === "jordan@example.com",
+    )!;
+    await expect
+      .poll(async () => (await runtime.caseStore.get(jordanCase.id))?.status)
+      .toBe("waiting_approval");
+    const jordanThreadId = `tenant_local-demo_conversation_${jordanCase.id}`;
+    const jordanThread = await triageMemory!.getThreadById({
+      threadId: jordanThreadId,
+    });
+    expect((jordanCase.metadata as Record<string, unknown>).ownerId).toBe(
+      "customer-jordan",
+    );
+    expect(jordanThread).toMatchObject({
+      id: jordanThreadId,
+      resourceId: "tenant_local-demo_owner_customer-jordan",
+    });
+    expect(jordanThread?.resourceId).not.toBe(alexResourceId);
+    const alexThreadsAfterJordan = await triageMemory!.listThreads({
+      filter: { resourceId: alexResourceId },
+      perPage: false,
+    });
+    expect(
+      alexThreadsAfterJordan.threads.map((thread) => thread.id),
+    ).not.toContain(jordanThreadId);
   } finally {
     await stopServer();
     await runtime.shutdownLocalMastra();

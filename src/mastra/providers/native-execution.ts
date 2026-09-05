@@ -1,4 +1,11 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import type { Mastra } from "@mastra/core/mastra";
+import type { LanguageModelV2 } from "@ai-sdk/provider";
+
+type NativeApprovalOptions = Parameters<
+  Awaited<ReturnType<Mastra["getAgent"]>>["approveToolCallGenerate"]
+>[0];
 
 /**
  * This is intentionally an application-process secret, rather than case
@@ -13,6 +20,10 @@ export interface NativeRefundExecutionAuthorization {
   readonly nativeRunId: string;
   readonly nativeToolCallId: string;
   readonly commandFingerprint: string;
+  readonly caseId: string;
+  readonly turnId: string;
+  readonly dispatchId: string;
+  readonly leaseToken: string;
   readonly signature: string;
 }
 
@@ -25,8 +36,52 @@ type NativeApproval = {
   fingerprint?: string;
 };
 
+interface NativeResumeScope {
+  caseId: string;
+  turnId: string;
+  nativeRunId: string;
+  nativeToolCallId: string;
+  commandFingerprint: string;
+  dispatchId: string;
+  leaseToken: string;
+}
+const nativeResumeScope = new AsyncLocalStorage<NativeResumeScope>();
+
+/**
+ * The only public capability issuer. It owns the AsyncLocalStorage scope and
+ * invokes Mastra's official native approval transition itself; callers cannot
+ * pair a fabricated scope with an arbitrary tool callback.
+ */
+export function resumeApprovedNativeTool<T>(input: {
+  mastra: Mastra;
+  approved: boolean;
+  scope: NativeResumeScope;
+  model?: LanguageModelV2;
+  requestContext?: NativeApprovalOptions["requestContext"];
+}): Promise<T> {
+  const { approved, scope, model, requestContext } = input;
+  const agent = input.mastra.getAgent("refundExecutionAgent");
+  return nativeResumeScope.run(
+    Object.freeze({ ...scope }),
+    () =>
+      (approved
+        ? agent.approveToolCallGenerate({
+            runId: scope.nativeRunId,
+            toolCallId: scope.nativeToolCallId,
+            ...(model === undefined ? {} : { model }),
+            ...(requestContext === undefined ? {} : { requestContext }),
+          })
+        : agent.declineToolCallGenerate({
+            runId: scope.nativeRunId,
+            toolCallId: scope.nativeToolCallId,
+            ...(model === undefined ? {} : { model }),
+            ...(requestContext === undefined ? {} : { requestContext }),
+          })) as Promise<T>,
+  );
+}
+
 function payload(value: Omit<NativeRefundExecutionAuthorization, "signature">) {
-  return `${value.issuedAt}:${value.nativeRunId}:${value.nativeToolCallId}:${value.commandFingerprint}`;
+  return `${value.issuedAt}:${value.nativeRunId}:${value.nativeToolCallId}:${value.commandFingerprint}:${value.caseId}:${value.turnId}:${value.dispatchId}:${value.leaseToken}`;
 }
 
 function signature(
@@ -38,9 +93,9 @@ function signature(
 }
 
 /**
- * Mints an authorization only inside the registered native tool execution.
- * Callers provide a callback, so no reusable token-minting API is exposed to
- * HTTP routes or other application surfaces.
+ * Mints an authorization only when Mastra executes a tool inside the active
+ * approved-native resume scope. Plain context fields are diagnostic data, not
+ * authority: direct callers cannot mint a capability by constructing them.
  */
 export async function withNativeRefundExecutionAuthorization<T>(
   context: NativeAgentContext | undefined,
@@ -49,6 +104,9 @@ export async function withNativeRefundExecutionAuthorization<T>(
   execute: (authorization: NativeRefundExecutionAuthorization) => Promise<T>,
 ): Promise<T> {
   if (
+    nativeResumeScope.getStore()?.nativeRunId !== native?.runId ||
+    nativeResumeScope.getStore()?.nativeToolCallId !== native?.toolCallId ||
+    nativeResumeScope.getStore()?.commandFingerprint !== commandFingerprint ||
     context?.agent?.agentId !== "refund-execution-agent" ||
     !native?.runId ||
     !native.toolCallId ||
@@ -63,6 +121,10 @@ export async function withNativeRefundExecutionAuthorization<T>(
     nativeRunId: native.runId,
     nativeToolCallId: native.toolCallId,
     commandFingerprint,
+    caseId: nativeResumeScope.getStore()!.caseId,
+    turnId: nativeResumeScope.getStore()!.turnId,
+    dispatchId: nativeResumeScope.getStore()!.dispatchId,
+    leaseToken: nativeResumeScope.getStore()!.leaseToken,
   };
   return execute({ ...unsigned, signature: signature(unsigned) });
 }
@@ -73,6 +135,7 @@ export function hasNativeRefundExecutionAuthorization(
     nativeRunId: string;
     nativeToolCallId: string;
     commandFingerprint: string;
+    caseId: string;
   },
 ): value is NativeRefundExecutionAuthorization {
   if (!value || typeof value !== "object") return false;
@@ -84,6 +147,10 @@ export function hasNativeRefundExecutionAuthorization(
     candidate.nativeRunId !== expected.nativeRunId ||
     candidate.nativeToolCallId !== expected.nativeToolCallId ||
     candidate.commandFingerprint !== expected.commandFingerprint ||
+    candidate.caseId !== expected.caseId ||
+    typeof candidate.turnId !== "string" ||
+    typeof candidate.dispatchId !== "string" ||
+    typeof candidate.leaseToken !== "string" ||
     Math.abs(Date.now() - candidate.issuedAt) > MAX_AGE_MS
   )
     return false;
@@ -92,6 +159,10 @@ export function hasNativeRefundExecutionAuthorization(
     nativeRunId: candidate.nativeRunId,
     nativeToolCallId: candidate.nativeToolCallId,
     commandFingerprint: candidate.commandFingerprint,
+    caseId: candidate.caseId,
+    turnId: candidate.turnId,
+    dispatchId: candidate.dispatchId,
+    leaseToken: candidate.leaseToken,
   };
   const supplied = Buffer.from(candidate.signature);
   const expectedSignature = Buffer.from(signature(unsigned));

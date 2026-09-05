@@ -68,7 +68,7 @@ if (mode === "init") {
       ],
       createdAt,
       updatedAt: createdAt,
-      metadata: {},
+      metadata: { ownerId: "customer-alex" },
     },
     "post-refund-recovery-event",
     "post-refund-recovery-run",
@@ -141,10 +141,32 @@ if (mode === "init") {
     native.turnId,
   );
   if (!dispatch) throw new Error("Expected a resume dispatch lease.");
-  await mastra.getAgent("refundExecutionAgent").approveToolCallGenerate({
-    runId: native.runId,
-    toolCallId: native.toolCallId,
-  });
+  const { withDispatchLeaseScope } =
+    await import("../../src/mastra/lib/dispatch-lease-scope");
+  const { resumeApprovedNativeTool } =
+    await import("../../src/mastra/providers/native-execution");
+  await withDispatchLeaseScope(
+    {
+      dispatchId: dispatch.id,
+      caseId: dispatch.caseId,
+      turnId: dispatch.turnId,
+      leaseToken: dispatch.leaseToken!,
+    },
+    () =>
+      resumeApprovedNativeTool({
+        mastra,
+        approved: true,
+        scope: {
+          caseId: dispatch.caseId,
+          turnId: dispatch.turnId,
+          nativeRunId: native.runId,
+          nativeToolCallId: native.toolCallId,
+          commandFingerprint: native.fingerprint,
+          dispatchId: dispatch.id,
+          leaseToken: dispatch.leaseToken!,
+        },
+      }),
+  );
 } else if (mode === "recover") {
   await caseStore
     .getClientForTests()

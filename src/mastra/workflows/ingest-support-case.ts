@@ -12,12 +12,24 @@ import {
   resolveConfiguredBinding,
 } from "../providers/registry";
 import { ownerIdForCustomer } from "../server/auth";
+import { withDispatchLeaseScope } from "../lib/dispatch-lease-scope";
+
+const ingressScopeSchema = z.object({
+  id: z.string().min(1),
+  email: z.email(),
+  tenantId: z.string().min(1),
+  roles: z.array(z.string()),
+});
+const ingestInputSchema = z.object({
+  payload: z.unknown(),
+  ingress: ingressScopeSchema,
+});
 
 const normalizeAndPersistStep = createStep({
   id: "normalize-inbound-message",
   description:
     "Normalizes a raw inbound payload into a SupportCase and persists it (idempotent on externalId).",
-  inputSchema: z.object({ payload: z.unknown() }),
+  inputSchema: ingestInputSchema,
   outputSchema: z.object({
     caseId: z.string(),
     isNew: z.boolean(),
@@ -33,6 +45,23 @@ const normalizeAndPersistStep = createStep({
       .support(ingress)
       .normalizeInbound(inputData.payload);
     const support = resolveConfiguredBinding(normalized.binding);
+    if (support.tenantId !== inputData.ingress.tenantId)
+      throw new Error(
+        "Inbound tenant does not match the authenticated principal.",
+      );
+    const verifiedOwner = ownerIdForCustomer(
+      support.tenantId,
+      normalized.customer.email,
+    );
+    const customerIngress = inputData.ingress.roles.includes("customer");
+    if (
+      !verifiedOwner ||
+      (customerIngress &&
+        (inputData.ingress.id !== verifiedOwner ||
+          inputData.ingress.email.toLowerCase() !==
+            normalized.customer.email.toLowerCase()))
+    )
+      throw new Error("Inbound customer does not match the verified owner.");
     // The support adapter owns the conversation reference; externalId is the
     // inbound event identity and may legitimately differ from it.
     const portBinding = support;
@@ -48,6 +77,12 @@ const normalizeAndPersistStep = createStep({
       );
     });
     if (existingConversation) {
+      if (
+        customerIngress &&
+        (existingConversation.metadata as Record<string, unknown>).ownerId !==
+          inputData.ingress.id
+      )
+        throw new Error("Inbound conversation is owned by another principal.");
       const followUp = await caseStore.appendFollowUp({
         caseId: existingConversation.id,
         eventId: `event_${normalized.source}_${normalized.externalId}`,
@@ -74,10 +109,7 @@ const normalizeAndPersistStep = createStep({
         rawPayload: normalized.rawPayload,
         // The adapter-normalized customer is mapped once at ingress to a
         // stable local owner. Later client email/query fields never alter it.
-        ownerId: ownerIdForCustomer(
-          support.tenantId,
-          normalized.customer.email,
-        ),
+        ownerId: verifiedOwner,
         providerBinding: portBinding,
         providerBindings: {
           support: { ...portBinding },
@@ -137,14 +169,11 @@ const startResolutionStep = createStep({
     const run = await resolveWorkflow.createRun({
       runId: inputData.workflowRunId,
     });
-    await caseStore.update(inputData.caseId, {
-      workflowRunId: inputData.workflowRunId,
-      metadata: {
-        ...(await caseStore.get(inputData.caseId))!.metadata,
-        activeTurnId: dispatch.turnId,
-      },
-    });
-    await caseStore.markDispatchStarted(dispatch.id, dispatch.leaseToken);
+    if (!(await caseStore.activateDispatch(dispatch)))
+      return {
+        caseId: inputData.caseId,
+        workflowRunId: inputData.workflowRunId,
+      };
 
     const heartbeat = setInterval(
       () =>
@@ -154,12 +183,20 @@ const startResolutionStep = createStep({
       10_000,
     );
     heartbeat.unref();
-    void run
-      .start({
-        inputData: { caseId: inputData.caseId },
-        requestContext,
-        tracingContext,
-      })
+    void withDispatchLeaseScope(
+      {
+        dispatchId: dispatch.id,
+        caseId: dispatch.caseId,
+        turnId: dispatch.turnId,
+        leaseToken: dispatch.leaseToken!,
+      },
+      () =>
+        run.start({
+          inputData: { caseId: inputData.caseId, turnId: dispatch.turnId },
+          requestContext,
+          tracingContext,
+        }),
+    )
       .then(async (result) => {
         if (result.status === "failed") {
           mastra!.getLogger()?.error("resolve-support-case run failed", {
@@ -205,7 +242,7 @@ export const ingestSupportCaseWorkflow = createWorkflow({
   id: "ingest-support-case",
   description:
     "Normalizes an inbound support message, persists it idempotently, and starts resolution.",
-  inputSchema: z.object({ payload: z.unknown() }),
+  inputSchema: ingestInputSchema,
   outputSchema: z.object({
     caseId: z.string(),
     workflowRunId: z.string().optional(),

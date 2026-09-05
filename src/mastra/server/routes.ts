@@ -1,5 +1,7 @@
 import { registerApiRoute, type ContextWithMastra } from "@mastra/core/server";
 import { caseStore } from "../lib/case-store";
+import { withDispatchLeaseScope } from "../lib/dispatch-lease-scope";
+import { resumeApprovedNativeTool } from "../providers/native-execution";
 import { REQUEST_APPROVAL_STEP_ID } from "../workflows/resolve-support-case";
 import { computeMonitoringSummary } from "../lib/monitoring";
 import type { CaseFeedback, SupportCase } from "../domain/support-case";
@@ -76,27 +78,21 @@ function scopedCaseDto(
 ): SupportCase {
   const metadata = supportCase.metadata as Record<string, unknown>;
   if (hasRole(current, "customer")) {
-    const {
-      triage: _triage,
-      policyMatches: _policyMatches,
-      orderLookup: _orderLookup,
-      subscriptionLookup: _subscriptionLookup,
-      refundHistory: _refundHistory,
-      draft: _draft,
-      approval: _approval,
-      refundResult: _refundResult,
-      workflowRunId: _workflowRunId,
-      traceId: _traceId,
-      agentUsage: _agentUsage,
-      metadata: _metadata,
-      ...publicCase
-    } = supportCase;
+    // This is an allowlist. New internal SupportCase fields cannot become a
+    // customer API leak merely because a destructuring denylist was missed.
     return {
-      ...publicCase,
+      id: supportCase.id,
+      externalId: supportCase.externalId,
+      source: supportCase.source,
       customer: { email: current.email, name: supportCase.customer.name },
+      subject: supportCase.subject,
       messages: supportCase.messages.filter(
         (message) => message.author !== "internal",
       ),
+      status: supportCase.status,
+      createdAt: supportCase.createdAt,
+      updatedAt: supportCase.updatedAt,
+      feedback: supportCase.feedback,
       metadata: {},
     };
   }
@@ -190,6 +186,14 @@ export const supportInboundRoute = registerApiRoute("/support/inbound", {
         errorResponseSchema.parse({ error: "Insufficient authority." }),
         403,
       );
+    // The only built-in inbound adapter is the local-demo support account.
+    // Reject a signed identity from another tenant before it can allocate a
+    // workflow run or ask the normalizer to interpret its payload.
+    if (actor.tenantId !== "local-demo")
+      return c.json(
+        errorResponseSchema.parse({ error: "Case access denied." }),
+        403,
+      );
     // A customer may create only their own conversation.  The body email is
     // normalized input, never a claim of another customer's identity.
     if (
@@ -200,6 +204,21 @@ export const supportInboundRoute = registerApiRoute("/support/inbound", {
         errorResponseSchema.parse({ error: "Case access denied." }),
         403,
       );
+    const conversationId =
+      typeof payloadResult.data.conversationId === "string"
+        ? payloadResult.data.conversationId
+        : undefined;
+    if (conversationId) {
+      const existing = await caseStore.findConversation(
+        actor.tenantId,
+        conversationId,
+      );
+      if (existing && !canAccessCase(actor, existing))
+        return c.json(
+          errorResponseSchema.parse({ error: "Case access denied." }),
+          403,
+        );
+    }
 
     const mastra = c.get("mastra");
     const ingestWorkflow = mastra.getWorkflow("ingestSupportCaseWorkflow");
@@ -208,7 +227,15 @@ export const supportInboundRoute = registerApiRoute("/support/inbound", {
     let result;
     try {
       result = await run.start({
-        inputData: { payload: payloadResult.data },
+        inputData: {
+          payload: payloadResult.data,
+          ingress: {
+            id: actor.id,
+            email: actor.email,
+            tenantId: actor.tenantId,
+            roles: actor.roles,
+          },
+        },
         requestContext: c.get("requestContext"),
       });
     } catch (error) {
@@ -287,21 +314,24 @@ export const supportCaseFollowUpRoute = registerApiRoute(
       if (!dispatch)
         return c.json(scopedCaseDto((await caseStore.get(caseId))!, current));
       try {
-        await caseStore.markDispatchStarted(dispatch.id, dispatch.leaseToken);
-        await caseStore.update(caseId, {
-          workflowRunId: runId,
-          metadata: {
-            ...(await caseStore.get(caseId))!.metadata,
-            activeTurnId: dispatch.turnId,
-          },
-        });
+        if (!(await caseStore.activateDispatch(dispatch)))
+          return c.json(scopedCaseDto((await caseStore.get(caseId))!, current));
         const run = await mastra
           .getWorkflow("resolveSupportCaseWorkflow")
           .createRun({ runId });
-        const result = await run.start({
-          inputData: { caseId },
-          requestContext: c.get("requestContext"),
-        });
+        const result = await withDispatchLeaseScope(
+          {
+            dispatchId: dispatch.id,
+            caseId: dispatch.caseId,
+            turnId: dispatch.turnId,
+            leaseToken: dispatch.leaseToken!,
+          },
+          () =>
+            run.start({
+              inputData: { caseId, turnId: dispatch.turnId },
+              requestContext: c.get("requestContext"),
+            }),
+        );
         await caseStore.completeDispatch(
           dispatch.id,
           result.status === "suspended" ? "suspended" : "completed",
@@ -507,19 +537,29 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
   heartbeat.unref();
   let nativeResumed = false;
   try {
-    const executionAgent = mastra.getAgent("refundExecutionAgent");
-    if (approved)
-      await executionAgent.approveToolCallGenerate({
-        runId: native.runId,
-        toolCallId: native.toolCallId,
-        requestContext: c.get("requestContext"),
-      });
-    else
-      await executionAgent.declineToolCallGenerate({
-        runId: native.runId,
-        toolCallId: native.toolCallId,
-        requestContext: c.get("requestContext"),
-      });
+    await withDispatchLeaseScope(
+      {
+        dispatchId: dispatch.id,
+        caseId: dispatch.caseId,
+        turnId: dispatch.turnId,
+        leaseToken: dispatch.leaseToken!,
+      },
+      () =>
+        resumeApprovedNativeTool({
+          mastra,
+          approved,
+          scope: {
+            caseId: dispatch.caseId,
+            turnId: dispatch.turnId,
+            nativeRunId: native.runId!,
+            nativeToolCallId: native.toolCallId!,
+            commandFingerprint: native.fingerprint!,
+            dispatchId: dispatch.id,
+            leaseToken: dispatch.leaseToken!,
+          },
+          requestContext: c.get("requestContext"),
+        }),
+    );
     nativeResumed = true;
   } catch (error) {
     // The decision remains durable. Requeue its fenced dispatch for native
@@ -539,18 +579,28 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
     const run = await resolveWorkflow.createRun({
       runId: supportCase.workflowRunId,
     });
-    await caseStore.update(caseId, { status: "processing" });
-    const result = await run.resume({
-      step: REQUEST_APPROVAL_STEP_ID,
-      resumeData: {
-        approved,
-        // The authenticated principal wins.  A client supplied approver id
-        // is retained only as an audit note and can never confer authority.
-        approverId: current.id,
-        note: body.note,
+    const result = await withDispatchLeaseScope(
+      {
+        dispatchId: dispatch.id,
+        caseId: dispatch.caseId,
+        turnId: dispatch.turnId,
+        leaseToken: dispatch.leaseToken!,
       },
-      requestContext: c.get("requestContext"),
-    });
+      async () => {
+        await caseStore.update(caseId, { status: "processing" });
+        return run.resume({
+          step: REQUEST_APPROVAL_STEP_ID,
+          resumeData: {
+            approved,
+            // The authenticated principal wins.  A client supplied approver id
+            // is retained only as an audit note and can never confer authority.
+            approverId: current.id,
+            note: body.note,
+          },
+          requestContext: c.get("requestContext"),
+        });
+      },
+    );
     if (leaseLost)
       return c.json(
         { error: "Approval resume lost its dispatch lease; reload the case." },

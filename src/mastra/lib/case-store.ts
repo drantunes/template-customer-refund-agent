@@ -11,6 +11,8 @@ import {
   getSharedLocalSqliteClient,
   serializeSqliteClient,
 } from "./sqlite-client";
+import { activeDispatchLeaseScope } from "./dispatch-lease-scope";
+import type { DispatchLeaseScope } from "./dispatch-lease-scope";
 
 export type DispatchState =
   "pending" | "claimed" | "completed" | "suspended" | "failed";
@@ -38,6 +40,16 @@ export interface DispatchRecord {
   /** Whether this dispatch had already crossed the durable start boundary. */
   wasStarted: boolean;
   leaseToken?: string;
+}
+export interface SupportTurnRecord {
+  id: string;
+  eventId: string;
+  sequence: number;
+  state: string;
+  runId?: string;
+  commandFingerprint?: string;
+  message?: CaseMessage;
+  outcome?: Record<string, unknown>;
 }
 export const retentionDefaults = {
   rawPayloadDays: 7,
@@ -89,10 +101,21 @@ export interface RetentionResult {
   tracesRedacted: number;
   auditsDeleted: number;
   messagesDeleted: number;
+  turnsRedacted: number;
+  outboxRecordsRedacted: number;
+  dispatchesExpired: number;
+  decisionsRedacted: number;
+  actionsRedacted: number;
+  auditPayloadsRedacted: number;
+  financialReasonsRedacted: number;
   mastraMessagesDeleted: number;
   mastraSpansDeleted: number;
   /** Pending cases older than the case window are closed without an effect. */
   pendingCasesExpired: number;
+  /** Inbound snapshots are enumerated by their real storage name and age. */
+  rawWorkflowSnapshotBefore: string;
+  /** Expired app cases identify native snapshots even before a decision exists. */
+  expiredCaseIds: string[];
   /** Mastra workflow runs whose snapshots can be removed after case redaction. */
   expiredWorkflowRunIds: string[];
 }
@@ -149,7 +172,7 @@ export class CaseStore {
   async close() {
     if (this.ownsClient) this.client.close();
   }
-  async migrate(target = 7): Promise<void> {
+  async migrate(target = 8): Promise<void> {
     await this.client.execute(
       "CREATE TABLE IF NOT EXISTS support_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
     );
@@ -157,6 +180,15 @@ export class CaseStore {
       "SELECT version FROM support_schema_migrations ORDER BY version",
     );
     let version = Number(applied.rows.at(-1)?.version ?? 0);
+    if (!Number.isInteger(target) || target < 0 || target > 8)
+      throw new Error("Unsupported support schema target version.");
+    // Versions 6 through 8 introduced append-only turn, decision, and audit
+    // records. Their inverse would discard or weaken durable financial/replay
+    // evidence, so refuse before changing any schema or migration marker.
+    if (version >= 6 && target < version)
+      throw new Error(
+        `Refusing unsupported downgrade from support schema v${version} to v${target}.`,
+      );
     while (version < target) {
       version += 1;
       await this.up(version);
@@ -213,6 +245,7 @@ export class CaseStore {
     if (version === 5) await this.up5();
     if (version === 6) await this.up6();
     if (version === 7) await this.up7();
+    if (version === 8) await this.up8();
     await this.client.execute({
       sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (?, ?)",
       args: [version, now()],
@@ -436,6 +469,35 @@ export class CaseStore {
       throw error;
     }
   }
+  /** Per-turn inputs and outputs are immutable history. The case remains only
+   * the current active-turn projection used by the UI. */
+  private async up8() {
+    for (const sql of [
+      "ALTER TABLE support_turns ADD COLUMN message_data TEXT",
+      "ALTER TABLE support_turns ADD COLUMN outcome_data TEXT",
+    ]) {
+      try {
+        await this.client.execute(sql);
+      } catch (error) {
+        if (!String(error).includes("duplicate column")) throw error;
+      }
+    }
+    const rows = await this.client.execute(
+      "SELECT support_turns.id, support_turns.case_id, support_turns.sequence, support_cases.data FROM support_turns JOIN support_cases ON support_cases.id = support_turns.case_id WHERE support_turns.message_data IS NULL",
+    );
+    for (const row of rows.rows) {
+      const value = row as Record<string, unknown>;
+      const supportCase = parse({ data: value.data });
+      const message = supportCase.messages.filter(
+        (entry) => entry.author === "customer",
+      )[Math.max(0, Number(value.sequence) - 1)];
+      if (message)
+        await this.client.execute({
+          sql: "UPDATE support_turns SET message_data = ? WHERE id = ?",
+          args: [JSON.stringify(message), String(value.id)],
+        });
+    }
+  }
   private async down(version: number) {
     if (version === 3) {
       const count = await this.client.execute(
@@ -549,6 +611,18 @@ export class CaseStore {
     );
     return result.rows.map((row) => parse(row as Record<string, unknown>));
   }
+  async findConversation(
+    tenantId: string,
+    externalConversationId: string,
+  ): Promise<SupportCase | undefined> {
+    return (await this.list()).find((supportCase) => {
+      const binding = this.binding(supportCase);
+      return (
+        binding.tenantId === tenantId &&
+        binding.externalConversationId === externalConversationId
+      );
+    });
+  }
   async create(case_: SupportCase) {
     await this.ensured();
     const persisted = this.withBindings(case_);
@@ -602,6 +676,27 @@ export class CaseStore {
       });
       const row = result.rows[0];
       if (!row) throw new Error(`Support case not found: ${id}`);
+      const lease = activeDispatchLeaseScope();
+      if (lease) {
+        if (lease.caseId !== id)
+          throw new Error(
+            "Workflow dispatch scope cannot project another case.",
+          );
+        const owned = await tx.execute({
+          sql: "SELECT id FROM support_dispatch WHERE id = ? AND case_id = ? AND turn_id = ? AND lease_token = ? AND state IN ('claimed', 'started') AND lease_until > ?",
+          args: [
+            lease.dispatchId,
+            lease.caseId,
+            lease.turnId,
+            lease.leaseToken,
+            now(),
+          ],
+        });
+        if (!owned.rows[0])
+          throw new StaleCaseWriteError(
+            `Dispatch lease is no longer current for ${id}.`,
+          );
+      }
       const version = Number(row.version ?? 1);
       if (expectedVersion !== undefined && expectedVersion !== version)
         throw new StaleCaseWriteError(id);
@@ -723,6 +818,36 @@ export class CaseStore {
       const invalidatesApproval = current.status === "waiting_approval";
       const terminal =
         current.status === "resolved" || current.status === "escalated";
+      const activeTurnId = (current.metadata as Record<string, unknown>)
+        .activeTurnId;
+      if (
+        (invalidatesApproval || terminal) &&
+        typeof activeTurnId === "string"
+      ) {
+        await tx.execute({
+          sql: "UPDATE support_turns SET outcome_data = COALESCE(outcome_data, ?), updated_at = ? WHERE id = ? AND case_id = ?",
+          args: [
+            JSON.stringify({
+              status: current.status,
+              triage: current.triage,
+              policyMatches: current.policyMatches,
+              orderLookup: current.orderLookup,
+              subscriptionLookup: current.subscriptionLookup,
+              refundHistory: current.refundHistory,
+              draft: current.draft,
+              approval: current.approval,
+              refundResult: current.refundResult,
+              finalResponse: current.finalResponse,
+              escalationReason: current.escalationReason,
+              workflowRunId: current.workflowRunId,
+            }),
+            now(),
+            activeTurnId,
+            input.caseId,
+          ],
+        });
+      }
+      const resetProjection = invalidatesApproval || terminal;
       const updated: SupportCase = {
         ...current,
         messages: current.messages.some(
@@ -732,9 +857,24 @@ export class CaseStore {
           : [...current.messages, input.message],
         // A pending turn never takes ownership away from a running dispatch.
         // The scheduler activates it only after the prior turn is terminal.
-        status: invalidatesApproval || terminal ? "new" : current.status,
-        approval: invalidatesApproval ? undefined : current.approval,
-        workflowRunId: current.workflowRunId,
+        status: resetProjection ? "new" : current.status,
+        triage: resetProjection ? undefined : current.triage,
+        policyMatches: resetProjection ? undefined : current.policyMatches,
+        orderLookup: resetProjection ? undefined : current.orderLookup,
+        subscriptionLookup: resetProjection
+          ? undefined
+          : current.subscriptionLookup,
+        refundHistory: resetProjection ? undefined : current.refundHistory,
+        draft: resetProjection ? undefined : current.draft,
+        approval: resetProjection ? undefined : current.approval,
+        refundResult: resetProjection ? undefined : current.refundResult,
+        finalResponse: resetProjection ? undefined : current.finalResponse,
+        escalationReason: resetProjection
+          ? undefined
+          : current.escalationReason,
+        workflowRunId: resetProjection ? undefined : current.workflowRunId,
+        traceId: resetProjection ? undefined : current.traceId,
+        agentUsage: resetProjection ? undefined : current.agentUsage,
         updatedAt: now(),
         metadata: {
           ...current.metadata,
@@ -742,10 +882,18 @@ export class CaseStore {
             ? now()
             : current.metadata.pendingApprovalInvalidatedAt,
           pendingTurnId: turnId,
+          ...(resetProjection
+            ? {
+                activeTurnId: undefined,
+                refundCommand: undefined,
+                nativeApproval: undefined,
+                refundEffects: undefined,
+              }
+            : {}),
         },
       };
       await tx.execute({
-        sql: "INSERT INTO support_turns(id, case_id, event_id, sequence, state, created_at, updated_at, run_id) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
+        sql: "INSERT INTO support_turns(id, case_id, event_id, sequence, state, created_at, updated_at, run_id, message_data) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
         args: [
           turnId,
           input.caseId,
@@ -754,6 +902,7 @@ export class CaseStore {
           now(),
           now(),
           input.runId,
+          JSON.stringify(input.message),
         ],
       });
       const binding = this.binding(current);
@@ -920,9 +1069,20 @@ export class CaseStore {
           now(),
         ],
       });
+      const initialMessage = persisted.messages.at(-1);
+      if (!initialMessage)
+        throw new Error("Inbound support case requires a customer message.");
       await tx.execute({
-        sql: "INSERT INTO support_turns(id, case_id, event_id, sequence, state, created_at, updated_at, run_id) VALUES (?, ?, ?, 1, 'pending', ?, ?, ?)",
-        args: [initialTurnId, persisted.id, eventId, now(), now(), runId],
+        sql: "INSERT INTO support_turns(id, case_id, event_id, sequence, state, created_at, updated_at, run_id, message_data) VALUES (?, ?, ?, 1, 'pending', ?, ?, ?, ?)",
+        args: [
+          initialTurnId,
+          persisted.id,
+          eventId,
+          now(),
+          now(),
+          runId,
+          JSON.stringify(initialMessage),
+        ],
       });
       await tx.execute({
         sql: "INSERT INTO support_dispatch(id, case_id, turn_id, run_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
@@ -964,6 +1124,7 @@ export class CaseStore {
    * mismatched finalization instead of creating another customer reply. */
   async finalizeCaseAndEnqueue(input: {
     caseId: string;
+    turnId: string;
     status: "resolved" | "escalated";
     finalResponse: string;
     escalationReason?: string;
@@ -980,6 +1141,51 @@ export class CaseStore {
       const row = rowResult.rows[0];
       if (!row) throw new Error(`Support case not found: ${input.caseId}`);
       const current = parse(row as Record<string, unknown>);
+      if (
+        (current.metadata as Record<string, unknown>).activeTurnId !==
+        input.turnId
+      )
+        throw new StaleCaseWriteError(input.caseId);
+      const lease = activeDispatchLeaseScope();
+      if (lease) {
+        if (lease.caseId !== input.caseId || lease.turnId !== input.turnId)
+          throw new Error(
+            "Workflow dispatch scope cannot finalize another turn.",
+          );
+        const owned = await tx.execute({
+          sql: "SELECT id FROM support_dispatch WHERE id = ? AND case_id = ? AND turn_id = ? AND lease_token = ? AND state IN ('claimed', 'started') AND lease_until > ?",
+          args: [
+            lease.dispatchId,
+            lease.caseId,
+            lease.turnId,
+            lease.leaseToken,
+            now(),
+          ],
+        });
+        if (!owned.rows[0])
+          throw new StaleCaseWriteError(
+            `Dispatch lease is no longer current for ${input.caseId}.`,
+          );
+      }
+      const priorOutcome = await tx.execute({
+        sql: "SELECT outcome_data FROM support_turns WHERE id = ? AND case_id = ?",
+        args: [input.turnId, input.caseId],
+      });
+      if (priorOutcome.rows[0]?.outcome_data) {
+        const outcome = JSON.parse(
+          String(priorOutcome.rows[0].outcome_data),
+        ) as {
+          finalResponse?: string;
+          status?: string;
+        };
+        if (
+          outcome.finalResponse !== input.finalResponse ||
+          outcome.status !== input.status
+        )
+          throw new Error(
+            "Conflicting replay attempted to finalize a support turn.",
+          );
+      }
       if (
         current.finalResponse !== undefined &&
         (current.finalResponse !== input.finalResponse ||
@@ -1019,6 +1225,23 @@ export class CaseStore {
           input.caseId,
           JSON.stringify(input.message),
           input.message.createdAt,
+        ],
+      });
+      await tx.execute({
+        sql: "UPDATE support_turns SET state = ?, outcome_data = COALESCE(outcome_data, ?), updated_at = ? WHERE id = ? AND case_id = ?",
+        args: [
+          input.status,
+          JSON.stringify({
+            status: input.status,
+            finalResponse: input.finalResponse,
+            escalationReason: input.escalationReason,
+            approval: updated.approval,
+            refundResult: updated.refundResult,
+            draft: updated.draft,
+          }),
+          now(),
+          input.turnId,
+          input.caseId,
         ],
       });
       const prior = await tx.execute({
@@ -1114,14 +1337,14 @@ export class CaseStore {
     }
     const leaseUntil = new Date(Date.now() + 30_000).toISOString();
     const rows = await this.client.execute({
-      sql: "SELECT * FROM support_dispatch AS candidate WHERE (state = 'pending' OR (state IN ('claimed', 'started') AND lease_until < ?)) AND attempts < 3 AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS earlier WHERE earlier.case_id = candidate.case_id AND earlier.state = 'pending' AND (earlier.created_at < candidate.created_at OR (earlier.created_at = candidate.created_at AND earlier.id < candidate.id))) ORDER BY created_at, id LIMIT ?",
+      sql: "SELECT candidate.* FROM support_dispatch AS candidate JOIN support_turns AS candidate_turn ON candidate_turn.id = candidate.turn_id WHERE (candidate.state = 'pending' OR (candidate.state IN ('claimed', 'started') AND candidate.lease_until < ?)) AND candidate.attempts < 3 AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS earlier JOIN support_turns AS earlier_turn ON earlier_turn.id = earlier.turn_id WHERE earlier.case_id = candidate.case_id AND earlier.state = 'pending' AND earlier_turn.sequence < candidate_turn.sequence) ORDER BY candidate.created_at, candidate_turn.sequence, candidate.id LIMIT ?",
       args: [claimedAt, limit],
     });
     const claimed: DispatchRecord[] = [];
     for (const row of rows.rows) {
       const leaseToken = crypto.randomUUID();
       const update = await this.client.execute({
-        sql: "UPDATE support_dispatch SET state = 'claimed', attempts = attempts + 1, lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND (state = 'pending' OR (state IN ('claimed', 'started') AND lease_until < ?))",
+        sql: "UPDATE support_dispatch AS candidate SET state = 'claimed', attempts = attempts + 1, lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND (state = 'pending' OR (state IN ('claimed', 'started') AND lease_until < ?)) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS earlier JOIN support_turns AS earlier_turn ON earlier_turn.id = earlier.turn_id JOIN support_turns AS candidate_turn ON candidate_turn.id = candidate.turn_id WHERE earlier.case_id = candidate.case_id AND earlier.state = 'pending' AND earlier_turn.sequence < candidate_turn.sequence)",
         args: [leaseUntil, leaseToken, claimedAt, String(row.id), claimedAt],
       });
       if (Number(update.rowsAffected) === 1)
@@ -1141,16 +1364,34 @@ export class CaseStore {
   }
   async renewDispatchLease(id: string, leaseToken: string) {
     await this.ensured();
+    const checkedAt = now();
     const updated = await this.client.execute({
-      sql: "UPDATE support_dispatch SET lease_until = ?, updated_at = ? WHERE id = ? AND lease_token = ? AND state IN ('claimed', 'started')",
+      // Never let an old worker resurrect a lease after another worker can
+      // legally reclaim it.  Renewal is a heartbeat, not a new claim.
+      sql: "UPDATE support_dispatch SET lease_until = ?, updated_at = ? WHERE id = ? AND lease_token = ? AND state IN ('claimed', 'started') AND lease_until > ?",
       args: [
         new Date(Date.now() + 30_000).toISOString(),
-        now(),
+        checkedAt,
         id,
         leaseToken,
+        checkedAt,
       ],
     });
     return Number(updated.rowsAffected) === 1;
+  }
+  async hasDispatchLease(scope: DispatchLeaseScope) {
+    await this.ensured();
+    const result = await this.client.execute({
+      sql: "SELECT id FROM support_dispatch WHERE id = ? AND case_id = ? AND turn_id = ? AND lease_token = ? AND state IN ('claimed', 'started') AND lease_until > ?",
+      args: [
+        scope.dispatchId,
+        scope.caseId,
+        scope.turnId,
+        scope.leaseToken,
+        now(),
+      ],
+    });
+    return Boolean(result.rows[0]);
   }
   async completeDispatch(
     id: string,
@@ -1158,16 +1399,32 @@ export class CaseStore {
     error?: unknown,
     leaseToken?: string,
   ) {
-    await this.client.execute({
-      sql: `UPDATE support_dispatch SET state = ?, lease_until = NULL, lease_token = NULL, last_error = ?, updated_at = ? WHERE id = ?${leaseToken ? " AND lease_token = ?" : ""}`,
-      args: leaseToken
-        ? [state, error ? String(error) : null, now(), id, leaseToken]
-        : [state, error ? String(error) : null, now(), id],
-    });
-    await this.client.execute({
-      sql: "UPDATE support_turns SET state = ?, updated_at = ? WHERE id = (SELECT turn_id FROM support_dispatch WHERE id = ?)",
-      args: [state, now(), id],
-    });
+    await this.ensured();
+    const tx = await this.client.transaction("write");
+    try {
+      const transitioned = await tx.execute({
+        sql: `UPDATE support_dispatch SET state = ?, lease_until = NULL, lease_token = NULL, last_error = ?, updated_at = ? WHERE id = ?${leaseToken ? " AND lease_token = ?" : ""}`,
+        args: leaseToken
+          ? [state, error ? String(error) : null, now(), id, leaseToken]
+          : [state, error ? String(error) : null, now(), id],
+      });
+      // A stale worker must never overwrite the newer worker's turn outcome.
+      if (Number(transitioned.rowsAffected) !== 1) {
+        await tx.rollback();
+        return false;
+      }
+      await tx.execute({
+        sql: "UPDATE support_turns SET state = ?, updated_at = ? WHERE id = (SELECT turn_id FROM support_dispatch WHERE id = ?)",
+        args: [state, now(), id],
+      });
+      await tx.commit();
+      return true;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
   }
   /** Atomically project a fenced workflow failure to its dispatch and public
    * case.  Callers must not write the case first: a lease can change between
@@ -1236,10 +1493,120 @@ export class CaseStore {
       args: [now(), dispatchId],
     });
   }
-  async turns(caseId: string) {
+  /** The turn claim, public active projection, and started state change as one
+   * transaction. A queued turn can never inherit a prior turn's identity. */
+  async activateDispatch(dispatch: DispatchRecord) {
+    if (!dispatch.leaseToken) return false;
+    await this.ensured();
+    const tx = await this.client.transaction("write");
+    try {
+      const started = await tx.execute({
+        sql: "UPDATE support_dispatch SET state = 'started', updated_at = ? WHERE id = ? AND case_id = ? AND turn_id = ? AND state = 'claimed' AND lease_token = ?",
+        args: [
+          now(),
+          dispatch.id,
+          dispatch.caseId,
+          dispatch.turnId,
+          dispatch.leaseToken,
+        ],
+      });
+      if (Number(started.rowsAffected) !== 1) {
+        await tx.rollback();
+        return false;
+      }
+      const row = await tx.execute({
+        sql: "SELECT data, version FROM support_cases WHERE id = ?",
+        args: [dispatch.caseId],
+      });
+      if (!row.rows[0])
+        throw new Error(`Support case not found: ${dispatch.caseId}`);
+      const current = parse(row.rows[0] as Record<string, unknown>);
+      const previousTurnId = (current.metadata as Record<string, unknown>)
+        .activeTurnId;
+      const switchesTurn = previousTurnId !== dispatch.turnId;
+      if (switchesTurn && typeof previousTurnId === "string")
+        await tx.execute({
+          sql: "UPDATE support_turns SET outcome_data = COALESCE(outcome_data, ?), updated_at = ? WHERE id = ? AND case_id = ?",
+          args: [
+            JSON.stringify({
+              status: current.status,
+              triage: current.triage,
+              policyMatches: current.policyMatches,
+              orderLookup: current.orderLookup,
+              subscriptionLookup: current.subscriptionLookup,
+              refundHistory: current.refundHistory,
+              draft: current.draft,
+              approval: current.approval,
+              refundResult: current.refundResult,
+              finalResponse: current.finalResponse,
+              escalationReason: current.escalationReason,
+              workflowRunId: current.workflowRunId,
+            }),
+            now(),
+            previousTurnId,
+            dispatch.caseId,
+          ],
+        });
+      const updated = this.withBindings({
+        ...current,
+        status: "processing",
+        triage: switchesTurn ? undefined : current.triage,
+        policyMatches: switchesTurn ? undefined : current.policyMatches,
+        orderLookup: switchesTurn ? undefined : current.orderLookup,
+        subscriptionLookup: switchesTurn
+          ? undefined
+          : current.subscriptionLookup,
+        refundHistory: switchesTurn ? undefined : current.refundHistory,
+        draft: switchesTurn ? undefined : current.draft,
+        approval: switchesTurn ? undefined : current.approval,
+        refundResult: switchesTurn ? undefined : current.refundResult,
+        finalResponse: switchesTurn ? undefined : current.finalResponse,
+        escalationReason: switchesTurn ? undefined : current.escalationReason,
+        traceId: switchesTurn ? undefined : current.traceId,
+        agentUsage: switchesTurn ? undefined : current.agentUsage,
+        workflowRunId: dispatch.runId,
+        metadata: {
+          ...current.metadata,
+          activeTurnId: dispatch.turnId,
+          pendingTurnId: undefined,
+          ...(switchesTurn
+            ? {
+                refundCommand: undefined,
+                nativeApproval: undefined,
+                refundEffects: undefined,
+              }
+            : {}),
+        },
+        updatedAt: now(),
+      });
+      const written = await tx.execute({
+        sql: "UPDATE support_cases SET data = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+        args: [
+          JSON.stringify(updated),
+          updated.updatedAt,
+          dispatch.caseId,
+          Number(row.rows[0].version ?? 1),
+        ],
+      });
+      if (Number(written.rowsAffected) !== 1)
+        throw new StaleCaseWriteError(dispatch.caseId);
+      await tx.execute({
+        sql: "UPDATE support_turns SET state = 'processing', updated_at = ? WHERE id = ? AND case_id = ?",
+        args: [now(), dispatch.turnId, dispatch.caseId],
+      });
+      await tx.commit();
+      return true;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
+  async turns(caseId: string): Promise<SupportTurnRecord[]> {
     await this.ensured();
     const rows = await this.client.execute({
-      sql: "SELECT id, event_id, sequence, state, run_id, command_fingerprint FROM support_turns WHERE case_id = ? ORDER BY sequence",
+      sql: "SELECT id, event_id, sequence, state, run_id, command_fingerprint, message_data, outcome_data FROM support_turns WHERE case_id = ? ORDER BY sequence",
       args: [caseId],
     });
     return rows.rows.map((row) => ({
@@ -1251,13 +1618,25 @@ export class CaseStore {
       commandFingerprint: row.command_fingerprint
         ? String(row.command_fingerprint)
         : undefined,
+      message: row.message_data
+        ? (JSON.parse(String(row.message_data)) as CaseMessage)
+        : undefined,
+      outcome: row.outcome_data
+        ? (JSON.parse(String(row.outcome_data)) as Record<string, unknown>)
+        : undefined,
     }));
+  }
+  async turn(
+    caseId: string,
+    turnId: string,
+  ): Promise<SupportTurnRecord | undefined> {
+    return (await this.turns(caseId)).find((turn) => turn.id === turnId);
   }
   async bindTurnCommand(caseId: string, turnId: string, fingerprint: string) {
     await this.ensured();
     const changed = await this.client.execute({
-      sql: "UPDATE support_turns SET command_fingerprint = ?, updated_at = ? WHERE id = ? AND case_id = ? AND command_fingerprint IS NULL",
-      args: [fingerprint, now(), turnId, caseId],
+      sql: "UPDATE support_turns SET command_fingerprint = ?, updated_at = ? WHERE id = ? AND case_id = ? AND (command_fingerprint IS NULL OR command_fingerprint = ?)",
+      args: [fingerprint, now(), turnId, caseId, fingerprint],
     });
     if (Number(changed.rowsAffected) !== 1)
       throw new Error("Turn command is missing, already bound, or changed.");
@@ -1271,13 +1650,13 @@ export class CaseStore {
     const claimedAt = now();
     const leaseUntil = new Date(Date.now() + 30_000).toISOString();
     const row = await this.client.execute({
-      sql: "SELECT * FROM support_dispatch AS candidate WHERE case_id = ? AND state = 'pending' AND (? IS NULL OR run_id = ?) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) ORDER BY created_at LIMIT 1",
+      sql: "SELECT candidate.* FROM support_dispatch AS candidate JOIN support_turns AS candidate_turn ON candidate_turn.id = candidate.turn_id WHERE candidate.case_id = ? AND candidate.state = 'pending' AND (? IS NULL OR candidate.run_id = ?) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) ORDER BY candidate_turn.sequence LIMIT 1",
       args: [caseId, runId ?? null, runId ?? null],
     });
     if (!row.rows[0]) return undefined;
     const leaseToken = crypto.randomUUID();
     const update = await this.client.execute({
-      sql: "UPDATE support_dispatch SET state = 'claimed', attempts = attempts + 1, lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND state = 'pending'",
+      sql: "UPDATE support_dispatch AS candidate SET state = 'claimed', attempts = attempts + 1, lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND state = 'pending' AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS earlier JOIN support_turns AS earlier_turn ON earlier_turn.id = earlier.turn_id JOIN support_turns AS candidate_turn ON candidate_turn.id = candidate.turn_id WHERE earlier.case_id = candidate.case_id AND earlier.state = 'pending' AND earlier_turn.sequence < candidate_turn.sequence)",
       args: [leaseUntil, leaseToken, claimedAt, String(row.rows[0].id)],
     });
     if (Number(update.rowsAffected) !== 1) return undefined;
@@ -1788,13 +2167,25 @@ export class CaseStore {
     let casesRedacted = 0;
     let tracesRedacted = 0;
     let messagesDeleted = 0;
+    let turnsRedacted = 0;
+    let outboxRecordsRedacted = 0;
+    let dispatchesExpired = 0;
+    let decisionsRedacted = 0;
+    let actionsRedacted = 0;
+    let auditPayloadsRedacted = 0;
+    let financialReasonsRedacted = 0;
     let pendingCasesExpired = 0;
+    const expiredCaseIds = new Set<string>();
     const expiredWorkflowRunIds = new Set<string>();
     for (const row of rows.rows) {
       const id = String(row.id);
       const supportCase = parse(row as Record<string, unknown>);
       const createdAt = String(row.created_at);
       const metadata = { ...supportCase.metadata };
+      // A prior supported-storage delete may have failed after this durable
+      // tombstone committed. Keep the case association in later sweeps so
+      // snapshot cleanup is retryable without retaining a content copy forever.
+      if (metadata.retentionRedactedAt !== undefined) expiredCaseIds.add(id);
       let changed = false;
       let deleteMessages = false;
       if (createdAt < rawCutoff && "rawPayload" in metadata) {
@@ -1867,13 +2258,30 @@ export class CaseStore {
         };
         if (wasPending) pendingCasesExpired += 1;
         casesRedacted += 1;
+        expiredCaseIds.add(id);
         if (supportCase.workflowRunId)
           expiredWorkflowRunIds.add(supportCase.workflowRunId);
+        const nativeApproval = metadata.nativeApproval as
+          { runId?: unknown } | undefined;
+        if (typeof nativeApproval?.runId === "string")
+          expiredWorkflowRunIds.add(nativeApproval.runId);
         const dispatchedRuns = await this.client.execute({
           sql: "SELECT run_id FROM support_dispatch WHERE case_id = ?",
           args: [id],
         });
         for (const run of dispatchedRuns.rows)
+          expiredWorkflowRunIds.add(String(run.run_id));
+        const nativeRuns = await this.client.execute({
+          sql: "SELECT native_run_id FROM support_decisions WHERE case_id = ? AND native_run_id IS NOT NULL",
+          args: [id],
+        });
+        for (const run of nativeRuns.rows)
+          expiredWorkflowRunIds.add(String(run.native_run_id));
+        const turnRuns = await this.client.execute({
+          sql: "SELECT run_id FROM support_turns WHERE case_id = ? AND run_id IS NOT NULL",
+          args: [id],
+        });
+        for (const run of turnRuns.rows)
           expiredWorkflowRunIds.add(String(run.run_id));
         deleteMessages = true;
         changed = true;
@@ -1898,6 +2306,33 @@ export class CaseStore {
               args: [id],
             });
             messagesDeleted += Number(deleted.rowsAffected ?? 0);
+            const turns = await tx.execute({
+              sql: "UPDATE support_turns SET message_data = NULL, outcome_data = NULL, updated_at = ? WHERE case_id = ? AND (message_data IS NOT NULL OR outcome_data IS NOT NULL)",
+              args: [current.toISOString(), id],
+            });
+            turnsRedacted += Number(turns.rowsAffected ?? 0);
+            // Expire in-flight authority before removing its native snapshot.
+            // The retained row remains a non-executable audit/replay reference.
+            const dispatches = await tx.execute({
+              sql: "UPDATE support_dispatch SET state = CASE WHEN state IN ('pending', 'claimed', 'started', 'suspended') THEN 'failed' ELSE state END, lease_until = NULL, lease_token = NULL, last_error = NULL, updated_at = ? WHERE case_id = ?",
+              args: [current.toISOString(), id],
+            });
+            dispatchesExpired += Number(dispatches.rowsAffected ?? 0);
+            const outbox = await tx.execute({
+              sql: "UPDATE support_outbox SET body = '[redacted]', receipt = NULL, last_error = NULL, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE case_id = ? AND (body <> '[redacted]' OR receipt IS NOT NULL OR last_error IS NOT NULL)",
+              args: [current.toISOString(), id],
+            });
+            outboxRecordsRedacted += Number(outbox.rowsAffected ?? 0);
+            const decisions = await tx.execute({
+              sql: "UPDATE support_decisions SET note = NULL WHERE case_id = ? AND note IS NOT NULL",
+              args: [id],
+            });
+            decisionsRedacted += Number(decisions.rowsAffected ?? 0);
+            const actions = await tx.execute({
+              sql: "UPDATE support_actions SET data = '{}' WHERE case_id = ? AND data <> '{}'",
+              args: [id],
+            });
+            actionsRedacted += Number(actions.rowsAffected ?? 0);
           }
           await tx.commit();
         } catch (error) {
@@ -1912,17 +2347,38 @@ export class CaseStore {
       sql: "DELETE FROM support_audit WHERE created_at < ?",
       args: [auditCutoff],
     });
+    // LocalRuntime owns the financial table and may not be initialized in a
+    // storage-only invocation. If it exists, its freeform reason follows the
+    // case-content window while the immutable financial identifiers remain.
+    try {
+      const financialReasons = await this.client.execute({
+        sql: "UPDATE local_refunds SET reason = '[redacted]' WHERE issued_at < ? AND reason <> '[redacted]'",
+        args: [caseCutoff],
+      });
+      financialReasonsRedacted += Number(financialReasons.rowsAffected ?? 0);
+    } catch (error) {
+      if (!String(error).includes("no such table")) throw error;
+    }
     return {
       rawPayloadsRedacted,
       casesRedacted,
       tracesRedacted,
       auditsDeleted: Number(audits.rowsAffected ?? 0),
       messagesDeleted,
+      turnsRedacted,
+      outboxRecordsRedacted,
+      dispatchesExpired,
+      decisionsRedacted,
+      actionsRedacted,
+      auditPayloadsRedacted,
+      financialReasonsRedacted,
       // Mastra owns its tables. The configured LibSQLStore retention policy
       // removes its messages, resources, threads, and spans via storage.prune.
       mastraMessagesDeleted: 0,
       mastraSpansDeleted: 0,
       pendingCasesExpired,
+      rawWorkflowSnapshotBefore: rawCutoff,
+      expiredCaseIds: [...expiredCaseIds],
       expiredWorkflowRunIds: [...expiredWorkflowRunIds],
     };
   }

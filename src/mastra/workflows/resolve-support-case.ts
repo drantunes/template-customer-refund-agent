@@ -1,11 +1,12 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import { caseStore } from "../lib/case-store";
+import { withTrustedCommerceScope } from "../lib/trusted-run-scope";
 import {
   draftResolutionSchema,
   orderLookupSchema,
   refundHistorySchema,
-  resourceIdForCase,
+  resourceIdForOwner,
   subscriptionLookupSchema,
   threadIdForCase,
   triageResultSchema,
@@ -28,12 +29,22 @@ import {
   resolveConfiguredBinding,
 } from "../providers/registry";
 
-const caseIdSchema = z.object({ caseId: z.string() });
+const caseIdSchema = z.object({ caseId: z.string(), turnId: z.string() });
 
-async function getCaseOrThrow(caseId: string) {
+async function getCaseOrThrow(caseId: string, turnId: string) {
   const supportCase = await caseStore.get(caseId);
   if (!supportCase) throw new Error(`Support case not found: ${caseId}`);
-  return supportCase;
+  if ((supportCase.metadata as Record<string, unknown>).activeTurnId !== turnId)
+    throw new Error(
+      "Workflow turn is no longer the active durable projection.",
+    );
+  const turn = await caseStore.turn(caseId, turnId);
+  if (!turn?.message)
+    throw new Error("Workflow turn is missing its immutable customer message.");
+  const ownerId = (supportCase.metadata as Record<string, unknown>).ownerId;
+  if (typeof ownerId !== "string" || !ownerId)
+    throw new Error("Workflow case has no verified owner binding.");
+  return { supportCase, turn, ownerId };
 }
 
 const classifyStep = createStep({
@@ -42,8 +53,11 @@ const classifyStep = createStep({
   inputSchema: caseIdSchema,
   outputSchema: caseIdSchema,
   execute: async ({ inputData, mastra, requestContext, tracingContext }) => {
-    const supportCase = await getCaseOrThrow(inputData.caseId);
-    const latestMessage = supportCase.messages[supportCase.messages.length - 1];
+    const { supportCase, turn, ownerId } = await getCaseOrThrow(
+      inputData.caseId,
+      inputData.turnId,
+    );
+    const latestMessage = turn.message!;
     if (!mastra)
       throw new Error(
         "The resolve workflow must run through a registered Mastra instance.",
@@ -70,8 +84,8 @@ const classifyStep = createStep({
             supportCase.id,
             bindingsForPersistedCase(supportCase).support.tenantId,
           ),
-          resource: resourceIdForCase(
-            supportCase.id,
+          resource: resourceIdForOwner(
+            ownerId,
             bindingsForPersistedCase(supportCase).support.tenantId,
           ),
         },
@@ -91,7 +105,7 @@ const classifyStep = createStep({
           ?.modelId,
       },
     });
-    return { caseId: supportCase.id };
+    return { caseId: supportCase.id, turnId: inputData.turnId };
   },
 });
 
@@ -102,9 +116,12 @@ const retrievePolicyStep = createStep({
   inputSchema: caseIdSchema,
   outputSchema: caseIdSchema,
   execute: async ({ inputData, mastra, requestContext, tracingContext }) => {
-    const supportCase = await getCaseOrThrow(inputData.caseId);
+    const { supportCase, turn } = await getCaseOrThrow(
+      inputData.caseId,
+      inputData.turnId,
+    );
     const bindings = bindingsForPersistedCase(supportCase);
-    const latestMessage = supportCase.messages[supportCase.messages.length - 1];
+    const latestMessage = turn.message!;
     const queryText =
       `${supportCase.triage?.intent ?? ""} ${supportCase.subject} ${latestMessage.body}`.trim();
     if (!mastra)
@@ -146,7 +163,7 @@ const retrievePolicyStep = createStep({
     }));
 
     await caseStore.update(supportCase.id, { policyMatches });
-    return { caseId: supportCase.id };
+    return { caseId: supportCase.id, turnId: inputData.turnId };
   },
 });
 
@@ -157,7 +174,10 @@ const inspectOrderStep = createStep({
   inputSchema: caseIdSchema,
   outputSchema: caseIdSchema,
   execute: async ({ inputData, mastra, requestContext, tracingContext }) => {
-    const supportCase = await getCaseOrThrow(inputData.caseId);
+    const { supportCase, ownerId } = await getCaseOrThrow(
+      inputData.caseId,
+      inputData.turnId,
+    );
     const bindings = bindingsForPersistedCase(supportCase);
     if (!mastra)
       throw new Error(
@@ -175,45 +195,57 @@ const inspectOrderStep = createStep({
         "A registered commerce lookup tool has no execute function.",
       );
     }
+    const executeOrder = orderTool.execute;
+    const executeSubscription = subscriptionTool.execute;
+    const executeRefundHistory = refundHistoryTool.execute;
 
-    const orderLookup = orderLookupSchema.parse(
-      await orderTool.execute(
-        {
-          customerEmail: supportCase.customer.email,
-          binding: resolveConfiguredBinding(bindings.commerce),
-        },
-        { mastra, requestContext, tracingContext },
-      ),
-    );
-
-    const subscriptionLookup = subscriptionLookupSchema.parse(
-      await subscriptionTool.execute(
-        {
-          customerEmail: supportCase.customer.email,
-          binding: resolveConfiguredBinding(bindings.commerce),
-        },
-        { mastra, requestContext, tracingContext },
-      ),
-    );
-
-    const refundHistory = orderLookup.found
-      ? refundHistorySchema.parse(
-          await refundHistoryTool.execute(
+    return withTrustedCommerceScope(
+      {
+        caseId: supportCase.id,
+        ownerId,
+        tenantId: bindings.commerce.tenantId,
+      },
+      async () => {
+        const orderLookup = orderLookupSchema.parse(
+          await executeOrder(
             {
-              orderId: orderLookup.order?.orderId ?? "",
+              customerEmail: supportCase.customer.email,
               binding: resolveConfiguredBinding(bindings.commerce),
             },
             { mastra, requestContext, tracingContext },
           ),
-        )
-      : { refunds: [] };
+        );
 
-    await caseStore.update(supportCase.id, {
-      orderLookup,
-      subscriptionLookup,
-      refundHistory,
-    });
-    return { caseId: supportCase.id };
+        const subscriptionLookup = subscriptionLookupSchema.parse(
+          await executeSubscription(
+            {
+              customerEmail: supportCase.customer.email,
+              binding: resolveConfiguredBinding(bindings.commerce),
+            },
+            { mastra, requestContext, tracingContext },
+          ),
+        );
+
+        const refundHistory = orderLookup.found
+          ? refundHistorySchema.parse(
+              await executeRefundHistory(
+                {
+                  orderId: orderLookup.order?.orderId ?? "",
+                  binding: resolveConfiguredBinding(bindings.commerce),
+                },
+                { mastra, requestContext, tracingContext },
+              ),
+            )
+          : { refunds: [] };
+
+        await caseStore.update(supportCase.id, {
+          orderLookup,
+          subscriptionLookup,
+          refundHistory,
+        });
+        return { caseId: supportCase.id, turnId: inputData.turnId };
+      },
+    );
   },
 });
 
@@ -224,8 +256,11 @@ const draftResponseStep = createStep({
   inputSchema: caseIdSchema,
   outputSchema: caseIdSchema,
   execute: async ({ inputData, mastra, requestContext, tracingContext }) => {
-    const supportCase = await getCaseOrThrow(inputData.caseId);
-    const latestMessage = supportCase.messages[supportCase.messages.length - 1];
+    const { supportCase, turn, ownerId } = await getCaseOrThrow(
+      inputData.caseId,
+      inputData.turnId,
+    );
+    const latestMessage = turn.message!;
     if (!mastra)
       throw new Error(
         "The resolve workflow must run through a registered Mastra instance.",
@@ -256,8 +291,8 @@ const draftResponseStep = createStep({
             supportCase.id,
             bindingsForPersistedCase(supportCase).support.tenantId,
           ),
-          resource: resourceIdForCase(
-            supportCase.id,
+          resource: resourceIdForOwner(
+            ownerId,
             bindingsForPersistedCase(supportCase).support.tenantId,
           ),
         },
@@ -281,13 +316,14 @@ const draftResponseStep = createStep({
           existingUsage?.model,
       },
     });
-    return { caseId: supportCase.id };
+    return { caseId: supportCase.id, turnId: inputData.turnId };
   },
 });
 
 const approvalInputSchema = caseIdSchema;
 const approvalOutputSchema = z.object({
   caseId: z.string(),
+  turnId: z.string(),
   approved: z.boolean(),
   approverId: z.string().optional(),
   note: z.string().optional(),
@@ -307,7 +343,10 @@ const persistedRefundCommandSchema = z.object({
  * before Mastra persisted the downstream step.  The restarted checkpoint has
  * no resumeData, so recover only an already durable decision.  Approval is
  * tied to the immutable action row, never just mutable case metadata. */
-async function recoveredApprovalDecision(supportCase: SupportCase) {
+async function recoveredApprovalDecision(
+  supportCase: SupportCase,
+  turnId: string,
+) {
   const decision = supportCase.approval;
   if (!decision) return undefined;
   if (!decision.approverId)
@@ -351,6 +390,7 @@ async function recoveredApprovalDecision(supportCase: SupportCase) {
   }
   return {
     caseId: supportCase.id,
+    turnId,
     approved: decision.approved,
     approverId: decision.approverId,
     note: decision.note,
@@ -384,22 +424,52 @@ const requestApprovalStep = createStep({
     requestContext,
     tracingContext,
   }) => {
-    const supportCase = await getCaseOrThrow(inputData.caseId);
+    const { supportCase } = await getCaseOrThrow(
+      inputData.caseId,
+      inputData.turnId,
+    );
     const bindings = bindingsForPersistedCase(supportCase);
     const draft = supportCase.draft;
 
     if (!draft?.recommendRefund) {
-      return { caseId: supportCase.id, approved: false };
+      return {
+        caseId: supportCase.id,
+        turnId: inputData.turnId,
+        approved: false,
+      };
+    }
+
+    // Do not create an executable native command for a recommendation which
+    // local policy already requires a human escalation to handle.  The same
+    // rule is repeated by LocalRuntime in its provider write transaction.
+    if (
+      draft.requiresEscalation ||
+      (draft.refundAmount ?? 0) > MAX_AUTO_APPROVABLE_REFUND
+    ) {
+      if (!draft.requiresEscalation)
+        await caseStore.update(supportCase.id, {
+          draft: {
+            ...draft,
+            requiresEscalation: true,
+            escalationReason: `Refund amount ${draft.refundAmount} exceeds the ${MAX_AUTO_APPROVABLE_REFUND} auto-approvable limit and needs manual handling.`,
+          },
+        });
+      return {
+        caseId: supportCase.id,
+        turnId: inputData.turnId,
+        approved: false,
+      };
     }
 
     if (!resumeData) {
-      const recovered = await recoveredApprovalDecision(supportCase);
+      const recovered = await recoveredApprovalDecision(
+        supportCase,
+        inputData.turnId,
+      );
       if (recovered) return recovered;
       const amount = draft.refundAmount ?? 0;
       const currency = draft.refundCurrency ?? "USD";
-      const turnId =
-        ((supportCase.metadata as Record<string, unknown>).activeTurnId as
-          string | undefined) ?? `legacy:${supportCase.id}`;
+      const turnId = inputData.turnId;
       const command = {
         approvalCaseId: supportCase.id,
         orderId: supportCase.orderLookup?.order?.orderId ?? "",
@@ -548,6 +618,7 @@ const requestApprovalStep = createStep({
 
     return {
       caseId: supportCase.id,
+      turnId: inputData.turnId,
       approved: persisted.approved,
       approverId: persisted.approverId,
       note: persisted.note,
@@ -562,10 +633,14 @@ const resolveCaseStep = createStep({
   inputSchema: approvalOutputSchema,
   outputSchema: z.object({
     caseId: z.string(),
+    turnId: z.string(),
     status: z.enum(["resolved", "escalated"]),
   }),
   execute: async ({ inputData, mastra }) => {
-    const supportCase = await getCaseOrThrow(inputData.caseId);
+    const { supportCase } = await getCaseOrThrow(
+      inputData.caseId,
+      inputData.turnId,
+    );
     const draft = supportCase.draft!;
     let finalResponse = draft.draftResponse;
     let status: "resolved" | "escalated" = draft.requiresEscalation
@@ -608,7 +683,7 @@ const resolveCaseStep = createStep({
     const message = {
       // Deterministic identities make an active-step replay converge on the
       // already finalized message/outbox pair.
-      id: `msg_${supportCase.id}_final`,
+      id: `msg_${supportCase.id}_${inputData.turnId}_final`,
       author: "agent" as const,
       authorName: "Support Agent",
       body: finalResponse,
@@ -616,12 +691,13 @@ const resolveCaseStep = createStep({
     };
     await persistentCaseStore.finalizeCaseAndEnqueue({
       caseId: supportCase.id,
+      turnId: inputData.turnId,
       status,
       finalResponse,
       escalationReason,
       message,
       outbox: {
-        id: `outbox_${supportCase.id}_final`,
+        id: `outbox_${supportCase.id}_${inputData.turnId}_final`,
         caseId: supportCase.id,
         binding: resolveConfiguredBinding(
           bindingsForPersistedCase(supportCase).support,
@@ -639,7 +715,7 @@ const resolveCaseStep = createStep({
         }),
     );
 
-    return { caseId: supportCase.id, status };
+    return { caseId: supportCase.id, turnId: inputData.turnId, status };
   },
 });
 
@@ -650,6 +726,7 @@ export const resolveSupportCaseWorkflow = createWorkflow({
   inputSchema: caseIdSchema,
   outputSchema: z.object({
     caseId: z.string(),
+    turnId: z.string(),
     status: z.enum(["resolved", "escalated"]),
   }),
 })
