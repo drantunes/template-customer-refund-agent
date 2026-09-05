@@ -7,7 +7,14 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "oxlint",
+    "format:check": "prettier --check . --ignore-path ../.prettierignore",
+    "lint": "oxlint --deny-warnings src",
+    "typecheck": "tsc -b --pretty false",
+    "test:unit": "vitest run --root .. --config vitest.config.ts --project web-unit",
+    "test:integration": "vitest run --root .. --config vitest.config.ts --project web-integration",
+    "test:contract": "vitest run --root .. --config vitest.config.ts --project web-contract",
+    "test:eval": "vitest run --root .. --config vitest.config.ts --project web-eval",
+    "test:e2e": "playwright test --config ../playwright.config.ts",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -32,7 +39,6 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.1.0",
-    "oxlint": "^1.79.0",
     "typescript": "~6.0.2",
     "vite": "^8.2.2"
   }

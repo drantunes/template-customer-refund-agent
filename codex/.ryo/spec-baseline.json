@@ -1,0 +1,32 @@
+{
+  "approval": {
+    "approved_at": "2026-09-05T00:27:16+00:00",
+    "approved_by": "Diego Antunes"
+  },
+  "created_at": "2026-09-05T00:26:31+00:00",
+  "files": {
+    "codex/.ryo/codebase-inventory.md": "55eeaeaee6f9b7d4bbb773f5d93836ca875c428802dea8b944d1c0d157c94801",
+    "codex/.ryo/discovery-approval.json": "ed08de927e029f6813099e9b884d4db60f400316b90071f94204764770a4e22d",
+    "codex/.ryo/gates.json": "32f45e4ff431e7150f782900ee902f1c7770cebbef1462b5b35ba9c1f10bc0af",
+    "codex/.ryo/project.json": "b2a822b73120cfc6f96bd46c8f5aaae752aa617c54f7bef788fe04e25e0255e4",
+    "codex/decision-matrix.md": "d8551accdca85ca4f4256dbcc209a6555b111652358b5d832cba28893e5a2827",
+    "codex/decisions.md": "b6c1d48e18381a47ae63acaaacf11d3c3e7f3e8859b4cf5d92e2ec0e0d92953a",
+    "codex/development-plan.md": "d29ed1ef084d4b8434b2e5ea20f3da01096554926530196e60ecec07f3418115",
+    "codex/project-instructions.md": "60d9ef9211a5de52ba0037cb560bdb5acb16b0c1d7b7d3b3da2b427cc11d8c6f",
+    "codex/proposal.md": "c2f4378816e738521429655524bc9eb55de4ade09aeb63f2fcd1c5199416b7fc",
+    "codex/tech-spec.md": "bbc5645a6d7de395e34bfa17aa8ac15035107f5dc895da5af8491c7c9ef38b35"
+  },
+  "human_approved": true,
+  "schema_version": 1,
+  "status": "APPROVED",
+  "authorized_updates": [
+    {
+      "path": "codex/.ryo/gates.json",
+      "decision_id": "DEC-018",
+      "previous_sha256": "ad506c87cc2ef50d2b95ea278990f37271f82a4539d62bae7405ccc466980c38",
+      "sha256": "32f45e4ff431e7150f782900ee902f1c7770cebbef1462b5b35ba9c1f10bc0af",
+      "reason": "Execute explicitly approved temporary-gate replacement; accepted canonical requirements and original human approval unchanged.",
+      "run_id": "RUN-20260905-002950"
+    }
+  ]
+}

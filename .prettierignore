@@ -1,0 +1,9 @@
+codex/
+.agents/
+node_modules/
+dist/
+.mastra/
+coverage/
+playwright-report/
+test-results/
+package-lock.json

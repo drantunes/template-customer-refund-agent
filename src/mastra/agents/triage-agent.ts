@@ -1,14 +1,15 @@
-import { Agent } from '@mastra/core/agent';
-import { Memory } from '@mastra/memory';
-import { triageResultSchema } from '../domain/support-case';
-import { triageAgentScorers } from '../evals';
+import { Agent } from "@mastra/core/agent";
+import { Memory } from "@mastra/memory";
+import { triageResultSchema } from "../domain/support-case";
+import { triageAgentScorers } from "../evals";
 
 export { triageResultSchema };
 
 export const triageAgent = new Agent({
-  id: 'triage-agent',
-  name: 'Support Triage',
-  description: 'Classifies inbound support messages by intent, urgency, sentiment, and confidence.',
+  id: "triage-agent",
+  name: "Support Triage",
+  description:
+    "Classifies inbound support messages by intent, urgency, sentiment, and confidence.",
   instructions: `You are the triage specialist for a customer support team. You read one inbound customer message and classify it - you never draft a reply and you never look anything up.
 
 ## Your job
@@ -22,7 +23,7 @@ Given a customer's subject and message body, decide:
 - **rationale**: one or two sentences explaining the classification, referencing specific words/phrases from the message.
 
 Never invent details that aren't in the message. If the message is empty or nonsensical, classify intent as 'other' with low confidence and requiresHumanReview true.`,
-  model: 'openai/gpt-5.6-luna',
+  model: "openai/gpt-5.6-luna",
   scorers: triageAgentScorers,
   memory: new Memory({
     options: {

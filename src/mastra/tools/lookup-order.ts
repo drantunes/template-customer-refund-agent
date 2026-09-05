@@ -1,11 +1,11 @@
-import { createTool } from '@mastra/core/tools';
-import { z } from 'zod';
+import { createTool } from "@mastra/core/tools";
+import { z } from "zod";
 import {
   findOrderByEmail,
   findOrderById,
   findRefundsByOrderId,
   findSubscriptionByEmail,
-} from '../lib/mock-commerce';
+} from "../lib/mock-commerce";
 
 /**
  * Read-only commerce lookups. These stand in for calls to a real order
@@ -15,8 +15,9 @@ import {
  */
 
 export const lookupOrderTool = createTool({
-  id: 'lookup_order',
-  description: "Look up a customer's most recent order by email address, or a specific order by id.",
+  id: "lookup_order",
+  description:
+    "Look up a customer's most recent order by email address, or a specific order by id.",
   inputSchema: z.object({
     customerEmail: z.email().optional(),
     orderId: z.string().optional(),
@@ -30,20 +31,30 @@ export const lookupOrderTool = createTool({
         product: z.string(),
         amount: z.number(),
         currency: z.string(),
-        status: z.enum(['fulfilled', 'shipped', 'processing', 'cancelled', 'refunded']),
+        status: z.enum([
+          "fulfilled",
+          "shipped",
+          "processing",
+          "cancelled",
+          "refunded",
+        ]),
         chargeCount: z.number(),
         placedAt: z.string(),
       })
       .optional(),
   }),
   execute: async ({ customerEmail, orderId }) => {
-    const order = orderId ? findOrderById(orderId) : customerEmail ? findOrderByEmail(customerEmail) : undefined;
+    const order = orderId
+      ? findOrderById(orderId)
+      : customerEmail
+        ? findOrderByEmail(customerEmail)
+        : undefined;
     return order ? { found: true, order } : { found: false };
   },
 });
 
 export const lookupSubscriptionTool = createTool({
-  id: 'lookup_subscription',
+  id: "lookup_subscription",
   description: "Look up a customer's subscription by email address.",
   inputSchema: z.object({
     customerEmail: z.email(),
@@ -57,7 +68,7 @@ export const lookupSubscriptionTool = createTool({
         plan: z.string(),
         amount: z.number(),
         currency: z.string(),
-        status: z.enum(['active', 'cancelled', 'past_due']),
+        status: z.enum(["active", "cancelled", "past_due"]),
         renewsAt: z.string(),
       })
       .optional(),
@@ -69,8 +80,9 @@ export const lookupSubscriptionTool = createTool({
 });
 
 export const lookupCustomerRefundHistoryTool = createTool({
-  id: 'lookup_customer_refund_history',
-  description: 'List prior refunds issued for a given order id, so the agent avoids double-refunding.',
+  id: "lookup_customer_refund_history",
+  description:
+    "List prior refunds issued for a given order id, so the agent avoids double-refunding.",
   inputSchema: z.object({
     orderId: z.string(),
   }),

@@ -13,3 +13,5 @@ src/mastra/public/
 *.duckdb
 *.duckdb.wal
 .mastra-project.json
+playwright-report/
+test-results/

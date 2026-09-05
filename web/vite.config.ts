@@ -12,10 +12,10 @@ export default defineConfig({
     },
   },
   server: {
-    // The Mastra API server runs on :4111 (`bun run dev` in the project root).
+    // The Mastra API server runs on :4111 (`npm run dev` in the project root).
     // Proxying avoids dealing with CORS during local development.
     proxy: {
-      "/support": "http://localhost:4111",
+      "/support": "http://127.0.0.1:4111",
     },
   },
 });

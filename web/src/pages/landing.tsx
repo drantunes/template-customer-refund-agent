@@ -22,9 +22,9 @@ export function Landing() {
         </CardHeader>
         <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground">
           <p>
-            This is an example of what your customer portal might look like.
-            Don't deploy this to production - use Zendesk or a similar
-            integration instead.
+            This baseline uses deterministic local mocks. Connect a real support
+            provider only after its adapter and security controls have been
+            implemented and verified.
           </p>
           <p>
             First, you'll submit a message to customer support. Then, you'll see

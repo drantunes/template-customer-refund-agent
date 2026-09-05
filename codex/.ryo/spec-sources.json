@@ -1,0 +1,338 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "SRC-001",
+      "kind": "user_prompt",
+      "title": "Brief do cliente e instruções do Discovery brownfield",
+      "authority": "authoritative",
+      "provenance": {
+        "origin": "Codex conversation",
+        "author": "project leader",
+        "captured_at": "2026-09-04",
+        "context": "Prompt que inicia o Discovery após ryo-init"
+      },
+      "summary": [
+        "Construir um template Mastra de resolução de suporte e reembolso com ações transacionais sob controle humano.",
+        "Cobrir ingestão, triagem, RAG, consulta de pedidos ou assinaturas, resposta fundamentada, aprovação, execução e escalonamento.",
+        "Demonstrar supervisor e especialistas, memória, threads multiusuário, structured output, feedback, evals e monitoramento.",
+        "Trabalhar em brownfield, preservar funcionalidades úteis e remover o WIP de Zendesk.",
+        "Entregar primeiro uma experiência Studio-first local com mocks sob contratos; depois adapters de APIs externas.",
+        "Considerar uma API mock HTTP local com SQLite e escolher um ou dois sistemas reais para integração."
+      ]
+    },
+    {
+      "id": "SRC-002",
+      "kind": "repository_instructions",
+      "title": "AGENTS.md",
+      "authority": "authoritative",
+      "location": "AGENTS.md",
+      "revision": "df2cb0df7dc0e9b0e1774306da268c570fa933a7",
+      "observed_at": "2026-09-04",
+      "summary": "Exige carregar a skill Mastra, registrar primitives em src/mastra/index.ts e usar scripts do package.json."
+    },
+    {
+      "id": "SRC-003",
+      "kind": "repository_baseline",
+      "title": "Código WIP na branch main",
+      "authority": "primary_evidence",
+      "location": ".",
+      "revision": "df2cb0df7dc0e9b0e1774306da268c570fa933a7",
+      "observed_at": "2026-09-04",
+      "summary": "Inventário observado de manifests, backend Mastra, UI React, persistência, mocks, Zendesk WIP, evals e ausência de testes/CI."
+    },
+    {
+      "id": "SRC-004",
+      "kind": "repository_documentation",
+      "title": "README e documentação do WIP",
+      "authority": "secondary_evidence",
+      "locations": ["README.md", "web/README.md", "docs/zendesk-deployment.md", ".env.example"],
+      "revision": "df2cb0df7dc0e9b0e1774306da268c570fa933a7",
+      "observed_at": "2026-09-04",
+      "summary": "Descreve a intenção do template e a operação local, mas contém afirmações de monitoramento e Zendesk que excedem ou conflitam com o comportamento observado."
+    },
+    {
+      "id": "SRC-005",
+      "kind": "vendor_documentation",
+      "title": "Intercom Developer Platform",
+      "authority": "official_current_documentation",
+      "retrieved_at": "2026-09-04",
+      "urls": [
+        "https://developers.intercom.com/docs/webhooks",
+        "https://developers.intercom.com/docs/guides/tickets",
+        "https://developers.intercom.com/docs/references/webhooks/webhook-models",
+        "https://developers.intercom.com/docs/references/rest-api/api.intercom.io"
+      ],
+      "summary": "Oferece conversations, tickets, replies/notes, contacts, articles/internal articles e webhooks, inclusive em workspace de desenvolvimento."
+    },
+    {
+      "id": "SRC-006",
+      "kind": "vendor_documentation",
+      "title": "Freshdesk API e automações",
+      "authority": "official_current_documentation",
+      "retrieved_at": "2026-09-04",
+      "urls": [
+        "https://developers.freshdesk.com/api/",
+        "https://support.freshdesk.com/support/articles/132589-using-webhooks-in-the"
+      ],
+      "summary": "Oferece tickets, conversations, replies, notas, contatos, satisfaction ratings e webhooks acionados por automações; alguns recursos variam por plano."
+    },
+    {
+      "id": "SRC-007",
+      "kind": "vendor_documentation",
+      "title": "HubSpot Tickets e Webhooks APIs",
+      "authority": "official_current_documentation",
+      "retrieved_at": "2026-09-04",
+      "urls": [
+        "https://developers.hubspot.com/docs/api-reference/latest/crm/objects/tickets/guide",
+        "https://developers.hubspot.com/docs/api-reference/latest/webhooks/guide",
+        "https://developers.hubspot.com/docs/api-reference/latest/cms/site-search/search-site"
+      ],
+      "summary": "Oferece tickets associados a contatos/empresas, eventos via webhook e busca de conteúdo CMS, com forte contexto CRM."
+    },
+    {
+      "id": "SRC-008",
+      "kind": "vendor_documentation",
+      "title": "Shopify Admin GraphQL e Dev Stores",
+      "authority": "official_current_documentation",
+      "retrieved_at": "2026-09-04",
+      "urls": [
+        "https://shopify.dev/docs/api/admin-graphql/latest/queries/order",
+        "https://shopify.dev/docs/api/admin-graphql/latest/mutations/refundCreate",
+        "https://shopify.dev/docs/apps/build/webhooks/subscribe",
+        "https://shopify.dev/docs/apps/build/stores/development-stores"
+      ],
+      "summary": "Dev stores isolam testes; Admin GraphQL cobre pedidos, fulfillment, retornos e refunds idempotentes, com webhooks e escopos explícitos."
+    },
+    {
+      "id": "SRC-009",
+      "kind": "vendor_documentation",
+      "title": "Stripe Refunds e ambientes de teste",
+      "authority": "official_current_documentation",
+      "retrieved_at": "2026-09-04",
+      "urls": [
+        "https://docs.stripe.com/api/refunds/create",
+        "https://docs.stripe.com/testing"
+      ],
+      "summary": "Oferece refunds parciais ou totais sobre Charge/PaymentIntent e sandboxes capazes de simular sucesso, estado pendente e falha assíncrona."
+    },
+    {
+      "id": "SRC-010",
+      "kind": "framework_documentation",
+      "title": "Mastra workflow snapshots e suspend/resume",
+      "authority": "official_documentation",
+      "retrieved_at": "2026-09-04",
+      "urls": ["https://mastra.ai/en/reference/workflows/snapshots"],
+      "summary": "Snapshots persistidos sustentam workflows human-in-the-loop suspensos e retomados."
+    },
+    {
+      "id": "SRC-011",
+      "kind": "user_answer",
+      "title": "Discovery round 2: topologia local aceita e pedidos de esclarecimento",
+      "authority": "authoritative",
+      "provenance": {
+        "origin": "Codex conversation",
+        "author": "project leader",
+        "captured_at": "2026-09-04",
+        "context": "Resposta às perguntas Q-001, Q-002 e Q-003"
+      },
+      "summary": [
+        "Q-003 foi respondida com a opção A: SQLite in-process e façade HTTP opcional.",
+        "Antes de responder Q-001, o líder quer comparar simplicidade de API e camada gratuita.",
+        "Antes de responder Q-002, o líder quer saber se Stripe sandbox cobre os cenários necessários."
+      ]
+    },
+    {
+      "id": "SRC-012",
+      "kind": "vendor_pricing_and_limits",
+      "title": "Planos gratuitos e limites oficiais dos support providers",
+      "authority": "official_current_documentation",
+      "retrieved_at": "2026-09-04",
+      "urls": [
+        "https://www.intercom.com/pricing",
+        "https://www.intercom.com/help/en/articles/9071694-intercom-developer-faqs",
+        "https://www.hubspot.com/pricing/service",
+        "https://developers.hubspot.com/docs/developer-tooling/platform/usage-guidelines",
+        "https://developers.freshdesk.com/api/",
+        "https://support.freshdesk.com/support/solutions/articles/225439-what-are-the-rate-limits-for-the-api-calls-to-freshdesk-"
+      ],
+      "summary": "Intercom tem workspace de desenvolvimento gratuito, mas produção paga; HubSpot mantém Free para até dois usuários com API; Freshdesk expõe API REST simples, mas o plano Free tem limite de zero chamadas e o trial tem 50 chamadas/minuto."
+    },
+    {
+      "id": "SRC-013",
+      "kind": "vendor_documentation",
+      "title": "Capacidades do Stripe sandbox para o domínio",
+      "authority": "official_current_documentation",
+      "retrieved_at": "2026-09-04",
+      "urls": [
+        "https://docs.stripe.com/api/checkout/sessions",
+        "https://docs.stripe.com/api/refunds/create",
+        "https://docs.stripe.com/api/subscriptions",
+        "https://docs.stripe.com/billing/testing",
+        "https://docs.stripe.com/testing"
+      ],
+      "summary": "Sandbox cobre Customer, Product/Price, Checkout Session com line items, PaymentIntent, Subscription, Invoice, refunds e webhooks; test clocks simulam lifecycle temporal. Não fornece fulfillment/shipping/return physical-product como domínio principal."
+    },
+    {
+      "id": "SRC-014",
+      "kind": "user_answer",
+      "title": "Discovery round 3: providers externos escolhidos",
+      "authority": "authoritative",
+      "provenance": {
+        "origin": "Codex conversation",
+        "author": "project leader",
+        "captured_at": "2026-09-04",
+        "context": "Resposta final às perguntas Q-001 e Q-002"
+      },
+      "summary": [
+        "Q-001 foi respondida com Intercom.",
+        "Q-002 foi respondida com Stripe."
+      ]
+    },
+    {
+      "id": "SRC-015",
+      "kind": "user_answer",
+      "title": "Discovery round 4: mappings, cenários e identidade escolhidos",
+      "authority": "authoritative",
+      "provenance": {
+        "origin": "Codex conversation",
+        "author": "project leader",
+        "captured_at": "2026-09-04",
+        "context": "Resposta às perguntas Q-004, Q-005 e Q-006"
+      },
+      "summary": [
+        "Q-004 foi respondida com A: Conversation canônica e Ticket opcional no Intercom.",
+        "Q-005 foi respondida com A: cobrir compra avulsa e assinatura no Stripe sandbox.",
+        "Q-006 foi respondida com A: auth port e identidades, roles e tenants locais seedados."
+      ]
+    },
+    {
+      "id": "SRC-016",
+      "kind": "user_prompt",
+      "title": "Discovery round 5: revisão de alinhamento com Mastra oficial",
+      "authority": "authoritative",
+      "provenance": {
+        "origin": "Codex conversation",
+        "author": "project leader",
+        "captured_at": "2026-09-04",
+        "context": "Pedido de comparação do WIP com estrutura e exemplos oficiais do Mastra"
+      },
+      "summary": [
+        "Avaliar se o WIP está alinhado com a estrutura e os exemplos oficiais do Mastra.",
+        "Identificar o que falta implementar, revisar ou adaptar.",
+        "Explicitar decisões ainda necessárias antes da aprovação do Discovery."
+      ]
+    },
+    {
+      "id": "SRC-017",
+      "kind": "framework_documentation",
+      "title": "Documentação oficial atual do Mastra usada na revisão de alinhamento",
+      "authority": "official_current_documentation",
+      "retrieved_at": "2026-09-04",
+      "urls": [
+        "https://mastra.ai/docs/agents/overview",
+        "https://mastra.ai/docs/agents/human-in-the-loop",
+        "https://mastra.ai/docs/workflows/overview",
+        "https://mastra.ai/en/reference/workflows/snapshots",
+        "https://mastra.ai/docs/memory/overview",
+        "https://mastra.ai/docs/server/custom-api-routes",
+        "https://mastra.ai/docs/observability/overview",
+        "https://mastra.ai/docs/evals/overview",
+        "https://mastra.ai/docs/evals/running-in-ci",
+        "https://mastra.ai/reference/rag/overview"
+      ],
+      "summary": "Confirma o layout src/mastra/index.ts, agents/tools/workflows registrados, workflows tipados com suspend/resume, tool approval exercitado por runs de agent, threads separadas de resources, custom routes validadas, observability baseada em spans e evals com datasets/gates em CI."
+    },
+    {
+      "id": "SRC-018",
+      "kind": "user_answer",
+      "title": "Discovery round 6: decisões de alinhamento Mastra aceitas",
+      "authority": "authoritative",
+      "provenance": {
+        "origin": "Codex conversation",
+        "author": "project leader",
+        "captured_at": "2026-09-04",
+        "context": "Resposta às perguntas Q-007, Q-008 e Q-009 e pedido para registrar todas as revisões restantes"
+      },
+      "summary": [
+        "Q-007 foi respondida com A: native agent tool approval integrado ao workflow.",
+        "Q-008 foi respondida com A: supervisor assistivo/read-only e workflows no pipeline operacional.",
+        "Q-009 foi respondida com A: versões Mastra exatas no manifest e lockfile.",
+        "Todas as demais revisões identificadas na auditoria Mastra devem ser registradas no plano e na rastreabilidade."
+      ]
+    },
+    {
+      "id": "SRC-019",
+      "kind": "user_answer",
+      "title": "Spec Readiness: Node/npm, verification, quality and retention recommendations approved",
+      "authority": "authoritative",
+      "provenance": {
+        "origin": "Codex conversation",
+        "author": "project leader",
+        "captured_at": "2026-09-04",
+        "context": "Approval of the recommended readiness options after explicitly excluding Bun from the target template"
+      },
+      "summary": [
+        "Bun must not be used; the template is focused on Node.js and npm.",
+        "Approved a single npm workspace with pinned Node.js 24 LTS and npm versions.",
+        "Approved Prettier, Oxlint, Vitest and Playwright as the verification toolchain.",
+        "Approved the balanced quality thresholds with zero tolerance for critical security and financial cases.",
+        "Approved the balanced retention and PII defaults with synthetic-only fixtures."
+      ]
+    },
+    {
+      "id": "SRC-020",
+      "kind": "runtime_documentation",
+      "title": "Official Node.js distribution index",
+      "authority": "official_current_documentation",
+      "retrieved_at": "2026-09-04",
+      "urls": [
+        "https://nodejs.org/dist/index.json"
+      ],
+      "summary": "Identifies Node.js 24.20.0 as the latest published Node 24 LTS release on 2026-09-04 and records its bundled npm version as 11.19.0."
+    },
+    {
+      "id": "SRC-021",
+      "kind": "user_answer",
+      "title": "Spec Readiness: operational defaults and OpenAI provider approved",
+      "authority": "authoritative",
+      "provenance": {
+        "origin": "Codex conversation",
+        "author": "project leader",
+        "captured_at": "2026-09-04",
+        "context": "Approval of Q-014 after explanation and confirmation that OpenAI will be used"
+      },
+      "summary": [
+        "Approved the conservative operational alert and cost-budget recommendation.",
+        "Confirmed OpenAI as the model and embedding provider for the template."
+      ]
+    },
+    {
+      "id": "SRC-022",
+      "kind": "vendor_documentation",
+      "title": "OpenAI API model catalog",
+      "authority": "official_current_documentation",
+      "retrieved_at": "2026-09-04",
+      "urls": [
+        "https://developers.openai.com/api/docs/models"
+      ],
+      "summary": "Official OpenAI model catalog used to confirm OpenAI as an API model provider; exact Mastra router identifiers remain subject to the installed provider registry."
+    },
+    {
+      "id": "SRC-023",
+      "kind": "user_answer",
+      "title": "Temporary bootstrap gate exceptions approved",
+      "authority": "authoritative",
+      "provenance": {
+        "origin": "Codex conversation",
+        "author": "project leader",
+        "captured_at": "2026-09-04",
+        "context": "Approval of temporary, time-bounded exceptions required to start PHASE-001 and create its missing npm verification scripts"
+      },
+      "summary": [
+        "Approved temporary gate exceptions solely to bootstrap PHASE-001.",
+        "The exceptions must be removed and complete npm gates regenerated before PR readiness."
+      ]
+    }
+  ]
+}

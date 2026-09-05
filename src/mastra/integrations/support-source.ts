@@ -1,11 +1,13 @@
-import type { CaseSource, SupportCase } from '../domain/support-case';
+import type { CaseSource, SupportCase } from "../domain/support-case";
 
 export interface SupportSourceAdapter {
   source: CaseSource;
 
-  normalizeInbound(payload: unknown): Promise<Omit<SupportCase, 'id' | 'status' | 'metadata'> & {
-    metadata: Record<string, unknown>;
-  }>;
+  normalizeInbound(payload: unknown): Promise<
+    Omit<SupportCase, "id" | "status" | "metadata"> & {
+      metadata: Record<string, unknown>;
+    }
+  >;
 
   sendReply(caseId: string, body: string): Promise<void>;
   addInternalNote(caseId: string, body: string): Promise<void>;

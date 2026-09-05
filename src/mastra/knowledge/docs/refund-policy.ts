@@ -1,8 +1,8 @@
-import type { PolicyDocument } from '../types';
+import type { PolicyDocument } from "../types";
 
 export const refundPolicy: PolicyDocument = {
-  title: 'General Refund Policy',
-  source: 'refund-policy',
+  title: "General Refund Policy",
+  source: "refund-policy",
   text: `# General Refund Policy
 
 We want customers to feel confident buying from us. Refunds are approved case-by-case, but the following guidelines apply:

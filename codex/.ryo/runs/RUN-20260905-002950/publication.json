@@ -1,0 +1,10 @@
+{
+  "stage": "PR_OPENED",
+  "status": "success",
+  "pr_url": "https://github.com/drantunes/template-customer-refund-agent/pull/1",
+  "pr_number": 1,
+  "head_sha": "c68e911441338c3180b52b3658ec7933e2f3554d",
+  "base_sha": "df2cb0df7dc0e9b0e1774306da268c570fa933a7",
+  "authorization": "HITL-PUBLISH-001 approved by Diego Antunes; user Autorizo",
+  "next_recommendation": "PR_REVIEW"
+}

@@ -1,4 +1,9 @@
-import type { MockEmailPayload, MonitoringSummary, SupportCase } from "./types";
+import type {
+  InboundSupportResponse,
+  MockEmailPayload,
+  MonitoringSummary,
+  SupportCase,
+} from "./types";
 
 // In dev, Vite proxies `/support/*` to the Mastra API server (see vite.config.ts).
 // In production, point VITE_API_BASE_URL at wherever the Mastra app is deployed.
@@ -20,7 +25,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function listCases(email?: string): Promise<{ cases: SupportCase[] }> {
   const query = email ? `?email=${encodeURIComponent(email)}` : "";
-  return request(`/support/cases${query}`);
+  return request<{ cases?: SupportCase[] }>(`/support/cases${query}`).then(
+    (response) => {
+      if (!Array.isArray(response.cases)) {
+        throw new Error("Support API returned an invalid case-list response.");
+      }
+      return { cases: response.cases };
+    },
+  );
 }
 
 export function getCase(caseId: string): Promise<SupportCase> {
@@ -29,7 +41,7 @@ export function getCase(caseId: string): Promise<SupportCase> {
 
 export function submitCase(
   payload: MockEmailPayload,
-): Promise<{ caseId: string; workflowRunId?: string; status: string }> {
+): Promise<InboundSupportResponse> {
   return request("/support/inbound", {
     method: "POST",
     body: JSON.stringify(payload),
