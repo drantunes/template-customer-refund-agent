@@ -9,6 +9,7 @@ type Runtime = Awaited<ReturnType<typeof loadDeterministicRuntime>>;
 async function loadDeterministicRuntime() {
   const databasePath = `/private/tmp/phase001-e2e-${crypto.randomUUID()}.db`;
   process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
+  delete process.env.TURSO_AUTH_TOKEN;
   process.env.SUPPORT_SOURCE = "mock";
   // Constructor-time provider validation requires a key. The harness replaces every
   // generation and embedding execution before a workflow begins, so this placeholder
