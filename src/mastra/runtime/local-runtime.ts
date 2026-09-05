@@ -3,7 +3,12 @@ import type { LanguageModelV2 } from "@ai-sdk/provider";
 import type { Mastra } from "@mastra/core/mastra";
 import { createHash } from "node:crypto";
 import { caseStore, type CaseStore } from "../lib/case-store";
-import { withDispatchLeaseScope } from "../lib/dispatch-lease-scope";
+import {
+  renewDispatchLeaseWhileRunning,
+  withDispatchLeaseScope,
+} from "../lib/dispatch-lease-scope";
+import type { DispatchRecord } from "../lib/case-store";
+import type { SupportCase } from "../domain/support-case";
 import {
   legacyAmountToMoney,
   moneyToLegacyAmount,
@@ -1065,6 +1070,86 @@ export async function purgeExpiredWorkflowSnapshots(
   return deleted;
 }
 
+type PersistedRefundCommand = {
+  orderId?: string;
+  idempotencyKey?: string;
+  fingerprint?: string;
+  amount?: number;
+  currency?: string;
+};
+
+/** Projects only an exact durable provider effect. A normal native-resume
+ * return does not prove that its tool completed, so callers use this before
+ * resuming the enclosing workflow. */
+export async function reconcileApprovedRefundEffect(input: {
+  store: CaseStore;
+  supportCase: SupportCase;
+  dispatch: DispatchRecord;
+  fingerprint: string;
+  command: PersistedRefundCommand | undefined;
+}) {
+  const { store, supportCase, dispatch, fingerprint, command } = input;
+  if (!command?.idempotencyKey) return false;
+  if (command.fingerprint !== fingerprint)
+    throw new Error(
+      "The persisted refund command does not match the approved fingerprint.",
+    );
+  const existing = await store.idempotency(command.idempotencyKey);
+  if (!existing) return false;
+  if (existing.fingerprint !== fingerprint)
+    throw new Error(
+      "A durable refund effect does not match the immutable approved command.",
+    );
+  const effect = existing.effect as RefundEffect;
+  const expectedAmount =
+    typeof command.amount === "number" && typeof command.currency === "string"
+      ? legacyAmountToMoney(command.amount, command.currency)
+      : undefined;
+  if (
+    effect.idempotencyKey !== command.idempotencyKey ||
+    effect.orderId !== command.orderId ||
+    !effect.amount ||
+    !effect.refundId ||
+    !expectedAmount ||
+    effect.amount.currency !== expectedAmount.currency ||
+    effect.amount.minor !== expectedAmount.minor ||
+    !Number.isFinite(Date.parse(effect.executedAt))
+  )
+    throw new Error(
+      "A durable refund effect does not exactly match the approved command.",
+    );
+  const reconciled = {
+    refundId: effect.refundId,
+    orderId: effect.orderId,
+    amount: moneyToLegacyAmount(effect.amount),
+    currency: effect.amount.currency,
+    status: effect.replayed ? ("skipped" as const) : ("executed" as const),
+    idempotencyKey: effect.idempotencyKey,
+    executedAt: effect.executedAt,
+  };
+  await withDispatchLeaseScope(
+    {
+      dispatchId: dispatch.id,
+      caseId: dispatch.caseId,
+      turnId: dispatch.turnId,
+      leaseToken: dispatch.leaseToken!,
+    },
+    () =>
+      store.update(dispatch.caseId, {
+        refundResult: reconciled,
+        metadata: {
+          ...supportCase.metadata,
+          refundEffects: {
+            ...((supportCase.metadata as Record<string, unknown>)
+              .refundEffects as Record<string, unknown> | undefined),
+            [fingerprint]: reconciled,
+          },
+        },
+      }),
+  );
+  return true;
+}
+
 export async function recoverApprovedNativeDecisions(
   mastra: NativeRecoveryMastra,
   store: CaseStore = caseStore,
@@ -1081,84 +1166,21 @@ export async function recoverApprovedNativeDecisions(
     );
     if (!dispatch || !item.workflowRunId) continue;
     const command = (item.supportCase.metadata as Record<string, unknown>)
-      .refundCommand as { idempotencyKey?: string } | undefined;
-    const existing = command?.idempotencyKey
-      ? await store.idempotency(command.idempotencyKey)
-      : undefined;
-    if (existing && existing.fingerprint !== item.fingerprint) {
-      // An idempotency key is an effect identity, never permission to project
-      // an unrelated command.  This is terminal integrity evidence rather
-      // than a retryable missing-native-snapshot condition.
-      await store.failDispatchAndCase(
-        dispatch.id,
-        item.caseId,
-        "A durable refund effect does not match the immutable approved command.",
-        dispatch.leaseToken,
-      );
-      continue;
-    }
+      .refundCommand as PersistedRefundCommand | undefined;
+    const lease = renewDispatchLeaseWhileRunning(store, dispatch);
     try {
-      if (existing) {
-        const effect = existing.effect as RefundEffect;
-        const persisted = command as
-          | {
-              orderId?: string;
-              idempotencyKey?: string;
-              fingerprint?: string;
-              amount?: number;
-              currency?: string;
-            }
-          | undefined;
-        const expectedAmount =
-          typeof persisted?.amount === "number" &&
-          typeof persisted.currency === "string"
-            ? legacyAmountToMoney(persisted.amount, persisted.currency)
-            : undefined;
-        if (
-          effect.idempotencyKey !== persisted?.idempotencyKey ||
-          effect.orderId !== persisted?.orderId ||
-          !effect.amount ||
-          !effect.refundId ||
-          !expectedAmount ||
-          effect.amount.currency !== expectedAmount.currency ||
-          effect.amount.minor !== expectedAmount.minor ||
-          !Number.isFinite(Date.parse(effect.executedAt))
-        )
-          throw new Error(
-            "A durable refund effect does not exactly match the approved command.",
-          );
-        const reconciled = {
-          refundId: effect.refundId,
-          orderId: effect.orderId,
-          amount: moneyToLegacyAmount(effect.amount),
-          currency: effect.amount.currency,
-          status: effect.replayed
-            ? ("skipped" as const)
-            : ("executed" as const),
-          idempotencyKey: effect.idempotencyKey,
-          executedAt: effect.executedAt,
-        };
-        await withDispatchLeaseScope(
-          {
-            dispatchId: dispatch.id,
-            caseId: dispatch.caseId,
-            turnId: dispatch.turnId,
-            leaseToken: dispatch.leaseToken!,
-          },
-          () =>
-            store.update(item.caseId, {
-              refundResult: reconciled,
-              metadata: {
-                ...item.supportCase.metadata,
-                refundEffects: {
-                  ...((item.supportCase.metadata as Record<string, unknown>)
-                    .refundEffects as Record<string, unknown> | undefined),
-                  [item.fingerprint]: reconciled,
-                },
-              },
-            }),
-        );
-      }
+      await lease.renew();
+      if (lease.lostOwnership) continue;
+      lease.start();
+      const reconciledBefore = item.approved
+        ? await reconcileApprovedRefundEffect({
+            store,
+            supportCase: item.supportCase,
+            dispatch,
+            fingerprint: item.fingerprint,
+            command,
+          })
+        : false;
       await withDispatchLeaseScope(
         {
           dispatchId: dispatch.id,
@@ -1167,7 +1189,7 @@ export async function recoverApprovedNativeDecisions(
           leaseToken: dispatch.leaseToken!,
         },
         () =>
-          existing
+          reconciledBefore
             ? Promise.resolve(undefined)
             : resumeApprovedNativeTool({
                 mastra,
@@ -1184,6 +1206,34 @@ export async function recoverApprovedNativeDecisions(
                 ...(options.model ? { model: options.model } : {}),
               }),
       );
+      if (lease.lostOwnership) continue;
+      // A normal native transition can contain a caught tool failure.  Do not
+      // resume and terminalize the enclosing workflow until its exact effect
+      // is durable and projected. A missing effect after that normal return
+      // is an explicit failed tool result; thrown native/snapshot errors use
+      // the recoverable catch path below.
+      if (
+        item.approved &&
+        !(await reconcileApprovedRefundEffect({
+          store,
+          supportCase: (await store.get(item.caseId)) ?? item.supportCase,
+          dispatch,
+          fingerprint: item.fingerprint,
+          command,
+        }))
+      ) {
+        // The official native transition returned normally and the exact
+        // durable effect is still absent. This is a completed tool failure,
+        // not an uncertain provider response: leave a visible terminal case
+        // instead of repeatedly resuming an already-consumed native snapshot.
+        await store.failDispatchAndCase(
+          dispatch.id,
+          item.caseId,
+          "Native approval completed without a durable refund effect.",
+          dispatch.leaseToken,
+        );
+        continue;
+      }
       const run = await mastra
         .getWorkflow("resolveSupportCaseWorkflow")
         .createRun({
@@ -1207,6 +1257,7 @@ export async function recoverApprovedNativeDecisions(
             },
           }),
       );
+      if (lease.lostOwnership) continue;
       if (result.status === "failed")
         await store.failDispatchAndCase(
           dispatch.id,
@@ -1214,11 +1265,18 @@ export async function recoverApprovedNativeDecisions(
           "Workflow recovery failed after the native decision.",
           dispatch.leaseToken,
         );
+      else if (result.status === "success")
+        await store.completeDispatch(
+          dispatch.id,
+          "completed",
+          undefined,
+          dispatch.leaseToken,
+        );
       else
         await store.completeDispatch(
           dispatch.id,
-          result.status === "suspended" ? "suspended" : "completed",
-          undefined,
+          "suspended",
+          `Workflow recovery returned ${result.status}.`,
           dispatch.leaseToken,
         );
       recovered += 1;
@@ -1226,10 +1284,27 @@ export async function recoverApprovedNativeDecisions(
       // The native snapshot may be temporarily unavailable after a process
       // crash. Return its lease to the suspended queue so a later bounded
       // sweep can reconcile it; never invent an approval or effect.
-      await store
-        .completeDispatch(dispatch.id, "suspended", error, dispatch.leaseToken)
-        .catch(() => undefined);
-      throw error;
+      if (/does not match the immutable approved command/.test(String(error)))
+        await store
+          .failDispatchAndCase(
+            dispatch.id,
+            item.caseId,
+            error,
+            dispatch.leaseToken,
+          )
+          .catch(() => undefined);
+      else
+        await store
+          .completeDispatch(
+            dispatch.id,
+            "suspended",
+            error,
+            dispatch.leaseToken,
+          )
+          .catch(() => undefined);
+      continue;
+    } finally {
+      lease.stop();
     }
   }
   return recovered;

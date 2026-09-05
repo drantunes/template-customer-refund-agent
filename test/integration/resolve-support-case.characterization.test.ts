@@ -160,6 +160,7 @@ async function startQueuedWorkflow(
 async function decideNativeApproval(
   runtime: Awaited<ReturnType<typeof loadCharacterizationRuntime>>,
   approved: boolean,
+  expectedRecovery = 1,
 ) {
   const supportCase = await runtime.caseStore.get(runtime.supportCase.id);
   if (!supportCase) throw new Error("Expected a suspended support case.");
@@ -193,7 +194,7 @@ async function decideNativeApproval(
     await recoverApprovedNativeDecisions(runtime.mastra, runtime.caseStore, {
       disableScorers: true,
     }),
-  ).toBe(1);
+  ).toBe(expectedRecovery);
 }
 
 afterEach(async () => {
@@ -469,7 +470,7 @@ describe("resolve support case WIP characterization", () => {
         },
       },
     });
-    await decideNativeApproval(runtime, true);
+    await decideNativeApproval(runtime, true, 0);
     expect((await caseStore.get(supportCase.id))?.refundResult).toBeUndefined();
   });
 

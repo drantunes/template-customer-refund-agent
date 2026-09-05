@@ -203,6 +203,10 @@ async function loadDeterministicRuntime() {
     "/support/cases/:caseId/approve",
     routes.supportCaseApproveRoute.handler,
   );
+  app.post(
+    "/support/cases/:caseId/follow-ups",
+    routes.supportCaseFollowUpRoute.handler,
+  );
   return {
     app,
     mastra,
@@ -285,7 +289,8 @@ describe("support approval HTTP boundary", () => {
         id: "case-waiting",
         status: "processing",
       } as never);
-      vi.spyOn(caseStore, "completeDispatch").mockResolvedValue(undefined);
+      vi.spyOn(caseStore, "renewDispatchLease").mockResolvedValue(true);
+      vi.spyOn(caseStore, "completeDispatch").mockResolvedValue(true);
       const app = approvalApp(mastra);
       const response = await app.request(
         `http://support.test/support/cases/case-waiting/${action}`,

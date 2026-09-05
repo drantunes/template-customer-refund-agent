@@ -137,6 +137,21 @@ function config(url = process.env.TURSO_DATABASE_URL || "file:./mastra.db") {
 function now() {
   return new Date().toISOString();
 }
+
+// Production workers always lease a dispatch for 30 seconds. The narrowly
+// test-only override lets integration coverage cross that boundary without
+// changing the deployed lifetime.
+function dispatchLeaseDurationMs() {
+  if (process.env.NODE_ENV !== "test") return 30_000;
+  const configured = Number(process.env.SUPPORT_TEST_DISPATCH_LEASE_MS);
+  return Number.isSafeInteger(configured) && configured > 0
+    ? configured
+    : 30_000;
+}
+
+function dispatchLeaseUntil() {
+  return new Date(Date.now() + dispatchLeaseDurationMs()).toISOString();
+}
 function parse(row: Record<string, unknown>): SupportCase {
   return JSON.parse(String(row.data)) as SupportCase;
 }
@@ -1335,7 +1350,7 @@ export class CaseStore {
         throw error;
       }
     }
-    const leaseUntil = new Date(Date.now() + 30_000).toISOString();
+    const leaseUntil = dispatchLeaseUntil();
     const rows = await this.client.execute({
       sql: "SELECT candidate.* FROM support_dispatch AS candidate JOIN support_turns AS candidate_turn ON candidate_turn.id = candidate.turn_id WHERE (candidate.state = 'pending' OR (candidate.state IN ('claimed', 'started') AND candidate.lease_until < ?)) AND candidate.attempts < 3 AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS earlier JOIN support_turns AS earlier_turn ON earlier_turn.id = earlier.turn_id WHERE earlier.case_id = candidate.case_id AND earlier.state = 'pending' AND earlier_turn.sequence < candidate_turn.sequence) ORDER BY candidate.created_at, candidate_turn.sequence, candidate.id LIMIT ?",
       args: [claimedAt, limit],
@@ -1369,13 +1384,7 @@ export class CaseStore {
       // Never let an old worker resurrect a lease after another worker can
       // legally reclaim it.  Renewal is a heartbeat, not a new claim.
       sql: "UPDATE support_dispatch SET lease_until = ?, updated_at = ? WHERE id = ? AND lease_token = ? AND state IN ('claimed', 'started') AND lease_until > ?",
-      args: [
-        new Date(Date.now() + 30_000).toISOString(),
-        checkedAt,
-        id,
-        leaseToken,
-        checkedAt,
-      ],
+      args: [dispatchLeaseUntil(), checkedAt, id, leaseToken, checkedAt],
     });
     return Number(updated.rowsAffected) === 1;
   }
@@ -1403,9 +1412,9 @@ export class CaseStore {
     const tx = await this.client.transaction("write");
     try {
       const transitioned = await tx.execute({
-        sql: `UPDATE support_dispatch SET state = ?, lease_until = NULL, lease_token = NULL, last_error = ?, updated_at = ? WHERE id = ?${leaseToken ? " AND lease_token = ?" : ""}`,
+        sql: `UPDATE support_dispatch SET state = ?, lease_until = NULL, lease_token = NULL, last_error = ?, updated_at = ? WHERE id = ?${leaseToken ? " AND lease_token = ? AND state IN ('claimed', 'started') AND lease_until > ?" : ""}`,
         args: leaseToken
-          ? [state, error ? String(error) : null, now(), id, leaseToken]
+          ? [state, error ? String(error) : null, now(), id, leaseToken, now()]
           : [state, error ? String(error) : null, now(), id],
       });
       // A stale worker must never overwrite the newer worker's turn outcome.
@@ -1439,15 +1448,24 @@ export class CaseStore {
     const tx = await this.client.transaction("write");
     try {
       const transitioned = await tx.execute({
-        sql: `UPDATE support_dispatch SET state = 'failed', lease_until = NULL, lease_token = NULL, last_error = ?, updated_at = ? WHERE id = ? AND state IN ('claimed', 'started')${leaseToken ? " AND lease_token = ?" : ""}`,
+        sql: `UPDATE support_dispatch SET state = 'failed', lease_until = NULL, lease_token = NULL, last_error = ?, updated_at = ? WHERE id = ? AND case_id = ? AND state IN ('claimed', 'started')${leaseToken ? " AND lease_token = ? AND lease_until > ?" : ""}`,
         args: leaseToken
-          ? [String(error), now(), id, leaseToken]
-          : [String(error), now(), id],
+          ? [String(error), now(), id, caseId, leaseToken, now()]
+          : [String(error), now(), id, caseId],
       });
       if (Number(transitioned.rowsAffected) !== 1) {
         await tx.rollback();
         return false;
       }
+      await tx.execute({
+        sql: "UPDATE support_turns SET state = 'failed', outcome_data = COALESCE(outcome_data, ?), updated_at = ? WHERE id = (SELECT turn_id FROM support_dispatch WHERE id = ?) AND case_id = ?",
+        args: [
+          JSON.stringify({ status: "failed", escalationReason: String(error) }),
+          now(),
+          id,
+          caseId,
+        ],
+      });
       const caseRow = await tx.execute({
         sql: "SELECT data, version FROM support_cases WHERE id = ?",
         args: [caseId],
@@ -1648,7 +1666,7 @@ export class CaseStore {
   ): Promise<DispatchRecord | undefined> {
     await this.ensured();
     const claimedAt = now();
-    const leaseUntil = new Date(Date.now() + 30_000).toISOString();
+    const leaseUntil = dispatchLeaseUntil();
     const row = await this.client.execute({
       sql: "SELECT candidate.* FROM support_dispatch AS candidate JOIN support_turns AS candidate_turn ON candidate_turn.id = candidate.turn_id WHERE candidate.case_id = ? AND candidate.state = 'pending' AND (? IS NULL OR candidate.run_id = ?) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) ORDER BY candidate_turn.sequence LIMIT 1",
       args: [caseId, runId ?? null, runId ?? null],
@@ -1716,7 +1734,7 @@ export class CaseStore {
       const update = await this.client.execute({
         sql: "UPDATE support_dispatch SET state = 'claimed', lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND case_id = ? AND turn_id = ? AND (state = 'suspended' OR (state = 'claimed' AND lease_until < ?))",
         args: [
-          new Date(Date.now() + 30_000).toISOString(),
+          dispatchLeaseUntil(),
           leaseToken,
           claimedAt,
           String(backfilled.rows[0].id),
@@ -1741,7 +1759,7 @@ export class CaseStore {
     const update = await this.client.execute({
       sql: "UPDATE support_dispatch SET state = 'claimed', lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND case_id = ? AND turn_id = ? AND (state = 'suspended' OR (state = 'claimed' AND lease_until < ?))",
       args: [
-        new Date(Date.now() + 30_000).toISOString(),
+        dispatchLeaseUntil(),
         leaseToken,
         claimedAt,
         String(row.rows[0].id),

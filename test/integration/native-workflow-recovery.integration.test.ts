@@ -1,17 +1,24 @@
 import type { LanguageModelV2 } from "@ai-sdk/provider";
+import { RequestContext } from "@mastra/core/request-context";
+import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { rm } from "node:fs/promises";
+import { issueLocalSession } from "../../src/mastra/server/auth";
 
 const files: string[] = [];
 const runtimes: Array<{ shutdown(): Promise<void> }> = [];
 
-function jsonModel(value: Record<string, unknown>): LanguageModelV2 {
+function jsonModel(
+  value: Record<string, unknown>,
+  beforeGenerate?: () => Promise<void>,
+): LanguageModelV2 {
   return {
     specificationVersion: "v2",
     provider: "phase003-test",
     modelId: "deterministic-json",
     supportedUrls: {},
     async doGenerate() {
+      await beforeGenerate?.();
       return {
         content: [{ type: "text" as const, text: JSON.stringify(value) }],
         finishReason: "stop" as const,
@@ -27,7 +34,10 @@ function jsonModel(value: Record<string, unknown>): LanguageModelV2 {
   };
 }
 
-function refundModel(input: Record<string, unknown>): LanguageModelV2 {
+function refundModel(
+  input: Record<string, unknown>,
+  beforeGenerate?: () => Promise<void>,
+): LanguageModelV2 {
   let called = false;
   return {
     specificationVersion: "v2",
@@ -35,6 +45,7 @@ function refundModel(input: Record<string, unknown>): LanguageModelV2 {
     modelId: "deterministic-refund",
     supportedUrls: {},
     async doGenerate(options) {
+      await beforeGenerate?.();
       if (!called && options.tools?.some((tool) => tool.type === "function")) {
         called = true;
         return {
@@ -78,7 +89,11 @@ async function setup(
     request: Request,
   ) => "timeout" | "429" | "500" | "drop-after-commit" | undefined,
   refund?: { amount: number; currency: string },
-  options?: { deferInitialWorkflow?: boolean },
+  options?: {
+    deferInitialWorkflow?: boolean;
+    responseBeforeGenerate?: () => Promise<void>;
+    executionBeforeGenerate?: () => Promise<void>;
+  },
 ) {
   const path = `/private/tmp/phase003-native-workflow-${crypto.randomUUID()}.db`;
   files.push(path, `${path}-shm`, `${path}-wal`);
@@ -108,6 +123,8 @@ async function setup(
     await import("../../src/mastra/agents/response-agent");
   const { refundExecutionAgent } =
     await import("../../src/mastra/agents/refund-execution-agent");
+  const { supportCaseApproveRoute, supportCaseFollowUpRoute } =
+    await import("../../src/mastra/server/routes");
 
   // These spies replace only the provider transport. The registered Agents,
   // native approval snapshot, tool execution, workflow suspension and resume
@@ -125,15 +142,18 @@ async function setup(
   const refundAmount = refund?.amount ?? 20;
   const refundCurrency = refund?.currency ?? "USD";
   responseAgent.__updateModel({
-    model: jsonModel({
-      draftResponse: "We will process the duplicate-charge refund.",
-      citedSources: ["duplicate-charge-policy"],
-      recommendRefund: true,
-      refundAmount,
-      refundCurrency,
-      refundReason: "duplicate charge",
-      requiresEscalation: false,
-    }) as never,
+    model: jsonModel(
+      {
+        draftResponse: "We will process the duplicate-charge refund.",
+        citedSources: ["duplicate-charge-policy"],
+        recommendRefund: true,
+        refundAmount,
+        refundCurrency,
+        refundReason: "duplicate charge",
+        requiresEscalation: false,
+      },
+      options?.responseBeforeGenerate,
+    ) as never,
   });
 
   const binding =
@@ -218,7 +238,7 @@ async function setup(
       idempotencyKey: command.idempotencyKey,
       fingerprint: command.fingerprint,
     };
-    return refundModel(input) as never;
+    return refundModel(input, options?.executionBeforeGenerate) as never;
   };
   refundExecutionAgent.__updateModel({ model: executionModel });
   // Workflows obtain this restricted agent through the Mastra registry.
@@ -226,11 +246,26 @@ async function setup(
     model: executionModel,
   });
 
+  const app = new Hono();
+  app.use("/support/*", async (c, next) => {
+    const requestContext = new RequestContext();
+    requestContext.setRaw("correlationId", c.req.header("x-correlation-id"));
+    c.set("mastra", mastra as never);
+    c.set("requestContext", requestContext);
+    await next();
+  });
+  app.post(
+    "/support/cases/:caseId/follow-ups",
+    supportCaseFollowUpRoute.handler,
+  );
+  app.post("/support/cases/:caseId/approve", supportCaseApproveRoute.handler);
+
   if (options?.deferInitialWorkflow)
     return {
       binding,
       caseStore,
       mastra,
+      app,
       selectExecutionCase,
       purgeExpiredWorkflowSnapshots,
       recoverApprovedNativeDecisions,
@@ -267,6 +302,7 @@ async function setup(
       binding,
       caseStore,
       mastra,
+      app,
       selectExecutionCase,
       purgeExpiredWorkflowSnapshots,
       recoverApprovedNativeDecisions,
@@ -289,6 +325,7 @@ async function setup(
     binding,
     caseStore,
     mastra,
+    app,
     native,
     selectExecutionCase,
     purgeExpiredWorkflowSnapshots,
@@ -300,10 +337,225 @@ afterEach(async () => {
   await Promise.all(runtimes.splice(0).map((runtime) => runtime.shutdown()));
   vi.doUnmock("../../src/mastra/evals");
   vi.restoreAllMocks();
+  delete process.env.SUPPORT_TEST_DISPATCH_LEASE_MS;
+  delete process.env.SUPPORT_TEST_DISPATCH_HEARTBEAT_MS;
   await Promise.all(files.splice(0).map((file) => rm(file, { force: true })));
 });
 
 describe("native approval workflow recovery", () => {
+  it("fails a real portal follow-up when its registered response agent transport fails", async () => {
+    const caseId = `portal-agent-failure-${crypto.randomUUID()}`;
+    let responseCalls = 0;
+    const { app, caseStore } = await setup(
+      caseId,
+      undefined,
+      undefined,
+      undefined,
+      {
+        responseBeforeGenerate: async () => {
+          responseCalls += 1;
+          if (responseCalls === 2)
+            throw new Error("injected deterministic follow-up model failure");
+        },
+      },
+    );
+    const response = await app.request(
+      `http://support.test/support/cases/${caseId}/follow-ups`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${issueLocalSession({ id: "customer-alex" })}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ body: "Please retry with the added detail." }),
+      },
+    );
+
+    expect(response.status).toBe(500);
+    expect(await caseStore.get(caseId)).toMatchObject({ status: "failed" });
+    expect(await caseStore.turns(caseId)).toHaveLength(2);
+    const dispatch = await caseStore.getClientForTests().execute({
+      sql: "SELECT state FROM support_dispatch WHERE case_id = ? ORDER BY created_at DESC LIMIT 1",
+      args: [caseId],
+    });
+    expect(dispatch.rows[0]).toMatchObject({ state: "failed" });
+  });
+
+  it("renews a portal follow-up lease while the registered response agent transport is slow", async () => {
+    const caseId = `portal-agent-slow-${crypto.randomUUID()}`;
+    let responseCalls = 0;
+    let entered!: () => void;
+    const enteredSlowTransport = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const slowTransport = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { app, caseStore } = await setup(
+      caseId,
+      undefined,
+      undefined,
+      undefined,
+      {
+        responseBeforeGenerate: async () => {
+          responseCalls += 1;
+          if (responseCalls === 2) {
+            entered();
+            await slowTransport;
+          }
+        },
+      },
+    );
+    process.env.SUPPORT_TEST_DISPATCH_LEASE_MS = "30";
+    process.env.SUPPORT_TEST_DISPATCH_HEARTBEAT_MS = "5";
+    const renew = vi.spyOn(caseStore, "renewDispatchLease");
+
+    let released = false;
+    try {
+      const request = app.request(
+        `http://support.test/support/cases/${caseId}/follow-ups`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${issueLocalSession({ id: "customer-alex" })}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ body: "Please include this new detail." }),
+        },
+      );
+      await enteredSlowTransport;
+      await new Promise((resolve) => setTimeout(resolve, 45));
+      expect(renew.mock.calls.length).toBeGreaterThan(1);
+      release();
+      released = true;
+      expect((await request).status).toBe(200);
+    } finally {
+      if (!released) release();
+    }
+  });
+
+  it("renews a native recovery lease beyond its duration while the registered Agent is slow", async () => {
+    const caseId = `native-agent-slow-${crypto.randomUUID()}`;
+    let entered!: () => void;
+    const enteredSlowTransport = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const slowTransport = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { caseStore, mastra, native, recoverApprovedNativeDecisions } =
+      await setup(caseId);
+    process.env.SUPPORT_TEST_DISPATCH_LEASE_MS = "30";
+    process.env.SUPPORT_TEST_DISPATCH_HEARTBEAT_MS = "5";
+    await caseStore.recordApprovalDecision({
+      caseId,
+      turnId: native.turnId,
+      commandFingerprint: native.fingerprint,
+      principalId: "approver-demo",
+      approved: true,
+      nativeRunId: native.runId,
+      nativeToolCallId: native.toolCallId,
+    });
+    const { localRuntime } =
+      await import("../../src/mastra/runtime/local-runtime");
+    const issueRefund = localRuntime.issueRefund.bind(localRuntime);
+    const slowProvider = vi
+      .spyOn(localRuntime, "issueRefund")
+      .mockImplementation(async (command, authorization) => {
+        entered();
+        await slowTransport;
+        return issueRefund(command, authorization);
+      });
+    const renew = vi.spyOn(caseStore, "renewDispatchLease");
+
+    let released = false;
+    try {
+      const recovery = recoverApprovedNativeDecisions(mastra, caseStore, {
+        disableScorers: true,
+      });
+      await enteredSlowTransport;
+      await new Promise((resolve) => setTimeout(resolve, 45));
+      expect(renew.mock.calls.length).toBeGreaterThan(1);
+      release();
+      released = true;
+      expect(await recovery).toBe(1);
+    } finally {
+      if (!released) release();
+      slowProvider.mockRestore();
+    }
+    expect(await localRefundCount(caseStore)).toBe(1);
+    expect((await caseStore.get(caseId))?.status).toBe("resolved");
+  });
+
+  it("does not project a native recovery after its heartbeat loses the replacement token", async () => {
+    const caseId = `native-agent-lost-lease-${crypto.randomUUID()}`;
+    let entered!: () => void;
+    const enteredSlowTransport = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const slowTransport = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { caseStore, mastra, native, recoverApprovedNativeDecisions } =
+      await setup(caseId);
+    process.env.SUPPORT_TEST_DISPATCH_LEASE_MS = "30";
+    process.env.SUPPORT_TEST_DISPATCH_HEARTBEAT_MS = "5";
+    await caseStore.recordApprovalDecision({
+      caseId,
+      turnId: native.turnId,
+      commandFingerprint: native.fingerprint,
+      principalId: "approver-demo",
+      approved: true,
+      nativeRunId: native.runId,
+      nativeToolCallId: native.toolCallId,
+    });
+    const { localRuntime } =
+      await import("../../src/mastra/runtime/local-runtime");
+    const issueRefund = localRuntime.issueRefund.bind(localRuntime);
+    const slowProvider = vi
+      .spyOn(localRuntime, "issueRefund")
+      .mockImplementation(async (command, authorization) => {
+        entered();
+        await slowTransport;
+        return issueRefund(command, authorization);
+      });
+
+    let released = false;
+    try {
+      const recovery = recoverApprovedNativeDecisions(mastra, caseStore, {
+        disableScorers: true,
+      });
+      await enteredSlowTransport;
+      await caseStore.getClientForTests().execute({
+        sql: "UPDATE support_dispatch SET lease_token = ? WHERE case_id = ?",
+        args: ["replacement-owner", caseId],
+      });
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      release();
+      released = true;
+      expect(await recovery).toBe(0);
+    } finally {
+      if (!released) release();
+      slowProvider.mockRestore();
+    }
+    expect(await localRefundCount(caseStore)).toBe(0);
+    // The winning decision has already moved the case into its durable
+    // processing projection. The stale worker must not advance it to a
+    // refund/final outcome after another lease owner takes over.
+    expect((await caseStore.get(caseId))?.status).toBe("processing");
+    const dispatch = await caseStore.getClientForTests().execute({
+      sql: "SELECT state, lease_token FROM support_dispatch WHERE case_id = ?",
+      args: [caseId],
+    });
+    expect(dispatch.rows[0]).toMatchObject({
+      state: "claimed",
+      lease_token: "replacement-owner",
+    });
+  });
+
   it("removes an expired real native snapshot while preserving another active native approval", async () => {
     const caseId = "retention-real-native";
     const {
@@ -1120,45 +1372,6 @@ describe("native approval workflow recovery", () => {
       nativeRunId: native.runId,
       nativeToolCallId: native.toolCallId,
     });
-    const dispatch = await caseStore.claimDispatchForResume(
-      caseId,
-      (await caseStore.get(caseId))!.workflowRunId,
-      native.turnId,
-    );
-    const { withDispatchLeaseScope } =
-      await import("../../src/mastra/lib/dispatch-lease-scope");
-    const { resumeApprovedNativeTool } =
-      await import("../../src/mastra/providers/native-execution");
-    await withDispatchLeaseScope(
-      {
-        dispatchId: dispatch!.id,
-        caseId,
-        turnId: native.turnId,
-        leaseToken: dispatch!.leaseToken!,
-      },
-      () =>
-        resumeApprovedNativeTool({
-          mastra,
-          approved: true,
-          scope: {
-            caseId,
-            turnId: native.turnId,
-            nativeRunId: native.runId,
-            nativeToolCallId: native.toolCallId,
-            commandFingerprint: native.fingerprint,
-            dispatchId: dispatch!.id,
-            leaseToken: dispatch!.leaseToken!,
-          },
-        }),
-    );
-    await caseStore.completeDispatch(
-      dispatch!.id,
-      "suspended",
-      undefined,
-      dispatch!.leaseToken,
-    );
-    expect(await localRefundCount(caseStore)).toBe(1);
-    expect((await caseStore.get(caseId))?.refundResult).toBeUndefined();
     expect(
       await recoverApprovedNativeDecisions(mastra, caseStore, {
         disableScorers: true,
@@ -1169,6 +1382,122 @@ describe("native approval workflow recovery", () => {
       status: "executed",
     });
     expect(await localRefundCount(caseStore)).toBe(1);
+    const persisted = await caseStore.getClientForTests().execute({
+      sql: "SELECT (SELECT COUNT(*) FROM support_decisions WHERE case_id = ?) AS decisions, (SELECT state FROM support_outbox WHERE case_id = ?) AS outbox_state",
+      args: [caseId, caseId],
+    });
+    expect(persisted.rows[0]).toMatchObject({
+      decisions: 1,
+      outbox_state: "delivered",
+    });
+    expect((await caseStore.get(caseId))?.status).toBe("resolved");
+    expect(
+      await recoverApprovedNativeDecisions(mastra, caseStore, {
+        disableScorers: true,
+      }),
+    ).toBe(0);
+    expect(await localRefundCount(caseStore)).toBe(1);
+  });
+
+  it("reconciles a drop-after-commit refund on the first registered HTTP approval without repair", async () => {
+    const caseId = `http-drop-${crypto.randomUUID()}`;
+    const binding = {
+      tenantId: "local-demo",
+      providerKind: "local" as const,
+      providerAccountId: `http-drop-${caseId}`,
+      externalConversationId: `http-drop-conversation-${caseId}`,
+    };
+    const { app, caseStore, mastra, native, recoverApprovedNativeDecisions } =
+      await setup(caseId, binding, (request) =>
+        request.url.endsWith("/transactions/issue-refund")
+          ? "drop-after-commit"
+          : undefined,
+      );
+
+    const response = await app.request(
+      `http://support.test/support/cases/${caseId}/approve`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${issueLocalSession({ id: "approver-demo" })}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ commandFingerprint: native.fingerprint }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await localRefundCount(caseStore)).toBe(1);
+    expect(await caseStore.get(caseId)).toMatchObject({
+      status: "resolved",
+      refundResult: { amount: 20, status: "executed" },
+    });
+    const durable = await caseStore.getClientForTests().execute({
+      sql: "SELECT (SELECT COUNT(*) FROM support_decisions WHERE case_id = ?) AS decisions, (SELECT COUNT(*) FROM support_idempotency) AS effects, (SELECT state FROM support_outbox WHERE case_id = ?) AS outbox_state",
+      args: [caseId, caseId],
+    });
+    expect(durable.rows[0]).toMatchObject({
+      decisions: 1,
+      effects: 1,
+      outbox_state: "delivered",
+    });
+    expect(
+      await recoverApprovedNativeDecisions(mastra, caseStore, {
+        disableScorers: true,
+      }),
+    ).toBe(0);
+    expect(await localRefundCount(caseStore)).toBe(1);
+  });
+
+  it("makes a completed native tool failure explicit instead of resuming it forever", async () => {
+    const caseId = `native-no-effect-${crypto.randomUUID()}`;
+    const { caseStore, mastra, native, recoverApprovedNativeDecisions } =
+      await setup(caseId);
+    await caseStore.recordApprovalDecision({
+      caseId,
+      turnId: native.turnId,
+      commandFingerprint: native.fingerprint,
+      principalId: "approver-demo",
+      approved: true,
+      nativeRunId: native.runId,
+      nativeToolCallId: native.toolCallId,
+    });
+    const { localRuntime } =
+      await import("../../src/mastra/runtime/local-runtime");
+    const providerFailure = vi
+      .spyOn(localRuntime, "issueRefund")
+      .mockRejectedValue(new Error("injected permanent provider rejection"));
+
+    // Mastra completes the native approval transition and returns the tool
+    // error to the Agent. No effect row exists, so recovery must make the
+    // failure durable rather than attempting the consumed snapshot again.
+    expect(
+      await recoverApprovedNativeDecisions(mastra, caseStore, {
+        disableScorers: true,
+      }),
+    ).toBe(0);
+    providerFailure.mockRestore();
+    expect(await localRefundCount(caseStore)).toBe(0);
+    expect(await caseStore.get(caseId)).toMatchObject({
+      status: "failed",
+      escalationReason:
+        "Native approval completed without a durable refund effect.",
+    });
+    const durable = await caseStore.getClientForTests().execute({
+      sql: "SELECT (SELECT COUNT(*) FROM support_decisions WHERE case_id = ?) AS decisions, (SELECT COUNT(*) FROM support_idempotency) AS effects, (SELECT state FROM support_dispatch WHERE case_id = ?) AS dispatch_state, (SELECT state FROM support_turns WHERE case_id = ?) AS turn_state",
+      args: [caseId, caseId, caseId],
+    });
+    expect(durable.rows[0]).toMatchObject({
+      decisions: 1,
+      effects: 0,
+      dispatch_state: "failed",
+      turn_state: "failed",
+    });
+    expect(
+      await recoverApprovedNativeDecisions(mastra, caseStore, {
+        disableScorers: true,
+      }),
+    ).toBe(0);
   });
 
   it("rejects a lease reclaimed between the tool precheck and effect transaction", async () => {

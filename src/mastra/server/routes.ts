@@ -1,7 +1,11 @@
 import { registerApiRoute, type ContextWithMastra } from "@mastra/core/server";
 import { caseStore } from "../lib/case-store";
-import { withDispatchLeaseScope } from "../lib/dispatch-lease-scope";
+import {
+  renewDispatchLeaseWhileRunning,
+  withDispatchLeaseScope,
+} from "../lib/dispatch-lease-scope";
 import { resumeApprovedNativeTool } from "../providers/native-execution";
+import { reconcileApprovedRefundEffect } from "../runtime/local-runtime";
 import { REQUEST_APPROVAL_STEP_ID } from "../workflows/resolve-support-case";
 import { computeMonitoringSummary } from "../lib/monitoring";
 import type { CaseFeedback, SupportCase } from "../domain/support-case";
@@ -313,13 +317,21 @@ export const supportCaseFollowUpRoute = registerApiRoute(
       const dispatch = await caseStore.claimDispatchForStart(caseId, runId);
       if (!dispatch)
         return c.json(scopedCaseDto((await caseStore.get(caseId))!, current));
+      const lease = renewDispatchLeaseWhileRunning(caseStore, dispatch);
       try {
+        await lease.renew();
+        if (lease.lostOwnership)
+          return c.json(
+            { error: "Follow-up lost its dispatch lease; reload the case." },
+            409,
+          );
+        lease.start();
         if (!(await caseStore.activateDispatch(dispatch)))
           return c.json(scopedCaseDto((await caseStore.get(caseId))!, current));
         const run = await mastra
           .getWorkflow("resolveSupportCaseWorkflow")
           .createRun({ runId });
-        const result = await withDispatchLeaseScope(
+        const result = await withDispatchLeaseScope<{ status: string }>(
           {
             dispatchId: dispatch.id,
             caseId: dispatch.caseId,
@@ -332,12 +344,69 @@ export const supportCaseFollowUpRoute = registerApiRoute(
               requestContext: c.get("requestContext"),
             }),
         );
-        await caseStore.completeDispatch(
-          dispatch.id,
-          result.status === "suspended" ? "suspended" : "completed",
-          undefined,
-          dispatch.leaseToken,
-        );
+        if (lease.lostOwnership)
+          return c.json(
+            { error: "Follow-up lost its dispatch lease; reload the case." },
+            409,
+          );
+        if (result.status === "failed") {
+          const failed = await caseStore.failDispatchAndCase(
+            dispatch.id,
+            caseId,
+            "Follow-up resolution failed.",
+            dispatch.leaseToken,
+          );
+          if (!failed)
+            return c.json(
+              { error: "Follow-up lost its dispatch lease; reload the case." },
+              409,
+            );
+          return c.json({ error: "Follow-up resolution failed." }, 500);
+        }
+        if (
+          result.status === "suspended" ||
+          result.status === "paused" ||
+          result.status === "waiting"
+        ) {
+          if (
+            !(await caseStore.completeDispatch(
+              dispatch.id,
+              "suspended",
+              undefined,
+              dispatch.leaseToken,
+            ))
+          )
+            return c.json(
+              { error: "Follow-up lost its dispatch lease; reload the case." },
+              409,
+            );
+        } else if (result.status === "success") {
+          if (
+            !(await caseStore.completeDispatch(
+              dispatch.id,
+              "completed",
+              undefined,
+              dispatch.leaseToken,
+            ))
+          )
+            return c.json(
+              { error: "Follow-up lost its dispatch lease; reload the case." },
+              409,
+            );
+        } else {
+          const failed = await caseStore.failDispatchAndCase(
+            dispatch.id,
+            caseId,
+            `Follow-up resolution returned ${result.status}.`,
+            dispatch.leaseToken,
+          );
+          if (!failed)
+            return c.json(
+              { error: "Follow-up lost its dispatch lease; reload the case." },
+              409,
+            );
+          return c.json({ error: "Follow-up resolution failed." }, 500);
+        }
       } catch (error) {
         await caseStore
           .failDispatchAndCase(dispatch.id, caseId, error, dispatch.leaseToken)
@@ -348,6 +417,8 @@ export const supportCaseFollowUpRoute = registerApiRoute(
           }),
           500,
         );
+      } finally {
+        lease.stop();
       }
       return c.json(scopedCaseDto((await caseStore.get(caseId))!, current));
     },
@@ -442,7 +513,12 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
   const mastra = c.get("mastra");
   const resolveWorkflow = mastra.getWorkflow("resolveSupportCaseWorkflow");
   const command = (supportCase.metadata as Record<string, unknown>)
-    .refundCommand as { fingerprint?: string } | undefined;
+    .refundCommand as
+    | {
+        fingerprint?: string;
+        idempotencyKey?: string;
+      }
+    | undefined;
   if (!command?.fingerprint)
     return c.json(
       errorResponseSchema.parse({
@@ -520,23 +596,16 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
       },
       409,
     );
-  let leaseLost = false;
-  const renewLease = async () => {
-    try {
-      if (
-        !(await caseStore.renewDispatchLease(dispatch.id, dispatch.leaseToken!))
-      )
-        leaseLost = true;
-    } catch {
-      // A renewal failure means the caller can no longer safely project the
-      // resume result onto the case.  Do not turn it into a detached rejection.
-      leaseLost = true;
-    }
-  };
-  const heartbeat = setInterval(() => void renewLease(), 10_000);
-  heartbeat.unref();
+  const lease = renewDispatchLeaseWhileRunning(caseStore, dispatch);
   let nativeResumed = false;
   try {
+    await lease.renew();
+    if (lease.lostOwnership)
+      return c.json(
+        { error: "Approval resume lost its dispatch lease; reload the case." },
+        409,
+      );
+    lease.start();
     await withDispatchLeaseScope(
       {
         dispatchId: dispatch.id,
@@ -567,7 +636,7 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
     await caseStore
       .completeDispatch(dispatch.id, "suspended", error, dispatch.leaseToken)
       .catch(() => undefined);
-    clearInterval(heartbeat);
+    lease.stop();
     return c.json(
       errorResponseSchema.parse({
         error: error instanceof Error ? error.message : String(error),
@@ -576,6 +645,54 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
     );
   }
   try {
+    if (approved && command.idempotencyKey) {
+      const currentCase = await caseStore.get(caseId);
+      const reconciled = await reconcileApprovedRefundEffect({
+        store: caseStore,
+        supportCase: currentCase ?? supportCase,
+        dispatch,
+        fingerprint: command.fingerprint,
+        command: (currentCase?.metadata as Record<string, unknown> | undefined)
+          ?.refundCommand as
+          | {
+              orderId?: string;
+              idempotencyKey?: string;
+              fingerprint?: string;
+              amount?: number;
+              currency?: string;
+            }
+          | undefined,
+      });
+      if (!reconciled) {
+        // A normally resolved native transition with no exact provider effect
+        // is a completed tool failure. Transport/snapshot errors take the
+        // earlier catch path and remain recoverable; do not loop forever on a
+        // native snapshot that Mastra has already consumed.
+        const failed = await caseStore.failDispatchAndCase(
+          dispatch.id,
+          caseId,
+          "Native approval completed without a durable refund effect.",
+          dispatch.leaseToken,
+        );
+        if (!failed)
+          return c.json(
+            {
+              error:
+                "Approval resume lost its dispatch lease; reload the case.",
+            },
+            409,
+          );
+        return c.json(
+          { error: "Approval completed without a durable refund effect." },
+          500,
+        );
+      }
+    }
+    if (lease.lostOwnership)
+      return c.json(
+        { error: "Approval resume lost its dispatch lease; reload the case." },
+        409,
+      );
     const run = await resolveWorkflow.createRun({
       runId: supportCase.workflowRunId,
     });
@@ -601,7 +718,7 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
         });
       },
     );
-    if (leaseLost)
+    if (lease.lostOwnership)
       return c.json(
         { error: "Approval resume lost its dispatch lease; reload the case." },
         409,
@@ -624,19 +741,47 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
       return c.json({ error: "Resolution failed after resume.", result }, 500);
     }
 
-    await caseStore.completeDispatch(
-      dispatch.id,
-      result.status === "suspended" ? "suspended" : "completed",
-      undefined,
-      dispatch.leaseToken,
-    );
+    const finalState =
+      result.status === "success"
+        ? "completed"
+        : result.status === "suspended" || result.status === "paused"
+          ? "suspended"
+          : undefined;
+    if (!finalState) {
+      const failed = await caseStore.failDispatchAndCase(
+        dispatch.id,
+        caseId,
+        `Resolution returned ${result.status} after approval resume.`,
+        dispatch.leaseToken,
+      );
+      if (!failed)
+        return c.json(
+          {
+            error: "Approval resume lost its dispatch lease; reload the case.",
+          },
+          409,
+        );
+      return c.json({ error: "Resolution failed after resume." }, 500);
+    }
+    if (
+      !(await caseStore.completeDispatch(
+        dispatch.id,
+        finalState,
+        undefined,
+        dispatch.leaseToken,
+      ))
+    )
+      return c.json(
+        { error: "Approval resume lost its dispatch lease; reload the case." },
+        409,
+      );
 
     return c.json(scopedCaseDto((await caseStore.get(caseId))!, current));
   } catch (error: any) {
     if (error?.id === "WORKFLOW_RESUME_ALREADY_CLAIMED") {
       return c.json({ error: "This approval was already submitted." }, 409);
     }
-    if (!leaseLost && nativeResumed) {
+    if (!lease.lostOwnership && nativeResumed) {
       const failed = await caseStore
         .failDispatchAndCase(dispatch.id, caseId, error, dispatch.leaseToken)
         .catch(() => false);
@@ -653,7 +798,7 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
       500,
     );
   } finally {
-    clearInterval(heartbeat);
+    lease.stop();
   }
 }
 

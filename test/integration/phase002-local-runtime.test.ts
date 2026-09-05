@@ -1255,6 +1255,23 @@ describe("Phase 002 persistent local runtime", () => {
       sql: "UPDATE support_dispatch SET lease_until = ? WHERE id = ?",
       args: ["2000-01-01T00:00:00.000Z", first.id],
     });
+    await expect(
+      store.failDispatchAndCase(
+        first.id,
+        support.id,
+        "expired worker failed",
+        first.leaseToken,
+      ),
+    ).resolves.toBe(false);
+    expect((await store.get(support.id))?.status).toBe("new");
+    expect(
+      (
+        await store.getClientForTests().execute({
+          sql: "SELECT state FROM support_dispatch WHERE id = ?",
+          args: [first.id],
+        })
+      ).rows[0],
+    ).toMatchObject({ state: "claimed" });
     const [second] = await store.claimDispatch();
     await expect(
       store.failDispatchAndCase(
