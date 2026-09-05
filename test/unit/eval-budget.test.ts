@@ -11,7 +11,10 @@ describe("eval budget ledger", () => {
       actualMicros: 5_000_000n,
       reservedMicros: 0n,
     });
+    expect(() => budget.reserve(1n)).toThrow("budget exhausted");
+    expect(() => budget.reconcile(reservation, 1n)).toThrow("Unknown, foreign");
     expect(() => budget.reserve(0n)).toThrow("unknown or invalid");
-    expect(() => budget.reconcile(1n, -1n)).toThrow("unknown or invalid");
+    const other = new EvalBudgetLedger("ci-eval").reserve(1n);
+    expect(() => budget.reconcile(other, -1n)).toThrow("Unknown, foreign");
   });
 });

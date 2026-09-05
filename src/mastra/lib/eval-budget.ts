@@ -10,24 +10,42 @@ export const budgetLimitMicros: Record<BudgetMode, bigint> = {
 export class EvalBudgetLedger {
   private reserved = 0n;
   private actual = 0n;
+  private readonly reservations = new Map<string, bigint>();
   constructor(readonly mode: BudgetMode) {}
 
   reserve(estimatedMicros: bigint) {
     if (estimatedMicros <= 0n)
       throw new Error("Model request has unknown or invalid price estimate.");
-    if (this.reserved + estimatedMicros > budgetLimitMicros[this.mode])
+    if (
+      this.actual + this.reserved + estimatedMicros >
+      budgetLimitMicros[this.mode]
+    )
       throw new Error(`Evaluation budget exhausted for ${this.mode}.`);
     this.reserved += estimatedMicros;
-    return estimatedMicros;
+    const id = crypto.randomUUID();
+    this.reservations.set(id, estimatedMicros);
+    return { id, estimatedMicros };
   }
 
-  reconcile(reservation: bigint, actualMicros: bigint) {
-    if (reservation <= 0n || actualMicros < 0n)
+  reconcile(
+    reservation: { id: string; estimatedMicros: bigint },
+    actualMicros: bigint,
+  ) {
+    const reservedMicros = this.reservations.get(reservation.id);
+    if (
+      reservedMicros === undefined ||
+      reservation.estimatedMicros !== reservedMicros
+    )
+      throw new Error(
+        "Unknown, foreign, or already reconciled budget reservation.",
+      );
+    if (actualMicros < 0n)
       throw new Error("Model request has unknown or invalid actual usage.");
-    if (actualMicros > reservation)
+    if (actualMicros > reservedMicros)
       throw new Error("Actual model usage exceeded the pre-call reservation.");
     this.actual += actualMicros;
-    this.reserved -= reservation;
+    this.reserved -= reservedMicros;
+    this.reservations.delete(reservation.id);
   }
 
   snapshot() {

@@ -1,51 +1,41 @@
-import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFile, readdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-const files = (await readdir(new URL("../evals/datasets/", import.meta.url)))
-  .filter((file) => file.endsWith(".json"))
-  .sort();
-const datasets = await Promise.all(
-  files.map(async (file) => ({
-    file,
-    bytes: await readFile(
-      new URL(`../evals/datasets/${file}`, import.meta.url),
-    ),
-  })),
-);
-const datasetHashes = Object.fromEntries(
-  datasets.map(({ file, bytes }) => [
-    file,
-    createHash("sha256").update(bytes).digest("hex"),
-  ]),
-);
-const implementationSha = execFileSync("git", ["rev-parse", "HEAD"], {
-  encoding: "utf8",
-}).trim();
-const report = {
-  kind: "support-eval-candidate",
-  runner: "deterministic-native-targets-v1",
-  executionMode: "deterministic",
-  implementationSha,
-  datasetHashes,
-  reportHash: createHash("sha256")
-    .update(
-      JSON.stringify({
-        implementationSha,
-        datasetHashes,
-        runner: "deterministic-native-targets-v1",
-      }),
-    )
-    .digest("hex"),
-  regression: "pending-human-baseline-approval",
-  approvalRequired: [
-    "reportHash",
-    "datasetHashes",
-    "runner",
-    "implementationSha",
-    "executionMode",
-    "perCaseScores",
-    "sixAxisScores",
-  ],
-};
-console.log(JSON.stringify(report, null, 2));
+const directory = await mkdtemp(join(tmpdir(), "support-eval-report-"));
+const reportPath = join(directory, "native-report.json");
+try {
+  execFileSync(
+    "npx",
+    ["vitest", "run", "test/eval/phase004-native-execution.eval.test.ts"],
+    {
+      stdio: "inherit",
+      env: { ...process.env, SUPPORT_EVAL_REPORT_PATH: reportPath },
+    },
+  );
+  const execution = JSON.parse(await readFile(reportPath, "utf8"));
+  const implementationSha = execFileSync("git", ["rev-parse", "HEAD"], {
+    encoding: "utf8",
+  }).trim();
+  const report = {
+    kind: "support-eval-candidate",
+    runner: execution.runner,
+    executionMode: execution.executionMode,
+    implementationSha,
+    ...execution,
+    regression: "pending-human-baseline-approval",
+  };
+  report.reportHash = createHash("sha256")
+    .update(JSON.stringify(report))
+    .digest("hex");
+  if (process.env.SUPPORT_EVAL_CANDIDATE_OUTPUT)
+    await writeFile(
+      process.env.SUPPORT_EVAL_CANDIDATE_OUTPUT,
+      JSON.stringify(report),
+    );
+  console.log(JSON.stringify(report, null, 2));
+} finally {
+  await rm(directory, { force: true, recursive: true });
+}
