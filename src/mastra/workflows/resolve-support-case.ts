@@ -68,6 +68,10 @@ const classifyStep = createStep({
     const traceId = tracingContext?.currentSpan?.traceId;
     if (traceId) {
       await caseStore.update(supportCase.id, { traceId });
+      await caseStore.recordTurnTelemetry(supportCase.id, inputData.turnId, {
+        traceId,
+        workflowRunId: supportCase.workflowRunId,
+      });
     }
 
     const result = await mastra.getAgent("triageAgent").generate(

@@ -878,19 +878,25 @@ export const supportCaseFeedbackRoute = registerApiRoute(
         );
       }
 
+      const activeTurnId = (supportCase.metadata as Record<string, unknown>)
+        .activeTurnId;
+      const activeTurn =
+        typeof activeTurnId === "string"
+          ? await caseStore.turn(caseId, activeTurnId)
+          : undefined;
+      const telemetry =
+        activeTurn?.outcome?.telemetry &&
+        typeof activeTurn.outcome.telemetry === "object"
+          ? (activeTurn.outcome.telemetry as { traceId?: string })
+          : undefined;
       const feedback: CaseFeedback = {
         rating: parsed.data.rating,
         comment: parsed.data.comment,
         submittedAt: new Date().toISOString(),
         actorId: current.id,
-        turnId:
-          typeof (supportCase.metadata as Record<string, unknown>)
-            .activeTurnId === "string"
-            ? ((supportCase.metadata as Record<string, unknown>)
-                .activeTurnId as string)
-            : undefined,
-        runId: supportCase.workflowRunId,
-        traceId: supportCase.traceId,
+        turnId: typeof activeTurnId === "string" ? activeTurnId : undefined,
+        runId: activeTurn?.runId ?? supportCase.workflowRunId,
+        traceId: telemetry?.traceId ?? supportCase.traceId,
       };
       const updated = await caseStore.update(caseId, { feedback });
 

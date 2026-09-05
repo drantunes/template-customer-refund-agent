@@ -1840,6 +1840,25 @@ export class CaseStore {
   ): Promise<SupportTurnRecord | undefined> {
     return (await this.turns(caseId)).find((turn) => turn.id === turnId);
   }
+  /** Immutable turn correlation survives later follow-up projections. */
+  async recordTurnTelemetry(
+    caseId: string,
+    turnId: string,
+    telemetry: { traceId?: string; workflowRunId?: string },
+  ) {
+    await this.ensured();
+    const current = await this.turn(caseId, turnId);
+    if (!current) throw new Error("Turn is missing for telemetry correlation.");
+    await this.client.execute({
+      sql: "UPDATE support_turns SET outcome_data = ?, updated_at = ? WHERE id = ? AND case_id = ?",
+      args: [
+        JSON.stringify({ ...current.outcome, telemetry }),
+        now(),
+        turnId,
+        caseId,
+      ],
+    });
+  }
   async bindTurnCommand(caseId: string, turnId: string, fingerprint: string) {
     await this.ensured();
     const changed = await this.client.execute({

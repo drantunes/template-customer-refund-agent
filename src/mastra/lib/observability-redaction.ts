@@ -123,7 +123,12 @@ export class ApplicationSpanRedactor implements SpanOutputProcessor {
       if (Object.hasOwn(mutable, key))
         mutable[key] = redactObservabilityValue(mutable[key]);
     for (const key of ["input", "output", "error", "errorInfo"])
-      if (Object.hasOwn(mutable, key)) mutable[key] = REDACTED_CONTENT;
+      if (
+        Object.hasOwn(mutable, key) &&
+        mutable[key] !== undefined &&
+        mutable[key] !== null
+      )
+        mutable[key] = REDACTED_CONTENT;
     return span;
   }
 
