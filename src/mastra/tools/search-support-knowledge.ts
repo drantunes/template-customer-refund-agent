@@ -1,12 +1,9 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import {
-  ensureProviderFixtures,
-  providerRegistry,
-  resolveConfiguredBinding,
-} from "../providers/registry";
+import { resolveConfiguredBinding } from "../providers/registry";
 import { knowledgePublicationStore } from "../lib/knowledge-publications";
 import { searchPublishedVector } from "../lib/vector-store";
+import { publishKnowledge } from "../lib/publish-knowledge";
 
 const bindingSchema = z.object({
   tenantId: z.string(),
@@ -48,32 +45,9 @@ export const searchSupportKnowledgeTool = createTool({
   }),
   execute: async ({ queryText, topK, binding }) => {
     const configured = resolveConfiguredBinding(binding);
-    await ensureProviderFixtures(configured);
     // Bootstrap a serving generation only when this account has never been
     // published. Subsequent searches never ask the provider directly.
-    if (!(await knowledgePublicationStore.activeGeneration(configured))) {
-      const provider = providerRegistry(configured).knowledge(configured);
-      const refs = await provider.listChanged(configured);
-      const documents = await Promise.all(
-        refs.map(async ({ source }) => {
-          const document = await provider.fetchDocument(configured, source);
-          if (!document)
-            throw new Error(
-              `Knowledge document ${source} disappeared during initial publication.`,
-            );
-          return document;
-        }),
-      );
-      const candidate = await knowledgePublicationStore.buildCandidate(
-        configured,
-        documents,
-      );
-      await knowledgePublicationStore.activate(
-        configured,
-        candidate.generationId,
-        undefined,
-      );
-    }
+    await publishKnowledge(configured, { onlyIfMissing: true });
     const lexicalEvidence = await knowledgePublicationStore.search(
       configured,
       queryText,
@@ -83,7 +57,7 @@ export const searchSupportKnowledgeTool = createTool({
       await knowledgePublicationStore.activeGeneration(configured);
     const evidence =
       process.env.SUPPORT_KNOWLEDGE_RETRIEVAL === "vector" && generationId
-        ? await searchPublishedVector(generationId, queryText, topK)
+        ? await searchPublishedVector(configured, generationId, queryText, topK)
         : lexicalEvidence;
     return {
       sources: evidence.map((entry) => ({

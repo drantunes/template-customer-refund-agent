@@ -189,6 +189,19 @@ export function CaseDetail({
                       <p className="line-clamp-3 text-muted-foreground">
                         {match.text}
                       </p>
+                      <p className="text-xs text-muted-foreground">
+                        Source: {match.source}
+                        {match.version ? ` · version ${match.version}` : ""}
+                        {match.effectiveAt
+                          ? ` · effective ${new Date(match.effectiveAt).toLocaleDateString()}`
+                          : ""}
+                        {match.expiresAt
+                          ? ` · expires ${new Date(match.expiresAt).toLocaleDateString()}`
+                          : ""}
+                        {match.documentHash
+                          ? ` · hash ${match.documentHash.slice(0, 12)}…`
+                          : ""}
+                      </p>
                     </div>
                   ))}
                 </div>

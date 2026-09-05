@@ -2,8 +2,11 @@ import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const databaseFiles: string[] = [];
+let invalidEmbedding = false;
 
 afterEach(async () => {
+  delete process.env.SUPPORT_KNOWLEDGE_RETRIEVAL;
+  invalidEmbedding = false;
   vi.doUnmock("@mastra/core/llm");
   await Promise.all(
     databaseFiles.splice(0).map((path) => rm(path, { force: true })),
@@ -19,6 +22,7 @@ describe("support knowledge index", () => {
       `${databasePath}-wal`,
     );
     process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
+    process.env.SUPPORT_KNOWLEDGE_RETRIEVAL = "vector";
     vi.resetModules();
     vi.doMock("@mastra/core/llm", async (importOriginal) => {
       const actual = await importOriginal<typeof import("@mastra/core/llm")>();
@@ -27,7 +31,9 @@ describe("support knowledge index", () => {
         ModelRouterEmbeddingModel: class DeterministicEmbeddingModel {
           async doEmbed({ values }: { values: string[] }) {
             return {
-              embeddings: values.map(() => [1, ...Array(1535).fill(0)]),
+              embeddings: values.map(() =>
+                invalidEmbedding ? [1] : [1, ...Array(1535).fill(0)],
+              ),
             };
           }
         },
@@ -41,7 +47,16 @@ describe("support knowledge index", () => {
     const run = await mastra
       .getWorkflow("indexSupportKnowledgeWorkflow")
       .createRun();
-    const indexed = await run.start({ inputData: {} });
+    const indexed = await run.start({
+      inputData: {
+        binding: {
+          tenantId: "local-demo",
+          providerKind: "local",
+          providerAccountId: "local-demo",
+          externalConversationId: "index-characterization",
+        },
+      },
+    });
     expect(indexed).toMatchObject({
       status: "success",
       result: { indexed: expect.any(Number) },
@@ -64,6 +79,40 @@ describe("support knowledge index", () => {
       source: expect.any(String),
       generationId: expect.any(String),
       documentHash: expect.any(String),
+      effectiveAt: "2026-01-01T00:00:00.000Z",
+      indexedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
     });
+    const publishedGeneration = results.sources[0]!.metadata.generationId;
+    invalidEmbedding = true;
+    const failed = await mastra
+      .getWorkflow("indexSupportKnowledgeWorkflow")
+      .createRun()
+      .then((retry) =>
+        retry.start({
+          inputData: {
+            binding: {
+              tenantId: "local-demo",
+              providerKind: "local",
+              providerAccountId: "local-demo",
+              externalConversationId: "index-characterization-retry",
+            },
+          },
+        }),
+      );
+    expect(failed.status).toBe("failed");
+    invalidEmbedding = false;
+    const preserved = await searchSupportKnowledgeTool.execute({
+      queryText: "duplicate charge refund policy",
+      topK: 1,
+      binding: {
+        tenantId: "local-demo",
+        providerKind: "local",
+        providerAccountId: "local-demo",
+        externalConversationId: "test-after-failure",
+      },
+    });
+    expect(preserved.sources[0]?.metadata.generationId).toBe(
+      publishedGeneration,
+    );
   });
 });

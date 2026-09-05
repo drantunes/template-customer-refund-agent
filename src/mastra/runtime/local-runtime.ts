@@ -120,7 +120,7 @@ export class LocalRuntime
       CREATE TABLE IF NOT EXISTS local_orders (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, order_id TEXT NOT NULL, customer_email TEXT NOT NULL, product TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, charge_count INTEGER NOT NULL, placed_at TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, order_id));
       CREATE TABLE IF NOT EXISTS local_subscriptions (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, subscription_id TEXT NOT NULL, customer_email TEXT NOT NULL, plan TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, renews_at TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, subscription_id));
       CREATE TABLE IF NOT EXISTS local_refunds (refund_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, order_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, reason TEXT NOT NULL, issued_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS local_knowledge (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, version TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, source));
+      CREATE TABLE IF NOT EXISTS local_knowledge (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, version TEXT NOT NULL, effective_at TEXT, expires_at TEXT, PRIMARY KEY(tenant_id, provider_account_id, source));
       CREATE TABLE IF NOT EXISTS local_deliveries (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, payload_fingerprint TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, idempotency_key));
     `);
     try {
@@ -130,6 +130,15 @@ export class LocalRuntime
     } catch (error) {
       if (!String(error).includes("duplicate column")) throw error;
     }
+    for (const sql of [
+      "ALTER TABLE local_knowledge ADD COLUMN effective_at TEXT",
+      "ALTER TABLE local_knowledge ADD COLUMN expires_at TEXT",
+    ])
+      try {
+        await this.client.execute(sql);
+      } catch (error) {
+        if (!String(error).includes("duplicate column")) throw error;
+      }
   }
   private assertLocalBinding(binding: ProviderBinding) {
     if (
@@ -227,7 +236,7 @@ export class LocalRuntime
           args,
         },
         ...POLICY_DOCUMENTS.map((document) => ({
-          sql: "INSERT OR IGNORE INTO local_knowledge VALUES (?, ?, ?, ?, ?, 'local-v1')",
+          sql: "INSERT OR IGNORE INTO local_knowledge(tenant_id, provider_account_id, source, title, text, version, effective_at, expires_at) VALUES (?, ?, ?, ?, ?, 'local-v1', '2026-01-01T00:00:00.000Z', NULL)",
           args: [...args, document.source, document.title, document.text],
         })),
       ],
@@ -627,6 +636,10 @@ export class LocalRuntime
           text: text(value.text),
           source: text(value.source),
           version: text(value.version),
+          effectiveAt: value.effective_at
+            ? text(value.effective_at)
+            : undefined,
+          expiresAt: value.expires_at ? text(value.expires_at) : undefined,
           score:
             terms.filter((term) => haystack.includes(term)).length /
             Math.max(terms.length, 1),
@@ -639,13 +652,13 @@ export class LocalRuntime
   async listChanged(binding: ProviderBinding) {
     await this.ensured();
     const result = await this.client.execute({
-      sql: "SELECT source, version FROM local_knowledge WHERE tenant_id = ? AND provider_account_id = ?",
+      sql: "SELECT source, version, effective_at FROM local_knowledge WHERE tenant_id = ? AND provider_account_id = ?",
       args: [binding.tenantId, binding.providerAccountId],
     });
     return result.rows.map((row) => ({
       source: text(row.source),
       version: text(row.version),
-      changedAt: "2026-09-05T00:00:00.000Z",
+      changedAt: text(row.effective_at),
     }));
   }
   async fetchDocument(binding: ProviderBinding, source: string) {
@@ -661,6 +674,8 @@ export class LocalRuntime
           text: text(row.text),
           source: text(row.source),
           version: text(row.version),
+          effectiveAt: row.effective_at ? text(row.effective_at) : undefined,
+          expiresAt: row.expires_at ? text(row.expires_at) : undefined,
           score: 1,
         }
       : undefined;

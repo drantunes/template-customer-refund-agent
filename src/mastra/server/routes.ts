@@ -962,7 +962,14 @@ export const supportKnowledgeReindexRoute = registerApiRoute(
       const workflow = mastra.getWorkflow("indexSupportKnowledgeWorkflow");
       const run = await workflow.createRun();
       const result = await run.start({
-        inputData: {},
+        inputData: {
+          binding: {
+            tenantId: current.tenantId,
+            providerKind: "local",
+            providerAccountId: "local-demo",
+            externalConversationId: `reindex:${current.id}`,
+          },
+        },
         requestContext: c.get("requestContext"),
       });
       if (result.status !== "success") {

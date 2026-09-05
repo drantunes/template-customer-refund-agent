@@ -27,6 +27,10 @@ export interface PublishedEvidence extends KnowledgeEvidence {
 }
 
 type Candidate = Omit<PublishedEvidence, "generationId" | "indexedAt">;
+export interface KnowledgePublication {
+  generationId?: string;
+  revision: number;
+}
 
 const accountKey = (binding: ProviderBinding) =>
   `${binding.tenantId}\u0000${binding.providerKind}\u0000${binding.providerAccountId}`;
@@ -54,11 +58,15 @@ export class KnowledgePublicationStore {
     this.ready ??= (async () => {
       await waitForMastraStorage();
       await this.client.executeMultiple(`
+        CREATE TABLE IF NOT EXISTS support_knowledge_schema_migrations (
+          version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS support_knowledge_generations (
           id TEXT PRIMARY KEY, account_key TEXT NOT NULL, tenant_id TEXT NOT NULL,
           provider_kind TEXT NOT NULL, provider_account_id TEXT NOT NULL,
           state TEXT NOT NULL CHECK(state IN ('candidate','active','rolled_back','failed')),
           created_at TEXT NOT NULL, activated_at TEXT, replaced_generation_id TEXT,
+          base_revision INTEGER NOT NULL DEFAULT 0,
           UNIQUE(account_key, id)
         );
         CREATE TABLE IF NOT EXISTS support_knowledge_documents (
@@ -73,6 +81,10 @@ export class KnowledgePublicationStore {
           published_at TEXT NOT NULL
         );
       `);
+      await this.client.execute({
+        sql: "INSERT OR IGNORE INTO support_knowledge_schema_migrations(version, applied_at) VALUES (1, ?)",
+        args: [new Date().toISOString()],
+      });
     })();
     await this.ready;
   }
@@ -80,13 +92,16 @@ export class KnowledgePublicationStore {
   async buildCandidate(
     binding: ProviderBinding,
     documents: KnowledgeEvidence[],
+    base?: KnowledgePublication,
   ) {
     await this.ensured();
+    base ??= await this.publication(binding);
     if (documents.length === 0)
       throw new Error("Knowledge candidate has no documents.");
     const now = new Date().toISOString();
     const generationId = `knowledge_${crypto.randomUUID()}`;
     const seen = new Set<string>();
+    const sourceVersions = new Map<string, string>();
     const candidates: Candidate[] = documents.map((document) => {
       if (
         !document.source ||
@@ -95,6 +110,23 @@ export class KnowledgePublicationStore {
         !document.version
       )
         throw new Error("Knowledge candidate has incomplete provenance.");
+      const effectiveAt = Date.parse(document.effectiveAt ?? "");
+      const expiresAt =
+        document.expiresAt === undefined
+          ? undefined
+          : Date.parse(document.expiresAt);
+      if (!Number.isFinite(effectiveAt))
+        throw new Error(
+          "Knowledge candidate has no valid source effective time.",
+        );
+      if (
+        effectiveAt > Date.now() ||
+        (expiresAt !== undefined &&
+          (!Number.isFinite(expiresAt) ||
+            expiresAt <= effectiveAt ||
+            expiresAt <= Date.now()))
+      )
+        throw new Error("Knowledge candidate has inactive source evidence.");
       const documentHash = createHash("sha256")
         .update(
           JSON.stringify([document.source, document.version, document.text]),
@@ -103,12 +135,16 @@ export class KnowledgePublicationStore {
       const identity = `${document.source}\u0000${documentHash}`;
       if (seen.has(identity))
         throw new Error("Knowledge candidate has duplicate document identity.");
+      const priorVersion = sourceVersions.get(document.source);
+      if (priorVersion && priorVersion !== document.version)
+        throw new Error("Knowledge candidate has conflicting source versions.");
       seen.add(identity);
+      sourceVersions.set(document.source, document.version);
       return {
         ...document,
         documentHash,
-        effectiveAt: now,
-        expiresAt: undefined,
+        effectiveAt: document.effectiveAt!,
+        expiresAt: document.expiresAt,
         providerKind: binding.providerKind,
         providerAccountId: binding.providerAccountId,
       };
@@ -116,7 +152,7 @@ export class KnowledgePublicationStore {
     const tx = await this.client.transaction("write");
     try {
       await tx.execute({
-        sql: "INSERT INTO support_knowledge_generations(id, account_key, tenant_id, provider_kind, provider_account_id, state, created_at) VALUES (?, ?, ?, ?, ?, 'candidate', ?)",
+        sql: "INSERT INTO support_knowledge_generations(id, account_key, tenant_id, provider_kind, provider_account_id, state, created_at, base_revision) VALUES (?, ?, ?, ?, ?, 'candidate', ?, ?)",
         args: [
           generationId,
           accountKey(binding),
@@ -124,6 +160,7 @@ export class KnowledgePublicationStore {
           binding.providerKind,
           binding.providerAccountId,
           now,
+          base.revision,
         ],
       });
       for (const document of candidates)
@@ -150,14 +187,14 @@ export class KnowledgePublicationStore {
       } catch {}
       throw error;
     }
-    return { generationId, indexed: candidates.length };
+    return { generationId, indexed: candidates.length, base };
   }
 
   /** Activates only if the caller built from the still-current generation. */
   async activate(
     binding: ProviderBinding,
     generationId: string,
-    expectedGenerationId?: string,
+    expected: KnowledgePublication,
   ) {
     await this.ensured();
     const key = accountKey(binding);
@@ -178,9 +215,10 @@ export class KnowledgePublicationStore {
         args: [key],
       });
       const actual = current.rows[0]?.generation_id as string | undefined;
-      if (actual !== expectedGenerationId)
+      const revision = Number(current.rows[0]?.revision ?? 0);
+      if (actual !== expected.generationId || revision !== expected.revision)
         throw new Error(
-          "Stale knowledge publication rejected by compare-and-set.",
+          `Stale knowledge publication rejected by compare-and-set (expected ${expected.generationId ?? "none"}@${expected.revision}, found ${actual ?? "none"}@${revision}).`,
         );
       const now = new Date().toISOString();
       await tx.execute({
@@ -206,19 +244,29 @@ export class KnowledgePublicationStore {
     }
   }
 
-  async activeGeneration(binding: ProviderBinding) {
+  async publication(binding: ProviderBinding): Promise<KnowledgePublication> {
     await this.ensured();
     const result = await this.client.execute({
-      sql: "SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?",
+      sql: "SELECT generation_id, revision FROM support_knowledge_publications WHERE account_key = ?",
       args: [accountKey(binding)],
     });
-    return result.rows[0]?.generation_id as string | undefined;
+    return {
+      generationId: result.rows[0]?.generation_id as string | undefined,
+      revision: Number(result.rows[0]?.revision ?? 0),
+    };
+  }
+
+  async activeGeneration(binding: ProviderBinding) {
+    return (await this.publication(binding)).generationId;
   }
 
   async rollback(binding: ProviderBinding, generationId: string) {
     await this.ensured();
-    const current = await this.activeGeneration(binding);
-    return this.activate(binding, generationId, current);
+    return this.activate(
+      binding,
+      generationId,
+      await this.publication(binding),
+    );
   }
 
   async search(
