@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { validateApprovedBaseline } from "./eval-baseline-record.mjs";
 
 let baseline;
 try {
@@ -14,20 +15,11 @@ try {
   );
   process.exit(2);
 }
-const required = [
-  "reportHash",
-  "datasetHashes",
-  "runner",
-  "executionMode",
-  "implementationSha",
-  "approvedBy",
-  "approvedAt",
-  "sixAxisScores",
-  "perCaseScores",
-];
-if (!required.every((key) => baseline[key] !== undefined)) {
+try {
+  baseline = validateApprovedBaseline(baseline);
+} catch (error) {
   console.error(
-    "EVAL BASELINE INVALID: the human record lacks report provenance or measured scores.",
+    `EVAL BASELINE INVALID: ${error instanceof Error ? error.message : String(error)}`,
   );
   process.exit(2);
 }

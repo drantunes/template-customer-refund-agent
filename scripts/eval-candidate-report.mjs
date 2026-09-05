@@ -1,15 +1,20 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { reportHash } from "./eval-baseline-record.mjs";
 
 const directory = await mkdtemp(join(tmpdir(), "support-eval-report-"));
 const reportPath = join(directory, "native-report.json");
 try {
   execFileSync(
     "npx",
-    ["vitest", "run", "test/eval/phase004-native-execution.eval.test.ts"],
+    [
+      "vitest",
+      "run",
+      "test/eval/phase004-native-execution.eval.test.ts",
+      "test/eval/supervisor-read-only.eval.test.ts",
+    ],
     {
       stdio: "inherit",
       env: { ...process.env, SUPPORT_EVAL_REPORT_PATH: reportPath },
@@ -27,9 +32,7 @@ try {
     ...execution,
     regression: "pending-human-baseline-approval",
   };
-  report.reportHash = createHash("sha256")
-    .update(JSON.stringify(report))
-    .digest("hex");
+  report.reportHash = reportHash(report);
   if (process.env.SUPPORT_EVAL_CANDIDATE_OUTPUT)
     await writeFile(
       process.env.SUPPORT_EVAL_CANDIDATE_OUTPUT,
