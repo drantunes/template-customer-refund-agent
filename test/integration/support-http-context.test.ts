@@ -112,6 +112,7 @@ async function loadDeterministicRuntime() {
   );
   return {
     app,
+    mastra,
     caseStore: (await import("../../src/mastra/lib/case-store")).caseStore,
     issueRefundTool,
     responseAgent,
@@ -152,6 +153,20 @@ describe("support approval HTTP boundary", () => {
         status: "waiting_approval",
         workflowRunId: "run-waiting",
       } as never);
+      vi.spyOn(caseStore, "claimDispatchForResume").mockResolvedValue({
+        id: "dispatch-waiting",
+        caseId: "case-waiting",
+        runId: "run-waiting",
+        state: "claimed",
+        attempts: 1,
+        wasStarted: true,
+        leaseToken: "lease-waiting",
+      });
+      vi.spyOn(caseStore, "update").mockResolvedValue({
+        id: "case-waiting",
+        status: "processing",
+      } as never);
+      vi.spyOn(caseStore, "completeDispatch").mockResolvedValue(undefined);
       const app = approvalApp(mastra);
       const response = await app.request(
         `http://support.test/support/cases/case-waiting/${action}`,
@@ -186,6 +201,63 @@ describe("support approval HTTP boundary", () => {
 });
 
 describe("support workflow HTTP context propagation", () => {
+  it("recovers a persisted pre-start Mastra run and then approves it through the real API", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      mastra,
+    } = await loadDeterministicRuntime();
+    const { recoverLocalWorkflows } =
+      await import("../../src/mastra/runtime/local-runtime");
+    const id = `recovered-${crypto.randomUUID()}`;
+    const createdAt = "2026-09-05T00:00:00.000Z";
+    const runId = crypto.randomUUID();
+    await runtimeCaseStore.acceptInbound(
+      {
+        id,
+        externalId: `event-${id}`,
+        source: "mock-email",
+        status: "new",
+        customer: { email: "alex@example.com" },
+        subject: "Recovered pre-start refund",
+        messages: [
+          {
+            id: `message-${id}`,
+            author: "customer",
+            body: "Please refund the duplicate charge.",
+            createdAt,
+          },
+        ],
+        createdAt,
+        updatedAt: createdAt,
+        metadata: {
+          providerBinding: {
+            tenantId: "local-demo",
+            providerKind: "local",
+            providerAccountId: "local-demo",
+            externalConversationId: `conversation-${id}`,
+          },
+        },
+      },
+      `event-${id}`,
+      runId,
+    );
+    await recoverLocalWorkflows(mastra, 10, runtimeCaseStore);
+    await vi.waitFor(async () => {
+      const recovered = await runtimeCaseStore.get(id);
+      expect(recovered?.status).toBe("waiting_approval");
+      expect(recovered?.workflowRunId).toEqual(expect.any(String));
+    });
+    const approved = await app.request(
+      `http://support.test/support/cases/${id}/approve`,
+      { method: "POST" },
+    );
+    expect(approved.status).toBe(200);
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(id))?.status).toBe("resolved"),
+    );
+  });
+
   it("passes the Hono RequestContext from inbound and approval requests to specialists and registered tools", async () => {
     const {
       app,

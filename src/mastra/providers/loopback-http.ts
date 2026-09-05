@@ -15,6 +15,102 @@ import type {
   TransactionalActionProvider,
 } from "./contracts";
 import { sameBinding } from "./contracts";
+import { z } from "zod";
+
+const bindingSchema = z
+  .object({
+    tenantId: z.string().min(1),
+    providerKind: z.literal("local"),
+    providerAccountId: z.string().min(1),
+    externalConversationId: z.string().min(1),
+  })
+  .strict();
+const moneySchema = z
+  .object({
+    currency: z.string().regex(/^[A-Z]{3}$/),
+    minor: z.number().int().safe().nonnegative(),
+  })
+  .strict();
+const receiptSchema = z
+  .object({
+    receiptId: z.string().min(1),
+    deliveredAt: z.iso.datetime(),
+    providerMessageId: z.string().min(1),
+  })
+  .strict();
+const effectSchema = z
+  .object({
+    refundId: z.string().min(1),
+    orderId: z.string().min(1),
+    amount: moneySchema,
+    idempotencyKey: z.string().min(1),
+    executedAt: z.iso.datetime(),
+    replayed: z.boolean(),
+  })
+  .strict();
+const quoteSchema = z
+  .object({
+    approvedAmount: moneySchema,
+    remainingAmount: moneySchema,
+    commandFingerprint: z.string().min(1),
+  })
+  .strict();
+const orderSchema = z
+  .object({
+    orderId: z.string().min(1),
+    customerEmail: z.string().min(1),
+    product: z.string().min(1),
+    amount: moneySchema,
+    status: z.enum([
+      "fulfilled",
+      "shipped",
+      "processing",
+      "cancelled",
+      "refunded",
+    ]),
+    chargeCount: z.number().int().nonnegative(),
+    placedAt: z.iso.datetime(),
+  })
+  .strict();
+const subscriptionSchema = z
+  .object({
+    subscriptionId: z.string().min(1),
+    customerEmail: z.string().min(1),
+    plan: z.string().min(1),
+    amount: moneySchema,
+    status: z.enum(["active", "cancelled", "past_due"]),
+    renewsAt: z.iso.datetime(),
+  })
+  .strict();
+const refundSchema = z
+  .object({
+    refundId: z.string().min(1),
+    orderId: z.string().min(1),
+    amount: moneySchema,
+    reason: z.string().min(1),
+    issuedAt: z.iso.datetime(),
+  })
+  .strict();
+const evidenceSchema = z
+  .object({
+    title: z.string(),
+    text: z.string(),
+    source: z.string(),
+    score: z.number().finite(),
+    version: z.string(),
+  })
+  .strict();
+const commandSchema = z
+  .object({
+    approvalCaseId: z.string().min(1),
+    binding: bindingSchema,
+    orderId: z.string().min(1),
+    amount: moneySchema,
+    reason: z.string().min(1),
+    idempotencyKey: z.string().min(1),
+    fingerprint: z.string().min(1),
+  })
+  .strict();
 
 export type LoopbackFailure = "timeout" | "429" | "500" | "drop-after-commit";
 export type LoopbackFetch = (request: Request) => Promise<Response>;
@@ -37,11 +133,7 @@ export function createLocalLoopbackFacade(
         email?: string;
         orderId?: string;
       };
-      if (
-        !body?.binding ||
-        typeof body.binding.tenantId !== "string" ||
-        typeof body.binding.providerAccountId !== "string"
-      )
+      if (!bindingSchema.safeParse(body?.binding).success)
         return Response.json(
           { error: "invalid provider binding" },
           { status: 400 },
@@ -86,7 +178,13 @@ export function createLocalLoopbackFacade(
             ),
         );
       if (request.url.endsWith("/transactions/quote-refund")) {
-        const command = body.command as RefundCommand;
+        const checked = commandSchema.safeParse(body.command);
+        if (!checked.success)
+          return Response.json(
+            { error: "invalid refund command" },
+            { status: 400 },
+          );
+        const command = checked.data;
         if (!command?.binding || !sameBinding(body.binding, command.binding))
           return Response.json(
             {
@@ -100,7 +198,13 @@ export function createLocalLoopbackFacade(
         );
       }
       if (request.url.endsWith("/transactions/issue-refund")) {
-        const command = body.command as RefundCommand;
+        const checked = commandSchema.safeParse(body.command);
+        if (!checked.success)
+          return Response.json(
+            { error: "invalid refund command" },
+            { status: 400 },
+          );
+        const command = checked.data;
         if (!command?.binding || !sameBinding(body.binding, command.binding))
           return Response.json(
             {
@@ -175,7 +279,11 @@ export class LoopbackHttpCommerceProvider implements CommerceProvider {
     private readonly fetcher: LoopbackFetch,
     private readonly timeoutMs = 100,
   ) {}
-  async call<T>(path: string, body: unknown): Promise<T> {
+  async call<T>(
+    path: string,
+    body: unknown,
+    schema?: z.ZodType<T>,
+  ): Promise<T> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -202,29 +310,41 @@ export class LoopbackHttpCommerceProvider implements CommerceProvider {
           `Loopback commerce HTTP ${response.status}: ${error.error ?? "request failed"}`,
         );
       }
-      return (await response.json()) as T;
+      const payload = await response.json();
+      return schema ? schema.parse(payload) : (payload as T);
     } finally {
       if (timer) clearTimeout(timer);
     }
   }
   findOrder(binding: ProviderBinding, email: string, orderId?: string) {
-    return this.call<CommerceOrder | undefined>("/commerce/orders", {
-      binding,
-      email,
-      orderId,
-    });
+    return this.call<CommerceOrder | undefined>(
+      "/commerce/orders",
+      {
+        binding,
+        email,
+        orderId,
+      },
+      z.union([orderSchema, z.null()]).transform((value) => value ?? undefined),
+    );
   }
   findSubscription(binding: ProviderBinding, email: string) {
     return this.call<CommerceSubscription | undefined>(
       "/commerce/subscriptions",
       { binding, email },
+      z
+        .union([subscriptionSchema, z.null()])
+        .transform((value) => value ?? undefined),
     );
   }
   refunds(binding: ProviderBinding, orderId: string) {
-    return this.call<CommerceRefund[]>("/commerce/refunds", {
-      binding,
-      orderId,
-    });
+    return this.call<CommerceRefund[]>(
+      "/commerce/refunds",
+      {
+        binding,
+        orderId,
+      },
+      z.array(refundSchema),
+    );
   }
 }
 
@@ -251,12 +371,16 @@ class LoopbackHttpSupportProvider implements SupportChannelProvider {
     status: string,
     idempotencyKey?: string,
   ) {
-    return this.http.call<DeliveryReceipt>("/support/deliver", {
-      binding,
-      body,
-      status,
-      idempotencyKey,
-    });
+    return this.http.call<DeliveryReceipt>(
+      "/support/deliver",
+      {
+        binding,
+        body,
+        status,
+        idempotencyKey,
+      },
+      receiptSchema,
+    );
   }
   addInternalNote(
     binding: ProviderBinding,
@@ -281,16 +405,24 @@ class LoopbackHttpTransactionalProvider implements TransactionalActionProvider {
     this.http = new LoopbackHttpCommerceProvider(fetcher, timeoutMs);
   }
   quoteRefund(command: RefundCommand) {
-    return this.http.call<RefundQuote>("/transactions/quote-refund", {
-      binding: command.binding,
-      command,
-    });
+    return this.http.call<RefundQuote>(
+      "/transactions/quote-refund",
+      {
+        binding: command.binding,
+        command,
+      },
+      quoteSchema,
+    );
   }
   issueRefund(command: RefundCommand) {
-    return this.http.call<RefundEffect>("/transactions/issue-refund", {
-      binding: command.binding,
-      command,
-    });
+    return this.http.call<RefundEffect>(
+      "/transactions/issue-refund",
+      {
+        binding: command.binding,
+        command,
+      },
+      effectSchema,
+    );
   }
 }
 
@@ -301,11 +433,15 @@ class LoopbackHttpKnowledgeProvider implements KnowledgeProvider {
     this.http = new LoopbackHttpCommerceProvider(fetcher, timeoutMs);
   }
   search(binding: ProviderBinding, query: string, topK: number) {
-    return this.http.call<KnowledgeEvidence[]>("/knowledge/search", {
-      binding,
-      query,
-      topK,
-    });
+    return this.http.call<KnowledgeEvidence[]>(
+      "/knowledge/search",
+      {
+        binding,
+        query,
+        topK,
+      },
+      z.array(evidenceSchema),
+    );
   }
   listChanged(binding: ProviderBinding, since?: string) {
     return this.http.call<
@@ -316,6 +452,9 @@ class LoopbackHttpKnowledgeProvider implements KnowledgeProvider {
     return this.http.call<KnowledgeEvidence | undefined>(
       "/knowledge/fetch-document",
       { binding, source },
+      z
+        .union([evidenceSchema, z.null()])
+        .transform((value) => value ?? undefined),
     );
   }
 }

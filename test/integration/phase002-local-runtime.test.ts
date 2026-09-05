@@ -6,7 +6,12 @@ import {
   CaseStore,
   StaleCaseWriteError,
 } from "../../src/mastra/lib/case-store";
-import { money, refundFingerprint } from "../../src/mastra/lib/money";
+import {
+  legacyAmountToMoney,
+  money,
+  moneyToLegacyAmount,
+  refundFingerprint,
+} from "../../src/mastra/lib/money";
 import {
   deliverOutbox,
   LocalRuntime,
@@ -71,6 +76,12 @@ async function approvedCommand(store: CaseStore, key: string, minor: number) {
     approval: { approved: true, approverId: "local-approver" },
     metadata: { providerBinding: binding, refundCommand: command },
   });
+  await store.saveAction(
+    base.approvalCaseId,
+    "refund-command",
+    command.fingerprint,
+    command,
+  );
   return command;
 }
 async function runtime() {
@@ -274,7 +285,9 @@ describe("Phase 002 persistent local runtime", () => {
     await store.update(commandA.approvalCaseId, {
       metadata: { providerBinding: binding, refundCommand: conflicting },
     });
-    await expect(local.issueRefund(conflicting)).rejects.toThrow("conflicting");
+    await expect(local.issueRefund(conflicting)).rejects.toThrow(
+      "matching persisted approved command",
+    );
     await local.issueRefund(await approvedCommand(store, "case-b", 2500));
     await expect(
       local.issueRefund(await approvedCommand(store, "case-c", 1)),
@@ -435,13 +448,17 @@ describe("Phase 002 persistent local runtime", () => {
       {
         getWorkflow: () => ({
           createRun: async () => ({ restart, start }),
-          getWorkflowRunById: async () => ({ status: "running" }),
+          getWorkflowRunById: async (runId: string) =>
+            runId === `run-${suspended.id}`
+              ? { status: "suspended" }
+              : { status: "running" },
         }),
       },
       10,
       store,
     );
     expect(restart).toHaveBeenCalledTimes(1);
+    expect(start).not.toHaveBeenCalled();
     const dispatches = await store.getClientForTests().execute({
       sql: "SELECT case_id, state FROM support_dispatch WHERE case_id IN (?, ?)",
       args: [active.id, suspended.id],
@@ -468,7 +485,11 @@ describe("Phase 002 persistent local runtime", () => {
     await recoverLocalWorkflows(
       {
         getWorkflow: () => ({
-          createRun: async () => ({ restart, start }),
+          createRun: async () => ({
+            runId: `run-${pending.id}`,
+            restart,
+            start,
+          }),
           getWorkflowRunById: async () => undefined,
         }),
       },
@@ -477,6 +498,105 @@ describe("Phase 002 persistent local runtime", () => {
     );
     expect(start).toHaveBeenCalledWith({ inputData: { caseId: pending.id } });
     expect(restart).not.toHaveBeenCalled();
+    expect((await store.get(pending.id))?.workflowRunId).toBe(
+      `run-${pending.id}`,
+    );
+    await store.close();
+  });
+
+  it("recovers an active post-approval snapshot even if the durable case still says waiting", async () => {
+    const { store } = await runtime();
+    const pending = supportCase("post-approval");
+    pending.status = "waiting_approval";
+    await store.acceptInbound(
+      pending,
+      "post-approval-event",
+      "post-approval-run",
+    );
+    const restart = vi.fn().mockResolvedValue({ status: "success" });
+    await recoverLocalWorkflows(
+      {
+        getWorkflow: () => ({
+          createRun: async () => ({ restart }),
+          getWorkflowRunById: async () => ({ status: "running" }),
+        }),
+      },
+      10,
+      store,
+    );
+    expect(restart).toHaveBeenCalledOnce();
+    expect(
+      (
+        await store.getClientForTests().execute({
+          sql: "SELECT state FROM support_dispatch WHERE case_id = ?",
+          args: [pending.id],
+        })
+      ).rows[0],
+    ).toMatchObject({ state: "completed" });
+    await store.close();
+  });
+
+  it("backfills a resumable dispatch for a migrated waiting approval case", async () => {
+    const { store } = await runtime();
+    const legacy = supportCase("legacy-resume");
+    legacy.status = "waiting_approval";
+    legacy.workflowRunId = "legacy-run";
+    await store.create(legacy);
+    const claim = await store.claimDispatchForResume(
+      legacy.id,
+      legacy.workflowRunId,
+    );
+    expect(claim).toMatchObject({
+      caseId: legacy.id,
+      runId: "legacy-run",
+      state: "claimed",
+    });
+    await store.close();
+  });
+
+  it("persists recovery failure on the case as well as the dispatch", async () => {
+    const { store } = await runtime();
+    const failed = supportCase("recovery-failure");
+    await store.acceptInbound(
+      failed,
+      "recovery-failure-event",
+      "recovery-failure-run",
+    );
+    await recoverLocalWorkflows(
+      {
+        getWorkflow: () => ({
+          createRun: async () => ({
+            restart: async () => ({ status: "failed" }),
+          }),
+          getWorkflowRunById: async () => ({ status: "running" }),
+        }),
+      },
+      10,
+      store,
+    );
+    expect(await store.get(failed.id)).toMatchObject({ status: "failed" });
+    await store.close();
+  });
+
+  it("never fresh-starts a terminal Mastra snapshot", async () => {
+    const { store } = await runtime();
+    const terminal = supportCase("terminal-run");
+    await store.acceptInbound(terminal, "terminal-event", "terminal-run-id");
+    const start = vi.fn();
+    const restart = vi.fn();
+    await recoverLocalWorkflows(
+      {
+        getWorkflow: () => ({
+          createRun: async () => ({ start, restart }),
+          getWorkflowRunById: async () => ({ status: "failed" }),
+        }),
+      },
+      10,
+      store,
+    );
+    expect(start).not.toHaveBeenCalled();
+    expect(restart).not.toHaveBeenCalled();
+    expect(await store.get(terminal.id)).toMatchObject({ status: "failed" });
     await store.close();
   });
 
@@ -575,5 +695,84 @@ describe("Phase 002 persistent local runtime", () => {
       .execute("SELECT state FROM support_outbox WHERE id = 'outbox-400'");
     expect(after400.rows[0]).toMatchObject({ state: "failed" });
     await store.close();
+  });
+
+  it("fences stale leases, renews healthy claims, and visibly fails exhausted abandoned work", async () => {
+    const { store } = await runtime();
+    await store.create(supportCase("fenced-case"));
+    await store.enqueueDelivery({
+      id: "fenced",
+      caseId: "fenced-case",
+      binding,
+      body: "reply",
+      status: "resolved",
+    });
+    const [first] = await store.claimOutbox();
+    expect(await store.renewOutboxLease(first.id, first.leaseToken!)).toBe(
+      true,
+    );
+    await store.getClientForTests().execute({
+      sql: "UPDATE support_outbox SET lease_until = ? WHERE id = ?",
+      args: ["2000-01-01T00:00:00.000Z", first.id],
+    });
+    const [second] = await store.claimOutbox();
+    await store.completeOutbox(first.id, { stale: true }, first.leaseToken);
+    expect(
+      (
+        await store.getClientForTests().execute({
+          sql: "SELECT state FROM support_outbox WHERE id = ?",
+          args: [first.id],
+        })
+      ).rows[0],
+    ).toMatchObject({ state: "claimed" });
+    await store.retryOutbox(second.id, "crash", false, second.leaseToken);
+    const [third] = await store.claimOutbox();
+    await store.getClientForTests().execute({
+      sql: "UPDATE support_outbox SET lease_until = ? WHERE id = ?",
+      args: ["2000-01-01T00:00:00.000Z", third.id],
+    });
+    await store.claimOutbox();
+    expect(
+      (
+        await store.getClientForTests().execute({
+          sql: "SELECT state, last_error FROM support_outbox WHERE id = ?",
+          args: [first.id],
+        })
+      ).rows[0],
+    ).toMatchObject({ state: "failed" });
+    expect((await store.get("fenced-case"))?.metadata).toMatchObject({
+      deliveryStatus: "failed",
+    });
+    await store.close();
+  });
+
+  it("uses currency-specific decimal exponents at the legacy boundary", () => {
+    expect(legacyAmountToMoney(100, "JPY")).toEqual({
+      currency: "JPY",
+      minor: 100,
+    });
+    expect(legacyAmountToMoney(1.23, "KWD")).toEqual({
+      currency: "KWD",
+      minor: 1230,
+    });
+    expect(moneyToLegacyAmount({ currency: "KWD", minor: 1230 })).toBe(1.23);
+    expect(() => legacyAmountToMoney(1, "ZZZ")).toThrow(
+      "Unsupported currency precision",
+    );
+  });
+
+  it("rejects malformed HTTP provider results before they reach persisted effects", async () => {
+    const malformed = new LoopbackHttpCommerceProvider(async () =>
+      Response.json({
+        orderId: "ORD",
+        customerEmail: "a@example.com",
+        product: "x",
+        amount: { currency: "???", minor: 0.5 },
+        status: "fulfilled",
+        chargeCount: 1,
+        placedAt: "not-a-date",
+      }),
+    );
+    await expect(malformed.findOrder(binding, "", "ORD")).rejects.toThrow();
   });
 });

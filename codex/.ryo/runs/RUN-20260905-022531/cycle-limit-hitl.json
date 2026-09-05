@@ -1,0 +1,29 @@
+{
+  "stage": "VERIFYING",
+  "status": "decision_required",
+  "run_id": "RUN-20260905-022531",
+  "phase": "PHASE-002",
+  "summary": "Mandatory cycle-limit HITL. Implementation and review fixes retained, but phase not complete and not approved for PR.",
+  "scope_checked": [
+    "PHASE-002"
+  ],
+  "gates_passed": 19,
+  "gates_total": 20,
+  "failed_gate": "backend-integration-test",
+  "failure": "Duplicate inbound characterization timed out with SQLITE_BUSY during LocalRuntime.seed and CaseStore.update; unhandled rejection. Fixer focused tests had passed, formal full gate disproved readiness.",
+  "evidence": [
+    "gates-20260905-041341.json",
+    "fix-3.json",
+    "internal-review-1.json",
+    "security-review-1.json"
+  ],
+  "findings_status": "Review findings have proposed implementation fixes but remain open until passing gates and fresh independent review; no deferral or bypass.",
+  "fix_cycles": 3,
+  "max_fix_cycles": 3,
+  "decisions_required": [
+    "HITL-CYCLES-002-001"
+  ],
+  "next_recommendation": "PAUSED_HITL",
+  "requested_next_step": "Authorize one additional PHASE-002 correction cycle (max_fix_cycles from3 to4), preserving all deterministic gates and required independent reviews.",
+  "policy_source": "ryo-orchestrate-phase/SKILL.md: If the limit is reached with blocking findings, pause for HITL."
+}

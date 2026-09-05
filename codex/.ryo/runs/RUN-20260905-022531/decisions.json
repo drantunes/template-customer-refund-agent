@@ -1,5 +1,15 @@
 {
-  "decisions": [],
+  "schema_version": 1,
   "run_id": "RUN-20260905-022531",
-  "schema_version": 1
+  "decisions": [
+    {
+      "id": "HITL-CYCLES-002-001",
+      "status": "pending",
+      "requested_action": "Authorize one additional PHASE-002 correction cycle (max_fix_cycles from3 to4), preserving all deterministic gates and required independent reviews.",
+      "reason": "Configured3 fix cycles exhausted. Final supervisor run19/20; backend-integration-test failed with SQLITE_BUSY in duplicate-inbound characterization and unhandled rejection. Cannot advance review/PR.",
+      "evidence": "gates-20260905-041341.json",
+      "scope": "PHASE-002 only",
+      "approved_by": null
+    }
+  ]
 }

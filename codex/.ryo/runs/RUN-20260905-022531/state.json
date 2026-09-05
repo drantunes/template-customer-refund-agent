@@ -54,12 +54,37 @@
       "evidence": "codex/.ryo/runs/RUN-20260905-022531/fix-2.json",
       "from": "FIXING",
       "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T03:40:53+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/gates-20260905-034028.json",
+      "from": "VERIFYING",
+      "to": "INTERNAL_REVIEW"
+    },
+    {
+      "at": "2026-09-05T03:51:31+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/security-review-1.json",
+      "from": "INTERNAL_REVIEW",
+      "to": "FIXING"
+    },
+    {
+      "at": "2026-09-05T04:12:33+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/fix-3.json",
+      "from": "FIXING",
+      "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T04:14:51+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/cycle-limit-hitl.json",
+      "from": "VERIFYING",
+      "to": "PAUSED_HITL"
     }
   ],
-  "fix_cycles": 2,
+  "fix_cycles": 3,
   "phase": "PHASE-002",
+  "resume_state": "VERIFYING",
   "run_id": "RUN-20260905-022531",
   "schema_version": 1,
-  "state": "VERIFYING",
-  "updated_at": "2026-09-05T03:39:52+00:00"
+  "state": "PAUSED_HITL",
+  "updated_at": "2026-09-05T04:14:51+00:00"
 }

@@ -323,33 +323,32 @@ const requestApprovalStep = createStep({
           "A refund recommendation requires an unambiguous order id.",
         );
       const money = legacyAmountToMoney(amount, currency);
-      command.fingerprint = refundFingerprint({
-        binding: resolveConfiguredBinding(bindings.transactions),
-        approvalCaseId: supportCase.id,
-        orderId: command.orderId,
-        amount: money,
-        reason: command.reason,
-        idempotencyKey: command.idempotencyKey,
-      });
       const binding = resolveConfiguredBinding(bindings.transactions);
-      await ensureProviderFixtures(binding);
-      await providerRegistry(binding).transactions(binding).quoteRefund({
+      const immutableCommand = {
         binding,
         approvalCaseId: supportCase.id,
         orderId: command.orderId,
         amount: money,
         reason: command.reason,
         idempotencyKey: command.idempotencyKey,
+      };
+      command.fingerprint = refundFingerprint(immutableCommand);
+      await ensureProviderFixtures(binding);
+      const approvedCommand = {
+        ...immutableCommand,
         fingerprint: command.fingerprint,
-      });
+      };
+      await providerRegistry(binding)
+        .transactions(binding)
+        .quoteRefund(approvedCommand);
       await persistentCaseStore.saveAction(
         supportCase.id,
         "refund-command",
         command.fingerprint,
-        command,
+        approvedCommand,
       );
-      await caseStore.update(supportCase.id, { status: "waiting_approval" });
       await caseStore.update(supportCase.id, {
+        status: "waiting_approval",
         metadata: { ...supportCase.metadata, refundCommand: command },
       });
       return await suspend({
@@ -450,32 +449,30 @@ const resolveCaseStep = createStep({
       }
     }
 
-    await caseStore.update(supportCase.id, {
+    const message = {
+      // Deterministic identities make an active-step replay converge on the
+      // already finalized message/outbox pair.
+      id: `msg_${supportCase.id}_final`,
+      author: "agent" as const,
+      authorName: "Support Agent",
+      body: finalResponse,
+      createdAt: new Date().toISOString(),
+    };
+    await persistentCaseStore.finalizeCaseAndEnqueue({
+      caseId: supportCase.id,
       status,
       finalResponse,
       escalationReason,
-      messages: [
-        ...supportCase.messages,
-        {
-          id: `msg_${crypto.randomUUID().slice(0, 8)}`,
-          author: "agent" as const,
-          authorName: "Support Agent",
-          body: finalResponse,
-          createdAt: new Date().toISOString(),
-        },
-      ],
-    });
-
-    // A completed workflow records delivery work atomically enough for recovery: delivery
-    // has its own status and receipt and can be retried after an interrupted process.
-    await persistentCaseStore.enqueueDelivery({
-      id: `outbox_${supportCase.id}_${crypto.randomUUID()}`,
-      caseId: supportCase.id,
-      binding: resolveConfiguredBinding(
-        bindingsForPersistedCase(supportCase).support,
-      ),
-      body: finalResponse,
-      status,
+      message,
+      outbox: {
+        id: `outbox_${supportCase.id}_final`,
+        caseId: supportCase.id,
+        binding: resolveConfiguredBinding(
+          bindingsForPersistedCase(supportCase).support,
+        ),
+        body: finalResponse,
+        status,
+      },
     });
     await deliverOutbox().catch((error) =>
       mastra

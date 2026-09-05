@@ -1,6 +1,17 @@
 {
-  "schema_version": 1,
+  "stage": "INTERNAL_REVIEW",
+  "status": "findings",
   "run_id": "RUN-20260905-022531",
+  "phase": "PHASE-002",
+  "role": {
+    "model": "gpt-6-astra",
+    "effort": "medium"
+  },
+  "reviewed_commit": "0344e7de5ce0d573f1969c6bc8828a45d83bfb8e",
+  "summary": "Twelve reproduced recovery, financial, persistence and contract findings block readiness.",
+  "scope_checked": [
+    "AC-002-01 through AC-002-09"
+  ],
   "findings": [
     {
       "id": "R1-001",
@@ -97,46 +108,14 @@
       "file": "src/mastra/runtime/local-runtime.ts",
       "line": 169,
       "body": "Reset deletes receipts but preserves outbox, enabling new effect on same key. Preserve receipt history or refuse reset after effects; runtime+CLI test."
-    },
-    {
-      "id": "S1-001",
-      "severity": "P1",
-      "status": "open",
-      "file": "src/mastra/runtime/local-runtime.ts",
-      "line": 157,
-      "body": "Refund can commit between reset COUNT and delete batch, then reset erases refund/order but keeps idempotency. Repro refunds0 ledger1 orders0. Guard+mutations one write transaction runtime and CLI, concurrent reset/refund test."
-    },
-    {
-      "id": "S1-002",
-      "severity": "P2",
-      "status": "open",
-      "file": "src/mastra/lib/case-store.ts",
-      "line": 452,
-      "body": "Migrated Phase001 case has no event backfill; original inbound replay attempts duplicate case and UNIQUE fails. Backfill compatible acceptance identity or scoped legacy fallback atomically, no duplicate dispatch."
-    },
-    {
-      "id": "S1-003",
-      "severity": "P2",
-      "status": "open",
-      "file": "src/mastra/workflows/ingest-support-case.ts",
-      "line": 34,
-      "body": "Normalizer conversation123/event456 is persisted with conversation=event456. Preserve authoritative support conversation ref independent event ID; actual ingestion→outbox test."
-    },
-    {
-      "id": "S1-004",
-      "severity": "P2",
-      "status": "open",
-      "file": "src/mastra/lib/money.ts",
-      "line": 18,
-      "body": "Compatibility conversion unconditionally x100: JPY100→10000, KWD1.23→123. Checked currency exponents both directions or explicit supported2decimal allowlist; zero/three exponent and unknown tests."
-    },
-    {
-      "id": "GATE-002-001",
-      "severity": "P1",
-      "status": "open",
-      "file": "test/integration/resolve-support-case.characterization.test.ts",
-      "line": 372,
-      "body": "Final required backend integration gate fails duplicate-inbound test with SQLITE_BUSY and unhandled rejection; 44/45 tests passed, one timed out. Evidence gates-20260905-041341.json. Three fix cycles exhausted; additional cycle needs HITL."
     }
-  ]
+  ],
+  "evidence": [
+    "Independent full diff review and installed Mastra restart docs",
+    "Three disposable SQLite programs confirmed event collision, recovery failure visibility, exhausted claims, registry bypass, missing run ID, non-atomic append, approved command substitution, malformed HTTP, receipt loss",
+    "gates-20260905-034028.json",
+    "built-start-smoke.json"
+  ],
+  "decisions_required": [],
+  "next_recommendation": "Security review same SHA then batch fixes and fresh gates/review"
 }

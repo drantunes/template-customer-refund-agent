@@ -154,16 +154,17 @@ export class LocalRuntime
       );
     await this.ensured();
     const args = [binding.tenantId, binding.providerAccountId];
-    const effects = await this.client.execute({
-      sql: "SELECT COUNT(*) AS total FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?",
-      args,
-    });
-    if (Number(effects.rows[0]?.total ?? 0) > 0)
-      throw new Error(
-        "Refusing fixture reset: durable refund/idempotency effects exist for this binding. Use a new local database rather than deleting financial history.",
-      );
-    await this.client.batch(
-      [
+    const tx = await this.client.transaction("write");
+    try {
+      const effects = await tx.execute({
+        sql: "SELECT (SELECT COUNT(*) FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?) + (SELECT COUNT(*) FROM local_deliveries WHERE tenant_id = ? AND provider_account_id = ?) AS total",
+        args: [...args, ...args],
+      });
+      if (Number(effects.rows[0]?.total ?? 0) > 0)
+        throw new Error(
+          "Refusing fixture reset: durable refund/idempotency or delivery effects exist for this binding. Use a new local database rather than deleting history.",
+        );
+      await tx.batch([
         {
           sql: "DELETE FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?",
           args,
@@ -184,9 +185,14 @@ export class LocalRuntime
           sql: "DELETE FROM local_deliveries WHERE tenant_id = ? AND provider_account_id = ?",
           args,
         },
-      ],
-      "write",
-    );
+      ]);
+      await tx.commit();
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
   }
   private order(row: Record<string, unknown>): CommerceOrder {
     return {
@@ -283,9 +289,17 @@ export class LocalRuntime
           metadata?: { refundCommand?: { fingerprint?: string } };
         })
       : undefined;
+    const action = await this.client.execute({
+      sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = ? AND fingerprint = ?",
+      args: [command.approvalCaseId, "refund-command", fingerprint],
+    });
+    const approvedAction = action.rows[0]
+      ? JSON.parse(String(action.rows[0].data))
+      : undefined;
     if (
       !approvedCase?.approval?.approved ||
-      approvedCase.metadata?.refundCommand?.fingerprint !== fingerprint
+      !approvedAction ||
+      JSON.stringify(approvedAction) !== JSON.stringify(command)
     )
       throw new Error(
         "Refund execution requires the matching persisted approved command.",
@@ -579,25 +593,42 @@ export const localRuntime = new LocalRuntime();
 
 /** Delivers accepted domain outcomes separately from workflow completion. */
 export async function deliverOutbox(
-  registry: ProviderRegistry = localRuntime,
+  registry?: ProviderRegistry,
   limit = 10,
   store: CaseStore = caseStore,
 ) {
   const items = await store.claimOutbox(limit);
-  for (const item of items)
+  for (const item of items) {
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
     try {
-      const receipt = await registry
+      heartbeat = setInterval(
+        () => void store.renewOutboxLease(item.id, item.leaseToken!),
+        10_000,
+      );
+      heartbeat.unref();
+      const selected =
+        registry ??
+        (await import("../providers/registry")).providerRegistry(item.binding);
+      const receipt = await selected
         .support(item.binding)
         .deliver(item.binding, item.body, item.status, item.id);
-      await store.completeOutbox(item.id, receipt);
+      await store.completeOutbox(item.id, receipt, item.leaseToken);
     } catch (error) {
       const message = String(error);
       const status = Number(message.match(/\b([1-5]\d\d)\b/)?.[1]);
       const terminal =
         /permanent/i.test(message) ||
         (status >= 400 && status < 500 && status !== 408 && status !== 429);
-      await store.retryOutbox(item.id, error, terminal || item.attempts >= 3);
+      await store.retryOutbox(
+        item.id,
+        error,
+        terminal || item.attempts >= 3,
+        item.leaseToken,
+      );
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
     }
+  }
   return items.length;
 }
 
@@ -609,6 +640,7 @@ export async function recoverLocalWorkflows(
 ) {
   const dispatches = await store.claimDispatch(limit);
   for (const dispatch of dispatches) {
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
     try {
       const supportCase = await store.get(dispatch.caseId);
       if (!supportCase) {
@@ -616,11 +648,8 @@ export async function recoverLocalWorkflows(
           dispatch.id,
           "failed",
           "Case missing during recovery.",
+          dispatch.leaseToken,
         );
-        continue;
-      }
-      if (supportCase.status === "waiting_approval") {
-        await store.completeDispatch(dispatch.id, "suspended");
         continue;
       }
       const workflow = mastra.getWorkflow("resolveSupportCaseWorkflow");
@@ -630,27 +659,70 @@ export async function recoverLocalWorkflows(
         existing?.status === "waiting" ||
         existing?.status === "paused"
       ) {
-        await store.completeDispatch(dispatch.id, "suspended");
+        await store.completeDispatch(
+          dispatch.id,
+          "suspended",
+          undefined,
+          dispatch.leaseToken,
+        );
+        continue;
+      }
+      // A persisted waiting_approval case only blocks recovery when the actual
+      // Mastra snapshot is absent.  If a process died after resume accepted the
+      // decision, its active snapshot is authoritative and must be resumed.
+      if (supportCase.status === "waiting_approval" && !existing) {
+        await store.completeDispatch(
+          dispatch.id,
+          "suspended",
+          undefined,
+          dispatch.leaseToken,
+        );
         continue;
       }
       if (existing?.status === "success") {
-        await store.completeDispatch(dispatch.id, "completed");
+        await store.completeDispatch(
+          dispatch.id,
+          "completed",
+          undefined,
+          dispatch.leaseToken,
+        );
         continue;
       }
       if (
-        existing?.status &&
-        existing.status !== "running" &&
-        existing.status !== "pending"
+        existing?.status === "failed" ||
+        existing?.status === "cancelled" ||
+        existing?.status === "canceled"
       ) {
-        await store.completeDispatch(dispatch.id, "failed", existing.status);
+        await store.update(dispatch.caseId, {
+          status: "failed",
+          escalationReason: `Workflow recovery failed: ${existing.status}`,
+        });
+        await store.completeDispatch(
+          dispatch.id,
+          "failed",
+          existing.status,
+          dispatch.leaseToken,
+        );
         continue;
       }
       const run = await workflow.createRun({ runId: dispatch.runId });
+      heartbeat = setInterval(
+        () => void store.renewDispatchLease(dispatch.id, dispatch.leaseToken!),
+        10_000,
+      );
+      heartbeat.unref();
+      await store.update(dispatch.caseId, { workflowRunId: run.runId });
       // `restart()` only resumes an installed active run.  A process can die
       // after acceptance but before first start, which has no run record yet.
-      const result = existing
-        ? await run.restart()
-        : await run.start({ inputData: { caseId: dispatch.caseId } });
+      const result =
+        existing?.status === "running" || existing?.status === "pending"
+          ? await run.restart()
+          : await run.start({ inputData: { caseId: dispatch.caseId } });
+      if (result.status === "failed")
+        await store.update(dispatch.caseId, {
+          status: "failed",
+          escalationReason: "Workflow recovery failed.",
+        });
       await store.completeDispatch(
         dispatch.id,
         result.status === "suspended"
@@ -659,9 +731,24 @@ export async function recoverLocalWorkflows(
             ? "completed"
             : "failed",
         result.status === "failed" ? "Workflow restart failed." : undefined,
+        dispatch.leaseToken,
       );
     } catch (error) {
-      await store.completeDispatch(dispatch.id, "failed", error);
+      await store
+        .update(dispatch.caseId, {
+          status: "failed",
+          escalationReason:
+            error instanceof Error ? error.message : String(error),
+        })
+        .catch(() => undefined);
+      await store.completeDispatch(
+        dispatch.id,
+        "failed",
+        error,
+        dispatch.leaseToken,
+      );
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
     }
   }
   return dispatches.length;

@@ -29,10 +29,9 @@ const normalizeAndPersistStep = createStep({
       .support(ingress)
       .normalizeInbound(inputData.payload);
     const support = resolveConfiguredBinding(normalized.binding);
-    const portBinding = {
-      ...support,
-      externalConversationId: normalized.externalId,
-    };
+    // The support adapter owns the conversation reference; externalId is the
+    // inbound event identity and may legitimately differ from it.
+    const portBinding = support;
     const resolveRun = await mastra
       .getWorkflow("resolveSupportCaseWorkflow")
       .createRun();
@@ -107,8 +106,14 @@ const startResolutionStep = createStep({
     await caseStore.update(inputData.caseId, {
       workflowRunId: inputData.workflowRunId,
     });
-    await caseStore.markDispatchStarted(inputData.caseId);
+    await caseStore.markDispatchStarted(inputData.caseId, dispatch.leaseToken);
 
+    const heartbeat = setInterval(
+      () =>
+        void caseStore.renewDispatchLease(dispatch.id, dispatch.leaseToken!),
+      10_000,
+    );
+    heartbeat.unref();
     void run
       .start({
         inputData: { caseId: inputData.caseId },
@@ -134,6 +139,7 @@ const startResolutionStep = createStep({
               ? "completed"
               : "failed",
           result.status === "failed" ? "Workflow start failed." : undefined,
+          dispatch.leaseToken,
         );
       })
       .catch(async (error) => {
@@ -146,8 +152,14 @@ const startResolutionStep = createStep({
           escalationReason:
             error instanceof Error ? error.message : String(error),
         });
-        await caseStore.completeDispatch(dispatch.id, "failed", error);
-      });
+        await caseStore.completeDispatch(
+          dispatch.id,
+          "failed",
+          error,
+          dispatch.leaseToken,
+        );
+      })
+      .finally(() => clearInterval(heartbeat));
 
     return { caseId: inputData.caseId, workflowRunId: inputData.workflowRunId };
   },

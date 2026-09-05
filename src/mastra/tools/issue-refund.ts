@@ -64,16 +64,13 @@ export const issueRefundTool = createTool({
     const command = stored.data;
     const bindings = bindingsForPersistedCase(supportCase);
     if (
-      JSON.stringify(command) !==
-      JSON.stringify({
-        approvalCaseId: input.caseId,
-        orderId: input.orderId,
-        amount: input.amount,
-        currency: input.currency,
-        reason: input.reason,
-        idempotencyKey: input.idempotencyKey,
-        fingerprint: input.fingerprint,
-      })
+      command.approvalCaseId !== input.caseId ||
+      command.orderId !== input.orderId ||
+      command.amount !== input.amount ||
+      command.currency !== input.currency ||
+      command.reason !== input.reason ||
+      command.idempotencyKey !== input.idempotencyKey ||
+      command.fingerprint !== input.fingerprint
     )
       throw new Error(
         "Refund execution must exactly match the persisted command.",
