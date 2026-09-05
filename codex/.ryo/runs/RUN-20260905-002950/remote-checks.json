@@ -1,0 +1,19 @@
+{
+  "checked_at": "2026-09-05T01:56:50.456266+00:00",
+  "pr_url": "https://github.com/drantunes/template-customer-refund-agent/pull/1",
+  "head_sha": "c68e911441338c3180b52b3658ec7933e2f3554d",
+  "base_sha": "df2cb0df7dc0e9b0e1774306da268c570fa933a7",
+  "open": true,
+  "merged": false,
+  "mergeable": true,
+  "status_contexts": [],
+  "check_runs": [],
+  "pull_request_workflow_runs": [],
+  "github_reviews": [],
+  "main_protected": false,
+  "effective_branch_rules": [],
+  "local_gate_evidence": "gates-20260905-013336.json",
+  "local_required_gates_passed": 20,
+  "merge_authorized": false,
+  "note": "No remote required checks configured; absence of checks is not remote CI success. Published-SHA independent review pending."
+}
