@@ -78,13 +78,44 @@
       "evidence": "codex/.ryo/runs/RUN-20260905-022531/cycle-limit-hitl.json",
       "from": "VERIFYING",
       "to": "PAUSED_HITL"
+    },
+    {
+      "approved_by": "Diego Antunes",
+      "at": "2026-09-05T05:05:54+00:00",
+      "evidence": "HITL-CYCLES-002-001 approved: explicit Sim for max_fix_cycles3 to4",
+      "from": "PAUSED_HITL",
+      "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T05:05:54+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/decisions.json",
+      "from": "VERIFYING",
+      "to": "FIXING"
+    },
+    {
+      "at": "2026-09-05T05:29:54+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/fix-4.json",
+      "from": "FIXING",
+      "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T05:30:55+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/gates-20260905-053042.json",
+      "from": "VERIFYING",
+      "to": "INTERNAL_REVIEW"
+    },
+    {
+      "at": "2026-09-05T05:43:43+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/cycle-limit-hitl-2.json",
+      "from": "INTERNAL_REVIEW",
+      "to": "PAUSED_HITL"
     }
   ],
-  "fix_cycles": 3,
+  "fix_cycles": 4,
   "phase": "PHASE-002",
-  "resume_state": "VERIFYING",
+  "resume_state": "INTERNAL_REVIEW",
   "run_id": "RUN-20260905-022531",
   "schema_version": 1,
   "state": "PAUSED_HITL",
-  "updated_at": "2026-09-05T04:14:51+00:00"
+  "updated_at": "2026-09-05T05:43:43+00:00"
 }

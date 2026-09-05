@@ -14,6 +14,7 @@ import { ingestSupportCaseWorkflow } from "./workflows/ingest-support-case";
 import { resolveSupportCaseWorkflow } from "./workflows/resolve-support-case";
 import { indexSupportKnowledgeWorkflow } from "./workflows/index-support-knowledge";
 import { supportEvalScorerRegistry } from "./evals";
+import { getSharedLocalSqliteClient } from "./lib/sqlite-client";
 import { vectorStore } from "./lib/vector-store";
 import { supportRoutes } from "./server/routes";
 import { issueRefundTool } from "./tools/issue-refund";
@@ -50,11 +51,11 @@ export const mastra = new Mastra({
   },
   storage: new LibSQLStore({
     id: "mastra-storage",
-    url: process.env.TURSO_DATABASE_URL || "file:./mastra.db",
-    authToken: process.env.TURSO_AUTH_TOKEN || undefined,
-    // The app's durable case/outbox store shares this local file. Give Mastra's
-    // own per-domain connections time to serialize schema and recovery writes.
-    connectionTimeoutMs: 30_000,
+    // Supported client injection makes Mastra and CaseStore share one
+    // cooperative write queue while keeping their table ownership separate.
+    client: getSharedLocalSqliteClient(),
+    maxRetries: 5,
+    initialBackoffMs: 5,
   }),
   server: {
     apiRoutes: supportRoutes,

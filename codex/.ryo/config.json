@@ -13,7 +13,7 @@
         "P2"
       ]
     },
-    "max_fix_cycles": 3,
+    "max_fix_cycles": 4,
     "merge_strategy": "merge-commit",
     "policy": "sequential",
     "require_human_discovery_approval": true,

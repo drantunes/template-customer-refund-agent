@@ -110,7 +110,9 @@ const startResolutionStep = createStep({
 
     const heartbeat = setInterval(
       () =>
-        void caseStore.renewDispatchLease(dispatch.id, dispatch.leaseToken!),
+        void caseStore
+          .renewDispatchLease(dispatch.id, dispatch.leaseToken!)
+          .catch(() => undefined),
       10_000,
     );
     heartbeat.unref();

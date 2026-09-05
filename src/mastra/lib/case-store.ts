@@ -6,6 +6,10 @@ import {
   type ProviderBinding,
 } from "../providers/contracts";
 import { waitForMastraStorage } from "../runtime/storage-lifecycle";
+import {
+  getSharedLocalSqliteClient,
+  serializeSqliteClient,
+} from "./sqlite-client";
 
 export type DispatchState =
   "pending" | "claimed" | "completed" | "suspended" | "failed";
@@ -39,7 +43,13 @@ export class StaleCaseWriteError extends Error {
 }
 
 function config(url = process.env.TURSO_DATABASE_URL || "file:./mastra.db") {
-  return { url, authToken: process.env.TURSO_AUTH_TOKEN || undefined };
+  return {
+    url,
+    authToken: process.env.TURSO_AUTH_TOKEN || undefined,
+    ...(url.startsWith("file:") || url.includes(":memory:")
+      ? { timeout: 0 }
+      : {}),
+  };
 }
 function now() {
   return new Date().toISOString();
@@ -51,12 +61,23 @@ function parse(row: Record<string, unknown>): SupportCase {
 /** App-owned migrations never enumerate, rename, or drop Mastra-owned tables. */
 export class CaseStore {
   private readonly client: Client;
+  private readonly ownsClient: boolean;
   private ready?: Promise<void>;
   constructor(options: { client?: Client; url?: string } = {}) {
-    this.client = options.client ?? createClient(config(options.url));
+    if (options.client) {
+      this.client = serializeSqliteClient(options.client);
+      this.ownsClient = true;
+    } else if (options.url) {
+      this.client = serializeSqliteClient(createClient(config(options.url)));
+      this.ownsClient = true;
+    } else {
+      this.client = getSharedLocalSqliteClient();
+      // Mastra owns the shared client lifecycle and closes it during shutdown.
+      this.ownsClient = false;
+    }
   }
   async close() {
-    this.client.close();
+    if (this.ownsClient) this.client.close();
   }
   async migrate(target = 5): Promise<void> {
     await this.client.execute(
@@ -293,7 +314,13 @@ export class CaseStore {
   private async ensured() {
     this.ready ??= (async () => {
       await waitForMastraStorage();
-      await this.client.execute("PRAGMA busy_timeout = 30000;");
+      // The injected Mastra client intentionally skips its internal local
+      // pragmas, so set WAL only after its schema initialization has finished.
+      await this.client.execute("PRAGMA journal_mode=WAL;");
+      // Do not synchronously wait in SQLite for another Mastra connection: a
+      // blocked native call can prevent that connection's pending commit from
+      // running. serializeSqliteClient retries lock conflicts after yielding.
+      await this.client.execute("PRAGMA busy_timeout = 0;");
       await this.migrate();
     })();
     await this.ready;

@@ -1,6 +1,8 @@
 import { rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { promisify } from "node:util";
 import { createClient } from "@libsql/client";
 import {
   CaseStore,
@@ -17,6 +19,7 @@ import {
   LocalRuntime,
   recoverLocalWorkflows,
 } from "../../src/mastra/runtime/local-runtime";
+import { serializeSqliteClient } from "../../src/mastra/lib/sqlite-client";
 import {
   createLocalLoopbackFacade,
   type LoopbackFetch,
@@ -31,6 +34,7 @@ import type {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const files: string[] = [];
+const execFileAsync = promisify(execFile);
 const binding: ProviderBinding = {
   tenantId: "tenant-a",
   providerKind: "local",
@@ -270,6 +274,72 @@ describe("Phase 002 persistent local runtime", () => {
     await store.close();
   });
 
+  it("retries a real competing SQLite seed after the holder commits on the event loop", async () => {
+    const { path, store, local } = await runtime();
+    const holderClient = createClient({ url: `file:${path}`, timeout: 0 });
+    await holderClient.execute("PRAGMA busy_timeout = 0");
+    await holderClient.execute("BEGIN IMMEDIATE");
+
+    const release = new Promise<void>((resolve, reject) => {
+      setTimeout(() => {
+        void holderClient.execute("COMMIT").then(() => resolve(), reject);
+      }, 20);
+    });
+    await expect(local.seed(binding)).resolves.toBeUndefined();
+    await release;
+    expect(await local.findOrder(binding, "", "ORD-1001")).toBeTruthy();
+    holderClient.close();
+    await store.close();
+  });
+
+  it("keeps a serialized transaction fenced through a failed commit until rollback or close", async () => {
+    let commitAttempts = 0;
+    let rollbacks = 0;
+    let executes = 0;
+    const rawTransaction = {
+      commit: async () => {
+        commitAttempts += 1;
+        throw new Error("commit failed");
+      },
+      rollback: async () => {
+        rollbacks += 1;
+      },
+      close: () => undefined,
+      execute: async () => ({ rows: [] }),
+    };
+    const client = serializeSqliteClient({
+      closed: false,
+      protocol: "file",
+      execute: async () => {
+        executes += 1;
+        return { rows: [] };
+      },
+      transaction: async () => rawTransaction,
+      batch: async () => [],
+      executeMultiple: async () => undefined,
+      migrate: async () => undefined,
+      sync: async () => undefined,
+      reconnect: async () => undefined,
+      close: () => undefined,
+    } as never);
+    const transaction = await client.transaction("write");
+    await expect(transaction.commit()).rejects.toThrow("commit failed");
+    const queued = client.execute("SELECT 1");
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(executes).toBe(0);
+    await transaction.rollback();
+    await queued;
+    expect(commitAttempts).toBe(1);
+    expect(rollbacks).toBe(1);
+    expect(executes).toBe(1);
+
+    const closedTransaction = await client.transaction("write");
+    const releasedByClose = client.execute("SELECT 1");
+    await closedTransaction.close();
+    await releasedByClose;
+    expect(executes).toBe(2);
+  });
+
   it("uses minor units and durable command fingerprints to prevent over-refund and conflicting replay", async () => {
     const { store, local } = await runtime();
     await local.seed(binding);
@@ -348,6 +418,55 @@ describe("Phase 002 persistent local runtime", () => {
       await local.findOrder(binding, "alex@example.com", "ORD-1001"),
     ).toBeUndefined();
     await store.close();
+  });
+
+  it("keeps CLI fixtures and delivery receipts intact when reset sees a durable effect", async () => {
+    const path = `/private/tmp/phase002-cli-${crypto.randomUUID()}.db`;
+    files.push(path, `${path}-shm`, `${path}-wal`);
+    const environment = {
+      ...process.env,
+      TURSO_DATABASE_URL: `file:${path}`,
+      LOCAL_FIXTURE_TENANT: binding.tenantId,
+      LOCAL_FIXTURE_ACCOUNT: binding.providerAccountId,
+    };
+    await execFileAsync(
+      process.execPath,
+      ["scripts/local-fixtures.mjs", "seed"],
+      {
+        cwd: process.cwd(),
+        env: environment,
+      },
+    );
+    await execFileAsync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import { createClient } from "@libsql/client"; const client = createClient({ url: ${JSON.stringify(`file:${path}`)}, timeout: 0 }); await client.execute({ sql: "INSERT INTO local_deliveries VALUES (?, ?, 'receipt-key', 'payload', '{}')", args: [${JSON.stringify(binding.tenantId)}, ${JSON.stringify(binding.providerAccountId)}] }); client.close();`,
+      ],
+      { cwd: process.cwd() },
+    );
+
+    await expect(
+      execFileAsync(process.execPath, ["scripts/local-fixtures.mjs", "reset"], {
+        cwd: process.cwd(),
+        env: environment,
+      }),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining(
+        "durable refund/idempotency or delivery effects",
+      ),
+    });
+    const verification = await execFileAsync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import { createClient } from "@libsql/client"; const client = createClient({ url: ${JSON.stringify(`file:${path}`)}, timeout: 0 }); const orders = await client.execute({ sql: "SELECT order_id FROM local_orders WHERE tenant_id = ? AND provider_account_id = ? AND order_id = 'ORD-1001'", args: [${JSON.stringify(binding.tenantId)}, ${JSON.stringify(binding.providerAccountId)}] }); const receipts = await client.execute({ sql: "SELECT receipt FROM local_deliveries WHERE tenant_id = ? AND provider_account_id = ? AND idempotency_key = 'receipt-key'", args: [${JSON.stringify(binding.tenantId)}, ${JSON.stringify(binding.providerAccountId)}] }); console.log(JSON.stringify({ orders: orders.rows.length, receipts: receipts.rows.length })); client.close();`,
+      ],
+      { cwd: process.cwd() },
+    );
+    expect(JSON.parse(verification.stdout)).toEqual({ orders: 1, receipts: 1 });
   });
 
   it("shares local commerce conformance through the optional loopback HTTP boundary", async () => {

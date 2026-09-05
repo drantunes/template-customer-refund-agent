@@ -15,7 +15,8 @@ if (!url.startsWith("file:")) {
 }
 const tenantId = process.env.LOCAL_FIXTURE_TENANT || "local-demo";
 const accountId = process.env.LOCAL_FIXTURE_ACCOUNT || "local-demo";
-const client = createClient({ url });
+const client = createClient({ url, timeout: 0 });
+await client.execute("PRAGMA busy_timeout = 0;");
 await client.executeMultiple(`
   CREATE TABLE IF NOT EXISTS local_orders (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, order_id TEXT NOT NULL, customer_email TEXT NOT NULL, product TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, charge_count INTEGER NOT NULL, placed_at TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, order_id));
   CREATE TABLE IF NOT EXISTS local_subscriptions (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, subscription_id TEXT NOT NULL, customer_email TEXT NOT NULL, plan TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, renews_at TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, subscription_id));
@@ -25,26 +26,31 @@ await client.executeMultiple(`
 `);
 const args = [tenantId, accountId];
 if (mode === "reset") {
-  const effects = await client.execute({
-    sql: "SELECT COUNT(*) AS total FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?",
-    args,
-  });
-  if (Number(effects.rows[0]?.total ?? 0) > 0)
-    throw new Error(
-      "Refusing fixture reset: durable refund/idempotency effects exist for this binding. Use a new local database rather than deleting financial history.",
+  const tx = await client.transaction("write");
+  try {
+    const effects = await tx.execute({
+      sql: "SELECT (SELECT COUNT(*) FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?) + (SELECT COUNT(*) FROM local_deliveries WHERE tenant_id = ? AND provider_account_id = ?) AS total",
+      args: [...args, ...args],
+    });
+    if (Number(effects.rows[0]?.total ?? 0) > 0)
+      throw new Error(
+        "Refusing fixture reset: durable refund/idempotency or delivery effects exist for this binding. Use a new local database rather than deleting history.",
+      );
+    await tx.batch(
+      ["local_orders", "local_subscriptions", "local_knowledge"].map(
+        (table) => ({
+          sql: `DELETE FROM ${table} WHERE tenant_id = ? AND provider_account_id = ?`,
+          args,
+        }),
+      ),
     );
-  await client.batch(
-    [
-      "local_orders",
-      "local_subscriptions",
-      "local_knowledge",
-      "local_deliveries",
-    ].map((table) => ({
-      sql: `DELETE FROM ${table} WHERE tenant_id = ? AND provider_account_id = ?`,
-      args,
-    })),
-    "write",
-  );
+    await tx.commit();
+  } catch (error) {
+    try {
+      await tx.rollback();
+    } catch {}
+    throw error;
+  }
   console.log(
     `Reset local fixtures for ${tenantId}/${accountId}; durable case and Mastra tables were untouched.`,
   );

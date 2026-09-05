@@ -4,12 +4,33 @@
   "decisions": [
     {
       "id": "HITL-CYCLES-002-001",
-      "status": "pending",
+      "status": "approved",
       "requested_action": "Authorize one additional PHASE-002 correction cycle (max_fix_cycles from3 to4), preserving all deterministic gates and required independent reviews.",
       "reason": "Configured3 fix cycles exhausted. Final supervisor run19/20; backend-integration-test failed with SQLITE_BUSY in duplicate-inbound characterization and unhandled rejection. Cannot advance review/PR.",
       "evidence": "gates-20260905-041341.json",
       "scope": "PHASE-002 only",
-      "approved_by": null
+      "approved_by": "Diego Antunes",
+      "approved_at": "2026-09-05T05:05:54.041991+00:00",
+      "authorization": "User replied Sim to explicit request to increase max_fix_cycles from3 to4 and continue PHASE-002 verification. No failed gate waiver."
+    },
+    {
+      "id": "HITL-CYCLES-002-002",
+      "status": "pending",
+      "requested_action": "Authorize one additional PHASE-002 correction cycle (max_fix_cycles from4 to5), preserving all deterministic gates and fresh independent reviews.",
+      "reason": "Cycle4/max4 completed. All20 deterministic gates pass, but fresh internal review reproduced twoP1 and threeP2 blockers; security review resolved allfour previous S1 findings. check-findings blocks PR readiness.",
+      "evidence": [
+        "internal-review-2.json",
+        "security-review-2.json",
+        "findings-gate-after-fix4.json"
+      ],
+      "scope": "PHASE-002 only",
+      "blocking_findings": [
+        "R1-002",
+        "R1-005",
+        "R1-008",
+        "R1-011",
+        "R2-001"
+      ]
     }
   ]
 }

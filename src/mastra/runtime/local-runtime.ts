@@ -55,6 +55,7 @@ export class LocalRuntime
   readonly kind = LOCAL;
   private readonly client: Client;
   private ready?: Promise<void>;
+  private readonly seeded = new Map<string, Promise<void>>();
   constructor(client: Client = caseStore.getClientForTests()) {
     this.client = client;
   }
@@ -104,6 +105,19 @@ export class LocalRuntime
     return this;
   }
   async seed(binding: ProviderBinding = defaultLocalBinding()) {
+    this.assertLocalBinding(binding);
+    const key = `${binding.tenantId}\u0000${binding.providerAccountId}`;
+    let seed = this.seeded.get(key);
+    if (!seed) {
+      seed = this.seedOnce(binding).catch((error) => {
+        this.seeded.delete(key);
+        throw error;
+      });
+      this.seeded.set(key, seed);
+    }
+    await seed;
+  }
+  private async seedOnce(binding: ProviderBinding) {
     const url = process.env.TURSO_DATABASE_URL || "file:./mastra.db";
     if (!url.startsWith("file:"))
       throw new Error(
@@ -602,7 +616,10 @@ export async function deliverOutbox(
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     try {
       heartbeat = setInterval(
-        () => void store.renewOutboxLease(item.id, item.leaseToken!),
+        () =>
+          void store
+            .renewOutboxLease(item.id, item.leaseToken!)
+            .catch(() => undefined),
         10_000,
       );
       heartbeat.unref();
@@ -707,7 +724,10 @@ export async function recoverLocalWorkflows(
       }
       const run = await workflow.createRun({ runId: dispatch.runId });
       heartbeat = setInterval(
-        () => void store.renewDispatchLease(dispatch.id, dispatch.leaseToken!),
+        () =>
+          void store
+            .renewDispatchLease(dispatch.id, dispatch.leaseToken!)
+            .catch(() => undefined),
         10_000,
       );
       heartbeat.unref();

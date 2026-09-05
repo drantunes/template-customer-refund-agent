@@ -1,6 +1,11 @@
 import { rm } from "node:fs/promises";
 import { RequestContext } from "@mastra/core/request-context";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  legacyAmountToMoney,
+  refundFingerprint,
+} from "../../src/mastra/lib/money";
+import type { ProviderBinding } from "../../src/mastra/providers/contracts";
 
 const databaseFiles: string[] = [];
 const mastraRuntimes: Array<{ shutdown(): Promise<void> }> = [];
@@ -33,23 +38,20 @@ async function loadCharacterizationRuntime(draft: {
     };
   });
 
-  const [
-    { mastra },
-    { caseStore },
-    { mockSupportAdapter },
-    { triageAgent },
-    { responseAgent },
-    { searchSupportKnowledgeTool },
-    { issueRefundTool },
-  ] = await Promise.all([
-    import("../../src/mastra/index"),
-    import("../../src/mastra/lib/case-store"),
-    import("../../src/mastra/integrations/mock-support"),
-    import("../../src/mastra/agents/triage-agent"),
-    import("../../src/mastra/agents/response-agent"),
-    import("../../src/mastra/tools/search-support-knowledge"),
-    import("../../src/mastra/tools/issue-refund"),
-  ]);
+  // index loads the provider registry through a circular workflow graph. Load
+  // that graph before its leaves so vi.resetModules cannot expose a partially
+  // initialized local-runtime export to a concurrent dynamic import.
+  const { mastra } = await import("../../src/mastra/index");
+  const { caseStore } = await import("../../src/mastra/lib/case-store");
+  const { mockSupportAdapter } =
+    await import("../../src/mastra/integrations/mock-support");
+  const { triageAgent } = await import("../../src/mastra/agents/triage-agent");
+  const { responseAgent } =
+    await import("../../src/mastra/agents/response-agent");
+  const { searchSupportKnowledgeTool } =
+    await import("../../src/mastra/tools/search-support-knowledge");
+  const { issueRefundTool } =
+    await import("../../src/mastra/tools/issue-refund");
 
   vi.spyOn(triageAgent, "generate").mockResolvedValue({
     object: {
@@ -279,7 +281,22 @@ describe("resolve support case WIP characterization", () => {
     await caseStore.update(supportCase.id, {
       metadata: {
         ...suspended.metadata,
-        refundCommand: { ...command, amount: command.amount - 1 },
+        refundCommand: {
+          ...command,
+          amount: command.amount - 1,
+          fingerprint: refundFingerprint({
+            binding: (
+              suspended.metadata.providerBindings as {
+                transactions: ProviderBinding;
+              }
+            ).transactions,
+            approvalCaseId: supportCase.id,
+            orderId: command.orderId,
+            amount: legacyAmountToMoney(command.amount - 1, command.currency),
+            reason: command.reason,
+            idempotencyKey: command.idempotencyKey,
+          }),
+        },
       },
     });
     const resumed = await run.resume({
@@ -382,12 +399,10 @@ describe("resolve support case WIP characterization", () => {
       body: "Please refund the duplicate subscription charge.",
     };
 
-    const first = await (
-      await workflow.createRun()
-    ).start({ inputData: { payload } });
-    const second = await (
-      await workflow.createRun()
-    ).start({ inputData: { payload } });
+    const [first, second] = await Promise.all([
+      (await workflow.createRun()).start({ inputData: { payload } }),
+      (await workflow.createRun()).start({ inputData: { payload } }),
+    ]);
 
     expect(first.status).toBe("success");
     expect(second.status).toBe("success");
@@ -401,6 +416,14 @@ describe("resolve support case WIP characterization", () => {
       expect((await caseStore.get(first.result.caseId))?.status).toBe(
         "resolved",
       );
+      expect(
+        (
+          await caseStore.getClientForTests().execute({
+            sql: "SELECT state FROM support_dispatch WHERE case_id = ?",
+            args: [first.result.caseId],
+          })
+        ).rows[0],
+      ).toMatchObject({ state: "completed" });
     });
   });
 });
