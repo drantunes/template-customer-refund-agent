@@ -1,5 +1,6 @@
 import type {
   InboundSupportResponse,
+  MonitoringSummaryResponse,
   MockEmailPayload,
   SupportCaseDto,
 } from "../../../src/mastra/server/contracts";
@@ -21,47 +22,4 @@ export type CaseFeedback = NonNullable<SupportCase["feedback"]>;
 
 // Mirrors src/mastra/lib/monitoring.ts on the API side.
 
-export interface CaseFunnelMetrics {
-  totalCases: number;
-  new: number;
-  processing: number;
-  waitingApproval: number;
-  resolved: number;
-  escalated: number;
-  failed: number;
-  containmentRate: number | null;
-  escalationRate: number | null;
-  avgResolutionMinutes: number | null;
-}
-
-export interface RefundApprovalMetrics {
-  recommended: number;
-  approved: number;
-  rejected: number;
-  autoEscalated: number;
-  approvalRate: number | null;
-  totalApprovedAmount: number;
-  currency: string;
-}
-
-export interface FeedbackMetrics {
-  totalResponses: number;
-  up: number;
-  down: number;
-  satisfactionRate: number | null;
-  recent: Array<{
-    caseId: string;
-    subject: string;
-    rating: "up" | "down";
-    comment?: string;
-    submittedAt: string;
-  }>;
-}
-
-export interface MonitoringSummary {
-  generatedAt: string;
-  casesConsidered: number;
-  funnel: CaseFunnelMetrics;
-  refunds: RefundApprovalMetrics;
-  feedback: FeedbackMetrics;
-}
+export type MonitoringSummary = MonitoringSummaryResponse;

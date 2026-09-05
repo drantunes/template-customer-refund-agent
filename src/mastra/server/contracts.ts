@@ -33,6 +33,46 @@ export const errorResponseSchema = z.object({ error: z.string() });
 export const reindexResponseSchema = z.object({
   indexed: z.number().int().nonnegative(),
 });
+export const monitoringSummarySchema = z.object({
+  generatedAt: z.iso.datetime(),
+  casesConsidered: z.number().int().nonnegative(),
+  funnel: z.object({
+    totalCases: z.number().int().nonnegative(),
+    new: z.number().int().nonnegative(),
+    processing: z.number().int().nonnegative(),
+    waitingApproval: z.number().int().nonnegative(),
+    resolved: z.number().int().nonnegative(),
+    escalated: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    containmentRate: z.number().nullable(),
+    escalationRate: z.number().nullable(),
+    avgResolutionMinutes: z.number().nullable(),
+  }),
+  refunds: z.object({
+    recommended: z.number().int().nonnegative(),
+    approved: z.number().int().nonnegative(),
+    rejected: z.number().int().nonnegative(),
+    autoEscalated: z.number().int().nonnegative(),
+    approvalRate: z.number().nullable(),
+    totalApprovedAmount: z.number().nonnegative(),
+    currency: z.string(),
+  }),
+  feedback: z.object({
+    totalResponses: z.number().int().nonnegative(),
+    up: z.number().int().nonnegative(),
+    down: z.number().int().nonnegative(),
+    satisfactionRate: z.number().nullable(),
+    recent: z.array(
+      z.object({
+        caseId: z.string(),
+        subject: z.string(),
+        rating: z.enum(["up", "down"]),
+        comment: z.string().optional(),
+        submittedAt: z.iso.datetime(),
+      }),
+    ),
+  }),
+});
 
 const caseIdParameter = {
   name: "caseId",
@@ -182,6 +222,27 @@ export const supportOpenApiDocument = {
         },
       },
     },
+    "/support/monitoring/summary": {
+      get: {
+        responses: {
+          "200": {
+            description: "Support monitoring summary",
+            content: {
+              "application/json": {
+                schema: jsonSchema(monitoringSummarySchema),
+              },
+            },
+          },
+        },
+      },
+    },
+    "/support/openapi.json": {
+      get: {
+        responses: {
+          "200": { description: "OpenAPI document" },
+        },
+      },
+    },
   },
 } as const;
 
@@ -191,3 +252,4 @@ export type CaseListResponse = z.infer<typeof caseListResponseSchema>;
 export type InboundSupportResponse = z.infer<
   typeof inboundSupportResponseSchema
 >;
+export type MonitoringSummaryResponse = z.infer<typeof monitoringSummarySchema>;

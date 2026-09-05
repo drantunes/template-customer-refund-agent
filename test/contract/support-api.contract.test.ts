@@ -39,6 +39,34 @@ describe("support API contract", () => {
     }
   });
 
+  it("keeps every public support endpoint and its success response in OpenAPI", () => {
+    const expectedPaths = [
+      "/support/inbound",
+      "/support/cases",
+      "/support/cases/{caseId}",
+      "/support/cases/{caseId}/approve",
+      "/support/cases/{caseId}/reject",
+      "/support/cases/{caseId}/feedback",
+      "/support/monitoring/summary",
+      "/support/knowledge/reindex",
+      "/support/openapi.json",
+    ];
+
+    expect(Object.keys(supportOpenApiDocument.paths).sort()).toEqual(
+      expectedPaths.sort(),
+    );
+    for (const path of expectedPaths) {
+      const operation =
+        supportOpenApiDocument.paths[
+          path as keyof typeof supportOpenApiDocument.paths
+        ];
+      const method = "get" in operation ? operation.get : operation.post;
+      expect(
+        Object.keys(method.responses).some((status) => status.startsWith("2")),
+      ).toBe(true);
+    }
+  });
+
   it("reports unsupported providers instead of silently using mock", () => {
     process.env.SUPPORT_SOURCE = "unsupported-provider";
 

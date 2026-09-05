@@ -1,4 +1,5 @@
 import { rm } from "node:fs/promises";
+import { RequestContext } from "@mastra/core/request-context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const databaseFiles: string[] = [];
@@ -101,7 +102,14 @@ async function loadCharacterizationRuntime(draft: {
     ...normalized,
   });
 
-  return { mastra, caseStore, searchSupportKnowledgeTool, supportCase };
+  return {
+    mastra,
+    caseStore,
+    responseAgent,
+    searchSupportKnowledgeTool,
+    supportCase,
+    triageAgent,
+  };
 }
 
 afterEach(async () => {
@@ -114,17 +122,26 @@ afterEach(async () => {
 
 describe("resolve support case WIP characterization", () => {
   it("suspends a refund recommendation, then resolves after the existing workflow approval checkpoint", async () => {
-    const { mastra, caseStore, searchSupportKnowledgeTool, supportCase } =
-      await loadCharacterizationRuntime({
-        recommendRefund: true,
-        requiresEscalation: false,
-        refundAmount: 49,
-      });
+    const {
+      mastra,
+      caseStore,
+      responseAgent,
+      searchSupportKnowledgeTool,
+      supportCase,
+      triageAgent,
+    } = await loadCharacterizationRuntime({
+      recommendRefund: true,
+      requiresEscalation: false,
+      refundAmount: 49,
+    });
     const workflow = mastra.getWorkflow("resolveSupportCaseWorkflow");
     const run = await workflow.createRun();
+    const requestContext = new RequestContext();
+    requestContext.setRaw("correlationId", "phase001-real-runtime");
 
     const suspended = await run.start({
       inputData: { caseId: supportCase.id },
+      requestContext,
     });
     expect(suspended.status).toBe("suspended");
     expect((await caseStore.get(supportCase.id))?.status).toBe(
@@ -136,8 +153,17 @@ describe("resolve support case WIP characterization", () => {
     const toolContext = vi.mocked(searchSupportKnowledgeTool.execute).mock
       .calls[0]?.[1];
     expect(toolContext).toMatchObject({ mastra });
-    expect(toolContext?.requestContext).toBeDefined();
+    expect(toolContext?.requestContext).toBe(requestContext);
+    expect(toolContext?.requestContext?.getRaw("correlationId")).toBe(
+      "phase001-real-runtime",
+    );
     expect(toolContext?.tracingContext).toBeDefined();
+    expect(
+      vi.mocked(triageAgent.generate).mock.calls[0]?.[1]?.requestContext,
+    ).toBe(requestContext);
+    expect(
+      vi.mocked(responseAgent.generate).mock.calls[0]?.[1]?.requestContext,
+    ).toBe(requestContext);
 
     const resumed = await run.resume({
       step: "request-approval",

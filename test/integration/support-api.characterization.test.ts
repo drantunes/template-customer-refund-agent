@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@mastra/core/llm", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@mastra/core/llm")>();
@@ -9,9 +9,13 @@ vi.mock("@mastra/core/llm", async (importOriginal) => {
 });
 
 import {
+  supportCaseApproveRoute,
   supportCasesListRoute,
   supportInboundRoute,
 } from "../../src/mastra/server/routes";
+import { caseStore } from "../../src/mastra/lib/case-store";
+
+afterEach(() => vi.restoreAllMocks());
 
 function responseContext(rawBody: string) {
   return {
@@ -45,5 +49,34 @@ describe("support API WIP characterization", () => {
       status: 200,
       body: { cases: expect.any(Array) },
     });
+  });
+
+  it("rejects malformed approval JSON before it resumes or mutates a case", async () => {
+    const get = vi.spyOn(caseStore, "get").mockResolvedValue({
+      id: "case-waiting",
+      status: "waiting_approval",
+      workflowRunId: "run-waiting",
+    } as never);
+    const update = vi.spyOn(caseStore, "update");
+    const getMastra = vi.fn();
+
+    const response = await supportCaseApproveRoute.handler({
+      req: {
+        param: () => "case-waiting",
+        json: async () => {
+          throw new SyntaxError("Unexpected end of JSON input");
+        },
+      },
+      get: getMastra,
+      json: (body: unknown, status = 200) => ({ body, status }),
+    } as never);
+
+    expect(response).toEqual({
+      body: { error: "Invalid approval payload." },
+      status: 400,
+    });
+    expect(get).toHaveBeenCalledWith("case-waiting");
+    expect(update).not.toHaveBeenCalled();
+    expect(getMastra).not.toHaveBeenCalled();
   });
 });

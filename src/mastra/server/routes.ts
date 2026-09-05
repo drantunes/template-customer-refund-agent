@@ -1,4 +1,4 @@
-import { registerApiRoute } from "@mastra/core/server";
+import { registerApiRoute, type ContextWithMastra } from "@mastra/core/server";
 import { caseStore } from "../lib/case-store";
 import { REQUEST_APPROVAL_STEP_ID } from "../workflows/resolve-support-case";
 import { computeMonitoringSummary } from "../lib/monitoring";
@@ -9,6 +9,7 @@ import {
   errorResponseSchema,
   feedbackRequestSchema,
   inboundSupportResponseSchema,
+  monitoringSummarySchema,
   mockEmailPayloadSchema,
   reindexResponseSchema,
   supportOpenApiDocument,
@@ -104,8 +105,14 @@ export const supportCaseDetailRoute = registerApiRoute(
   },
 );
 
-async function resumeApproval(c: any, approved: boolean) {
+async function resumeApproval(c: ContextWithMastra, approved: boolean) {
   const caseId = c.req.param("caseId");
+  if (!caseId) {
+    return c.json(
+      errorResponseSchema.parse({ error: "Missing case id." }),
+      400,
+    );
+  }
   const supportCase = await caseStore.get(caseId);
   if (!supportCase) return c.json({ error: "Case not found." }, 404);
   if (!supportCase.workflowRunId) {
@@ -133,7 +140,10 @@ async function resumeApproval(c: any, approved: boolean) {
       );
     body = parsed.data;
   } catch {
-    // no-op
+    return c.json(
+      errorResponseSchema.parse({ error: "Invalid approval payload." }),
+      400,
+    );
   }
 
   const mastra = c.get("mastra");
@@ -276,7 +286,7 @@ export const supportMonitoringSummaryRoute = registerApiRoute(
     handler: async (c) => {
       const mastra = c.get("mastra");
       const summary = await computeMonitoringSummary(mastra);
-      return c.json(summary);
+      return c.json(monitoringSummarySchema.parse(summary));
     },
   },
 );
