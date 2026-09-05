@@ -277,28 +277,34 @@ const draftResponseStep = createStep({
       refundHistory: supportCase.refundHistory,
     };
 
-    const result = await mastra.getAgent("responseAgent").generate(
-      [
-        {
-          role: "user",
-          content: `Draft a resolution for this support case. Here is everything retrieved so far as JSON - use only this data, plus your tools if you need to double check something:\n\n${JSON.stringify(context, null, 2)}`,
-        },
-      ],
+    const bindings = bindingsForPersistedCase(supportCase);
+    const result = await withTrustedCommerceScope(
       {
-        structuredOutput: { schema: draftResolutionSchema },
-        memory: {
-          thread: threadIdForCase(
-            supportCase.id,
-            bindingsForPersistedCase(supportCase).support.tenantId,
-          ),
-          resource: resourceIdForOwner(
-            ownerId,
-            bindingsForPersistedCase(supportCase).support.tenantId,
-          ),
-        },
-        requestContext,
-        tracingContext,
+        caseId: supportCase.id,
+        ownerId,
+        tenantId: bindings.commerce.tenantId,
       },
+      () =>
+        mastra.getAgent("responseAgent").generate(
+          [
+            {
+              role: "user",
+              content: `Draft a resolution for this support case. Here is everything retrieved so far as JSON - use only this data, plus your tools if you need to double check something:\n\n${JSON.stringify(context, null, 2)}`,
+            },
+          ],
+          {
+            structuredOutput: { schema: draftResolutionSchema },
+            memory: {
+              thread: threadIdForCase(
+                supportCase.id,
+                bindings.support.tenantId,
+              ),
+              resource: resourceIdForOwner(ownerId, bindings.support.tenantId),
+            },
+            requestContext,
+            tracingContext,
+          },
+        ),
     );
 
     const responseUsage = result.usage;

@@ -166,6 +166,13 @@ function scopedEventId(binding: ProviderBinding, eventId: string) {
     .digest("hex")}`;
 }
 
+export function isRetentionTombstone(supportCase: SupportCase) {
+  return (
+    (supportCase.metadata as Record<string, unknown>).retentionRedactedAt !==
+    undefined
+  );
+}
+
 /** App-owned migrations never enumerate, rename, or drop Mastra-owned tables. */
 export class CaseStore {
   private readonly client: Client;
@@ -187,7 +194,7 @@ export class CaseStore {
   async close() {
     if (this.ownsClient) this.client.close();
   }
-  async migrate(target = 8): Promise<void> {
+  async migrate(target = 9): Promise<void> {
     await this.client.execute(
       "CREATE TABLE IF NOT EXISTS support_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
     );
@@ -195,7 +202,7 @@ export class CaseStore {
       "SELECT version FROM support_schema_migrations ORDER BY version",
     );
     let version = Number(applied.rows.at(-1)?.version ?? 0);
-    if (!Number.isInteger(target) || target < 0 || target > 8)
+    if (!Number.isInteger(target) || target < 0 || target > 9)
       throw new Error("Unsupported support schema target version.");
     // Versions 6 through 8 introduced append-only turn, decision, and audit
     // records. Their inverse would discard or weaken durable financial/replay
@@ -261,6 +268,10 @@ export class CaseStore {
     if (version === 6) await this.up6();
     if (version === 7) await this.up7();
     if (version === 8) await this.up8();
+    if (version === 9) {
+      await this.up9();
+      return;
+    }
     await this.client.execute({
       sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (?, ?)",
       args: [version, now()],
@@ -513,6 +524,100 @@ export class CaseStore {
         });
     }
   }
+  /** Canonical conversation identity and trusted acceptance time are persisted
+   * independently of provider-supplied event timestamps.  Historical conflicts
+   * must be resolved by an operator, never guessed and merged by a migration. */
+  private async up9() {
+    const nowAtMigration = now();
+    const tx = await this.client.transaction("write");
+    try {
+      try {
+        await tx.execute(
+          "ALTER TABLE support_cases ADD COLUMN accepted_at TEXT",
+        );
+      } catch (error) {
+        if (!String(error).includes("duplicate column")) throw error;
+      }
+      await tx.executeMultiple(`
+        CREATE TABLE IF NOT EXISTS support_conversations (
+          tenant_id TEXT NOT NULL,
+          provider_kind TEXT NOT NULL,
+          provider_account_id TEXT NOT NULL,
+          external_conversation_id TEXT NOT NULL,
+          case_id TEXT NOT NULL UNIQUE,
+          owner_id TEXT NOT NULL,
+          PRIMARY KEY(tenant_id, provider_kind, provider_account_id, external_conversation_id)
+        );
+      `);
+      const cases = await tx.execute(
+        "SELECT id, data, created_at, accepted_at FROM support_cases",
+      );
+      for (const row of cases.rows) {
+        const value = row as Record<string, unknown>;
+        const supportCase = parse(value);
+        const binding = this.binding(supportCase);
+        const storedOwner = (supportCase.metadata as Record<string, unknown>)
+          .ownerId;
+        const ownerId =
+          typeof storedOwner === "string" && storedOwner
+            ? storedOwner
+            : `legacy:${createHash("sha256").update(String(value.id)).digest("hex")}`;
+        const existing = await tx.execute({
+          sql: "SELECT case_id, owner_id FROM support_conversations WHERE tenant_id = ? AND provider_kind = ? AND provider_account_id = ? AND external_conversation_id = ?",
+          args: [
+            binding.tenantId,
+            binding.providerKind,
+            binding.providerAccountId,
+            binding.externalConversationId,
+          ],
+        });
+        if (
+          existing.rows[0] &&
+          (String(existing.rows[0].case_id) !== String(value.id) ||
+            String(existing.rows[0].owner_id) !== ownerId)
+        )
+          throw new Error(
+            `Refusing canonical conversation migration: ambiguous historical conversation ${binding.tenantId}/${binding.providerAccountId}/${binding.externalConversationId}.`,
+          );
+        await tx.execute({
+          sql: "INSERT OR IGNORE INTO support_conversations(tenant_id, provider_kind, provider_account_id, external_conversation_id, case_id, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
+          args: [
+            binding.tenantId,
+            binding.providerKind,
+            binding.providerAccountId,
+            binding.externalConversationId,
+            String(value.id),
+            ownerId,
+          ],
+        });
+        const evidence = await tx.execute({
+          sql: "SELECT accepted_at FROM support_events WHERE case_id = ? ORDER BY accepted_at LIMIT 1",
+          args: [String(value.id)],
+        });
+        const candidate = String(
+          evidence.rows[0]?.accepted_at ?? value.created_at,
+        );
+        const acceptedAt =
+          Number.isNaN(Date.parse(candidate)) || candidate > nowAtMigration
+            ? nowAtMigration
+            : candidate;
+        await tx.execute({
+          sql: "UPDATE support_cases SET accepted_at = COALESCE(accepted_at, ?) WHERE id = ?",
+          args: [acceptedAt, String(value.id)],
+        });
+      }
+      await tx.execute({
+        sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (9, ?)",
+        args: [now()],
+      });
+      await tx.commit();
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
   private async down(version: number) {
     if (version === 3) {
       const count = await this.client.execute(
@@ -630,13 +735,14 @@ export class CaseStore {
     tenantId: string,
     externalConversationId: string,
   ): Promise<SupportCase | undefined> {
-    return (await this.list()).find((supportCase) => {
-      const binding = this.binding(supportCase);
-      return (
-        binding.tenantId === tenantId &&
-        binding.externalConversationId === externalConversationId
-      );
+    await this.ensured();
+    const result = await this.client.execute({
+      sql: "SELECT c.data FROM support_conversations x JOIN support_cases c ON c.id = x.case_id WHERE x.tenant_id = ? AND x.provider_kind = 'local' AND x.provider_account_id = 'local-demo' AND x.external_conversation_id = ?",
+      args: [tenantId, externalConversationId],
     });
+    return result.rows[0]
+      ? parse(result.rows[0] as Record<string, unknown>)
+      : undefined;
   }
   async create(case_: SupportCase) {
     await this.ensured();
@@ -645,7 +751,7 @@ export class CaseStore {
     const tx = await this.client.transaction("write");
     try {
       await tx.execute({
-        sql: "INSERT INTO support_cases(id, source, external_id, data, created_at, updated_at, version, tenant_id, provider_account_id, provider_binding) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+        sql: "INSERT INTO support_cases(id, source, external_id, data, created_at, updated_at, version, tenant_id, provider_account_id, provider_binding, accepted_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
         args: [
           persisted.id,
           persisted.source,
@@ -656,6 +762,7 @@ export class CaseStore {
           binding.tenantId,
           binding.providerAccountId,
           JSON.stringify(binding),
+          persisted.createdAt,
         ],
       });
       for (const message of persisted.messages)
@@ -715,15 +822,15 @@ export class CaseStore {
       const version = Number(row.version ?? 1);
       if (expectedVersion !== undefined && expectedVersion !== version)
         throw new StaleCaseWriteError(id);
+      const current = parse(row as Record<string, unknown>);
+      if (isRetentionTombstone(current))
+        throw new Error("Expired support case is a retention tombstone.");
       const updated = this.withBindings({
-        ...parse(row as Record<string, unknown>),
+        ...current,
         ...patch,
         updatedAt: now(),
       } as SupportCase);
-      this.assertBindingsUnchanged(
-        parse(row as Record<string, unknown>),
-        updated,
-      );
+      this.assertBindingsUnchanged(current, updated);
       const write = await tx.execute({
         sql: "UPDATE support_cases SET data = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
         args: [JSON.stringify(updated), updated.updatedAt, id, version],
@@ -757,6 +864,8 @@ export class CaseStore {
         const row = read.rows[0];
         if (!row) throw new Error(`Support case not found: ${id}`);
         const current = parse(row as Record<string, unknown>);
+        if (isRetentionTombstone(current))
+          throw new Error("Expired support case is a retention tombstone.");
         if (current.messages.some((entry) => entry.id === message.id)) {
           await tx.rollback();
           return current;
@@ -801,6 +910,8 @@ export class CaseStore {
     eventId: string;
     message: CaseMessage;
     runId: string;
+    /** Set only by authenticated ingress after owner verification. */
+    expectedOwnerId?: string;
   }): Promise<{
     appended: boolean;
     supportCase: SupportCase;
@@ -816,6 +927,28 @@ export class CaseStore {
       const row = read.rows[0];
       if (!row) throw new Error(`Support case not found: ${input.caseId}`);
       const current = parse(row as Record<string, unknown>);
+      if (isRetentionTombstone(current))
+        throw new Error("Expired support case is a retention tombstone.");
+      if (input.expectedOwnerId) {
+        const binding = this.binding(current);
+        const canonical = await tx.execute({
+          sql: "SELECT owner_id FROM support_conversations WHERE tenant_id = ? AND provider_kind = ? AND provider_account_id = ? AND external_conversation_id = ? AND case_id = ?",
+          args: [
+            binding.tenantId,
+            binding.providerKind,
+            binding.providerAccountId,
+            binding.externalConversationId,
+            input.caseId,
+          ],
+        });
+        if (
+          !canonical.rows[0] ||
+          String(canonical.rows[0].owner_id) !== input.expectedOwnerId
+        )
+          throw new Error(
+            "Inbound conversation is owned by another principal.",
+          );
+      }
       const seen = await tx.execute({
         sql: "SELECT id FROM support_turns WHERE case_id = ? AND event_id = ?",
         args: [input.caseId, input.eventId],
@@ -1004,6 +1137,9 @@ export class CaseStore {
     });
     const binding = this.binding(persisted);
     const storageEventId = scopedEventId(binding, eventId);
+    const storedOwner = (persisted.metadata as Record<string, unknown>).ownerId;
+    const ownerId =
+      typeof storedOwner === "string" && storedOwner ? storedOwner : undefined;
     const tx = await this.client.transaction("write");
     try {
       const exists = await tx.execute({
@@ -1016,8 +1152,49 @@ export class CaseStore {
         ],
       });
       if (exists.rows[0]) {
+        if (ownerId) {
+          const winner = await tx.execute({
+            sql: "SELECT owner_id FROM support_conversations WHERE case_id = ?",
+            args: [String(exists.rows[0].case_id)],
+          });
+          if (!winner.rows[0] || String(winner.rows[0].owner_id) !== ownerId)
+            throw new Error(
+              "Inbound conversation is owned by another principal.",
+            );
+        }
         await tx.rollback();
         return { caseId: String(exists.rows[0].case_id), isNew: false };
+      }
+      const canonical = ownerId
+        ? await tx.execute({
+            sql: "SELECT case_id, owner_id FROM support_conversations WHERE tenant_id = ? AND provider_kind = ? AND provider_account_id = ? AND external_conversation_id = ?",
+            args: [
+              binding.tenantId,
+              binding.providerKind,
+              binding.providerAccountId,
+              binding.externalConversationId,
+            ],
+          })
+        : { rows: [] };
+      if (canonical.rows[0]) {
+        const caseId = String(canonical.rows[0].case_id);
+        if (String(canonical.rows[0].owner_id) !== ownerId)
+          throw new Error(
+            "Inbound conversation is owned by another principal.",
+          );
+        const existingCase = await tx.execute({
+          sql: "SELECT data FROM support_cases WHERE id = ?",
+          args: [caseId],
+        });
+        const existing = existingCase.rows[0]
+          ? parse(existingCase.rows[0] as Record<string, unknown>)
+          : undefined;
+        if (!existing)
+          throw new Error("Canonical conversation points to a missing case.");
+        if (isRetentionTombstone(existing))
+          throw new Error("Expired support case is a retention tombstone.");
+        await tx.rollback();
+        return { caseId, isNew: true, appendRequired: true };
       }
       // Phase 001 cases predate support_events.  Treat their scoped case
       // identity as the already-accepted event and backfill it in this same
@@ -1049,7 +1226,7 @@ export class CaseStore {
         return { caseId, isNew: false };
       }
       await tx.execute({
-        sql: "INSERT INTO support_cases(id, source, external_id, data, created_at, updated_at, version, tenant_id, provider_account_id, provider_binding) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+        sql: "INSERT INTO support_cases(id, source, external_id, data, created_at, updated_at, version, tenant_id, provider_account_id, provider_binding, accepted_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
         args: [
           persisted.id,
           persisted.source,
@@ -1060,8 +1237,21 @@ export class CaseStore {
           binding.tenantId,
           binding.providerAccountId,
           JSON.stringify(binding),
+          persisted.createdAt,
         ],
       });
+      if (ownerId)
+        await tx.execute({
+          sql: "INSERT INTO support_conversations(tenant_id, provider_kind, provider_account_id, external_conversation_id, case_id, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
+          args: [
+            binding.tenantId,
+            binding.providerKind,
+            binding.providerAccountId,
+            binding.externalConversationId,
+            persisted.id,
+            ownerId,
+          ],
+        });
       for (const message of persisted.messages)
         await tx.execute({
           sql: "INSERT INTO support_messages(id, case_id, data, created_at) VALUES (?, ?, ?, ?)",
@@ -2178,7 +2368,7 @@ export class CaseStore {
     const caseCutoff = cutoff(policy.caseDays);
     const auditCutoff = cutoff(policy.financialAuditDays);
     const rows = await this.client.execute(
-      "SELECT id, data, version, created_at FROM support_cases WHERE created_at < ? OR updated_at < ?",
+      "SELECT id, data, version, created_at, accepted_at FROM support_cases WHERE COALESCE(accepted_at, created_at) < ? OR updated_at < ?",
       [rawCutoff, traceCutoff],
     );
     let rawPayloadsRedacted = 0;
@@ -2198,7 +2388,7 @@ export class CaseStore {
     for (const row of rows.rows) {
       const id = String(row.id);
       const supportCase = parse(row as Record<string, unknown>);
-      const createdAt = String(row.created_at);
+      const acceptedAt = String(row.accepted_at ?? row.created_at);
       const metadata = { ...supportCase.metadata };
       // A prior supported-storage delete may have failed after this durable
       // tombstone committed. Keep the case association in later sweeps so
@@ -2206,20 +2396,45 @@ export class CaseStore {
       if (metadata.retentionRedactedAt !== undefined) expiredCaseIds.add(id);
       let changed = false;
       let deleteMessages = false;
-      if (createdAt < rawCutoff && "rawPayload" in metadata) {
+      if (acceptedAt < rawCutoff && "rawPayload" in metadata) {
         delete metadata.rawPayload;
         rawPayloadsRedacted += 1;
         changed = true;
       }
       let updated: SupportCase = { ...supportCase, metadata };
-      if (createdAt < traceCutoff && updated.traceId) {
+      if (acceptedAt < traceCutoff && updated.traceId) {
         updated = { ...updated, traceId: undefined };
         tracesRedacted += 1;
         changed = true;
       }
+      // Tombstones are normally clean after their first sweep, but a previous
+      // version allowed content to be appended after the tombstone marker was
+      // written. Check every durable content projection before deciding that a
+      // marked case needs no work; otherwise table-only leftovers would live
+      // forever because the case JSON is already minimal.
+      const residualContent =
+        acceptedAt < caseCutoff && metadata.retentionRedactedAt !== undefined
+          ? await this.client.execute({
+              sql: `SELECT 1 FROM support_messages WHERE case_id = ?
+                UNION ALL SELECT 1 FROM support_turns WHERE case_id = ? AND (message_data IS NOT NULL OR outcome_data IS NOT NULL)
+                UNION ALL SELECT 1 FROM support_outbox WHERE case_id = ? AND (body <> '[redacted]' OR receipt IS NOT NULL OR last_error IS NOT NULL)
+                UNION ALL SELECT 1 FROM support_decisions WHERE case_id = ? AND note IS NOT NULL
+                UNION ALL SELECT 1 FROM support_actions WHERE case_id = ? AND data <> '{}'
+                LIMIT 1`,
+              args: [id, id, id, id, id],
+            })
+          : undefined;
       if (
-        createdAt < caseCutoff &&
-        metadata.retentionRedactedAt === undefined
+        acceptedAt < caseCutoff &&
+        (metadata.retentionRedactedAt === undefined ||
+          supportCase.messages.length > 0 ||
+          supportCase.approval !== undefined ||
+          supportCase.feedback !== undefined ||
+          supportCase.customer.email !== "redacted@invalid.local" ||
+          supportCase.subject !== "Redacted support case" ||
+          supportCase.finalResponse !== undefined ||
+          supportCase.draft !== undefined ||
+          Boolean(residualContent?.rows[0]))
       ) {
         const binding = this.binding(supportCase);
         const wasPending = ["new", "processing", "waiting_approval"].includes(
@@ -2232,13 +2447,13 @@ export class CaseStore {
           customer: { email: "redacted@invalid.local" },
           subject: "Redacted support case",
           messages: [],
+          approval: undefined,
           ...(wasPending
             ? {
                 // Closing a stale in-flight case fails closed. Keep only a
                 // non-executable fingerprint/replay reference for audit and
                 // reconciliation; the decision route rejects this status.
                 status: "failed" as const,
-                approval: undefined,
               }
             : {}),
           triage: undefined,

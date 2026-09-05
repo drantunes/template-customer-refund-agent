@@ -169,7 +169,7 @@ describe("Phase 002 persistent local runtime", () => {
       .execute("INSERT INTO mastra_owned_probe VALUES ('keep')");
     await store.create(supportCase("legacy"));
     await expect(store.migrate(1)).rejects.toThrow(
-      "Refusing unsupported downgrade from support schema v8 to v1.",
+      "Refusing unsupported downgrade from support schema v9 to v1.",
     );
     expect((await store.get("legacy"))?.externalId).toBe("legacy");
     expect(
@@ -253,7 +253,7 @@ describe("Phase 002 persistent local runtime", () => {
     const { store } = await runtime();
     await store.create(supportCase("bad-migration"));
     await expect(store.migrate(3)).rejects.toThrow(
-      "Refusing unsupported downgrade from support schema v8 to v3.",
+      "Refusing unsupported downgrade from support schema v9 to v3.",
     );
     const versions = await store
       .getClientForTests()
@@ -261,7 +261,7 @@ describe("Phase 002 persistent local runtime", () => {
         "SELECT version FROM support_schema_migrations ORDER BY version",
       );
     expect(versions.rows.map((row) => Number(row.version))).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8,
+      1, 2, 3, 4, 5, 6, 7, 8, 9,
     ]);
     expect(
       await store
@@ -296,6 +296,144 @@ describe("Phase 002 persistent local runtime", () => {
       run_id: "run-one",
       state: "pending",
     });
+    await store.close();
+  });
+
+  it("keeps simultaneous verified first events in one canonical conversation", async () => {
+    const { path, store } = await runtime();
+    const other = new CaseStore({ url: `file:${path}` });
+    await other.list();
+    const conversation = `race-${crypto.randomUUID()}`;
+    const candidate = (id: string, event: string) => ({
+      ...supportCase(id, event),
+      metadata: {
+        providerBinding: { ...binding, externalConversationId: conversation },
+        ownerId: "customer-alex",
+      },
+    });
+    // These are independent SQLite clients.  Each caller follows the actual
+    // ingress contract: a canonical winner persists turn one, while any
+    // create-or-append result appends its own event and immutable message.
+    const attempts = [
+      {
+        client: store,
+        input: candidate("canonical-first", "event-first"),
+        eventId: "event-first",
+        runId: "run-first",
+      },
+      {
+        client: other,
+        input: candidate("canonical-second", "event-second"),
+        eventId: "event-second",
+        runId: "run-second",
+      },
+    ];
+    const accepted = await Promise.all(
+      attempts.map(async (attempt) => ({
+        ...attempt,
+        result: await attempt.client.acceptInbound(
+          attempt.input,
+          attempt.eventId,
+          attempt.runId,
+        ),
+      })),
+    );
+    await Promise.all(
+      accepted.map(async (attempt) => {
+        if (!("appendRequired" in attempt.result)) return;
+        await attempt.client.appendFollowUp({
+          caseId: attempt.result.caseId,
+          eventId: attempt.eventId,
+          runId: attempt.runId,
+          message: attempt.input.messages[0],
+          expectedOwnerId: "customer-alex",
+        });
+      }),
+    );
+    const rows = await store.getClientForTests().execute({
+      sql: "SELECT case_id FROM support_conversations WHERE external_conversation_id = ?",
+      args: [conversation],
+    });
+    expect(rows.rows).toHaveLength(1);
+    const turns = await store.getClientForTests().execute({
+      sql: "SELECT sequence, event_id FROM support_turns WHERE case_id = ? ORDER BY sequence",
+      args: [String(rows.rows[0]?.case_id)],
+    });
+    expect(turns.rows).toEqual([
+      { sequence: 1, event_id: expect.any(String) },
+      { sequence: 2, event_id: expect.any(String) },
+    ]);
+    expect(turns.rows.map((turn) => turn.event_id).sort()).toEqual([
+      "event-first",
+      "event-second",
+    ]);
+    const messages = await store.getClientForTests().execute({
+      sql: "SELECT message_data FROM support_turns WHERE case_id = ? ORDER BY sequence",
+      args: [String(rows.rows[0]?.case_id)],
+    });
+    expect(
+      messages.rows
+        .map((row) => JSON.parse(String(row.message_data)).id)
+        .sort(),
+    ).toEqual(["message-canonical-first", "message-canonical-second"]);
+    const winnerCaseId = String(rows.rows[0]?.case_id);
+    await expect(
+      store.acceptInbound(
+        {
+          ...candidate("replay-with-redirect", "event-first"),
+          metadata: {
+            providerBinding: {
+              ...binding,
+              externalConversationId: "redirected-conversation",
+            },
+            ownerId: "customer-alex",
+          },
+        },
+        "event-first",
+        "replay-run",
+      ),
+    ).resolves.toEqual({ caseId: winnerCaseId, isNew: false });
+    await expect(
+      store.acceptInbound(
+        {
+          ...candidate("foreign-replay", "event-first"),
+          metadata: {
+            providerBinding: {
+              ...binding,
+              externalConversationId: conversation,
+            },
+            ownerId: "customer-jordan",
+          },
+        },
+        "event-first",
+        "foreign-replay-run",
+      ),
+    ).rejects.toThrow("owned by another principal");
+    await expect(
+      other.acceptInbound(
+        {
+          ...candidate("foreign-canonical", "event-third"),
+          metadata: {
+            providerBinding: {
+              ...binding,
+              externalConversationId: conversation,
+            },
+            ownerId: "customer-jordan",
+          },
+        },
+        "event-third",
+        "foreign-canonical-run",
+      ),
+    ).rejects.toThrow("owned by another principal");
+    expect(
+      (
+        await store.getClientForTests().execute({
+          sql: "SELECT COUNT(*) AS total FROM support_turns WHERE case_id = ?",
+          args: [winnerCaseId],
+        })
+      ).rows[0],
+    ).toMatchObject({ total: 2 });
+    await other.close();
     await store.close();
   });
 

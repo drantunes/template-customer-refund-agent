@@ -21,6 +21,9 @@ const closeSharedClients: Array<() => Promise<void>> = [];
 const approverHeaders = {
   authorization: `Bearer ${issueLocalSession({ id: "approver-demo" })}`,
 };
+const supportAgentHeaders = {
+  authorization: `Bearer ${issueLocalSession({ id: "support-agent-demo" })}`,
+};
 const customerHeaders = {
   authorization: `Bearer ${issueLocalSession({ id: "customer-alex" })}`,
 };
@@ -207,6 +210,10 @@ async function loadDeterministicRuntime() {
     "/support/cases/:caseId/follow-ups",
     routes.supportCaseFollowUpRoute.handler,
   );
+  app.post(
+    "/support/cases/:caseId/feedback",
+    routes.supportCaseFeedbackRoute.handler,
+  );
   return {
     app,
     mastra,
@@ -323,6 +330,70 @@ describe("support approval HTTP boundary", () => {
 });
 
 describe("support workflow HTTP context propagation", () => {
+  it("uses server acceptance time and denies fresh staff content on tombstones", async () => {
+    const { app, caseStore: runtimeCaseStore } =
+      await loadDeterministicRuntime();
+    const conversationId = `retention-http-${crypto.randomUUID()}`;
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `retention-http-event-${crypto.randomUUID()}`,
+        conversationId,
+        from: "alex@example.com",
+        subject: "future timestamp",
+        body: "synthetic retention body",
+        receivedAt: "2099-01-01T00:00:00.000Z",
+      }),
+    });
+    expect(inbound.status).toBe(200);
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe(
+        "waiting_approval",
+      ),
+    );
+    const client = runtimeCaseStore.getClientForTests();
+    const accepted = await client.execute({
+      sql: "SELECT accepted_at FROM support_cases WHERE id = ?",
+      args: [caseId],
+    });
+    expect(String(accepted.rows[0]?.accepted_at)).not.toBe(
+      "2099-01-01T00:00:00.000Z",
+    );
+    await client.execute({
+      sql: "UPDATE support_cases SET accepted_at = ? WHERE id = ?",
+      args: ["2026-01-01T00:00:00.000Z", caseId],
+    });
+    await runtimeCaseStore.enforceRetention(
+      () => new Date("2026-05-01T00:00:00.000Z"),
+    );
+    const feedback = await app.request(
+      `http://support.test/support/cases/${caseId}/feedback`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...supportAgentHeaders },
+        body: JSON.stringify({ rating: "up", comment: "must not persist" }),
+      },
+    );
+    expect(feedback.status).toBe(410);
+    const staffInbound = await app.request(
+      "http://support.test/support/inbound",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...supportAgentHeaders },
+        body: JSON.stringify({
+          externalId: `retention-http-late-${crypto.randomUUID()}`,
+          conversationId,
+          from: "alex@example.com",
+          subject: "late",
+          body: "must not persist",
+        }),
+      },
+    );
+    expect(staffInbound.status).toBe(410);
+  });
+
   it("rejects cross-tenant and cross-owner inbound conversation mutation before dispatch", async () => {
     const { app, caseStore: runtimeCaseStore } =
       await loadDeterministicRuntime();

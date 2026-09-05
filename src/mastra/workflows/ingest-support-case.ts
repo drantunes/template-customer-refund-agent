@@ -3,10 +3,7 @@ import { z } from "zod";
 import { caseStore } from "../lib/case-store";
 import { generateCaseId } from "../integrations/support-source";
 import type { SupportCase } from "../domain/support-case";
-import {
-  bindingsForPersistedCase,
-  defaultLocalBinding,
-} from "../runtime/local-runtime";
+import { defaultLocalBinding } from "../runtime/local-runtime";
 import {
   providerRegistry,
   resolveConfiguredBinding,
@@ -68,33 +65,7 @@ const normalizeAndPersistStep = createStep({
     const resolveRun = await mastra
       .getWorkflow("resolveSupportCaseWorkflow")
       .createRun();
-    const existingConversation = (await caseStore.list()).find((entry) => {
-      const binding = bindingsForPersistedCase(entry).support;
-      return (
-        binding.tenantId === support.tenantId &&
-        binding.providerAccountId === support.providerAccountId &&
-        binding.externalConversationId === support.externalConversationId
-      );
-    });
-    if (existingConversation) {
-      if (
-        customerIngress &&
-        (existingConversation.metadata as Record<string, unknown>).ownerId !==
-          inputData.ingress.id
-      )
-        throw new Error("Inbound conversation is owned by another principal.");
-      const followUp = await caseStore.appendFollowUp({
-        caseId: existingConversation.id,
-        eventId: `event_${normalized.source}_${normalized.externalId}`,
-        message: normalized.message,
-        runId: resolveRun.runId,
-      });
-      return {
-        caseId: existingConversation.id,
-        isNew: followUp.appended,
-        workflowRunId: followUp.appended ? resolveRun.runId : undefined,
-      };
-    }
+    const acceptedAt = new Date().toISOString();
     const supportCase: SupportCase = {
       id: generateCaseId(),
       status: "new",
@@ -103,10 +74,13 @@ const normalizeAndPersistStep = createStep({
       customer: normalized.customer,
       subject: normalized.subject,
       messages: [normalized.message],
-      createdAt: normalized.message.createdAt,
-      updatedAt: normalized.message.createdAt,
+      // receivedAt records the provider occurrence only. Retention starts at
+      // this server-owned acceptance boundary, never at a client timestamp.
+      createdAt: acceptedAt,
+      updatedAt: acceptedAt,
       metadata: {
         rawPayload: normalized.rawPayload,
+        sourceOccurredAt: normalized.message.createdAt,
         // The adapter-normalized customer is mapped once at ingress to a
         // stable local owner. Later client email/query fields never alter it.
         ownerId: verifiedOwner,
@@ -121,9 +95,23 @@ const normalizeAndPersistStep = createStep({
     };
     const accepted = await caseStore.acceptInbound(
       supportCase,
-      `event_${normalized.source}_${normalized.externalId}`,
+      normalized.externalId,
       resolveRun.runId,
     );
+    if (accepted.appendRequired) {
+      const followUp = await caseStore.appendFollowUp({
+        caseId: accepted.caseId,
+        eventId: normalized.externalId,
+        message: normalized.message,
+        runId: resolveRun.runId,
+        expectedOwnerId: verifiedOwner,
+      });
+      return {
+        caseId: accepted.caseId,
+        isNew: followUp.appended,
+        workflowRunId: followUp.appended ? resolveRun.runId : undefined,
+      };
+    }
     return {
       caseId: accepted.caseId,
       isNew: accepted.isNew,

@@ -22,6 +22,130 @@ afterEach(async () => {
 });
 
 describe("DEC-015 retention", () => {
+  it("uses accepted_at, removes terminal approval prose, and repairs a contaminated tombstone", async () => {
+    const store = await storeForTest();
+    const client = store.getClientForTests();
+    const now = new Date("2026-09-05T00:00:00.000Z");
+    const old = "2025-05-01T00:00:00.000Z";
+    await store.create({
+      id: "terminal-retention-case",
+      externalId: "terminal-retention-event",
+      source: "mock-email",
+      customer: { email: "synthetic-terminal@example.test" },
+      subject: "terminal note marker",
+      messages: [
+        {
+          id: "terminal-message",
+          author: "customer",
+          body: "terminal note marker",
+          createdAt: old,
+        },
+      ],
+      status: "resolved",
+      approval: {
+        approved: true,
+        approverId: "approver",
+        note: "terminal approval marker",
+      },
+      createdAt: old,
+      updatedAt: old,
+      metadata: {
+        providerBinding: {
+          tenantId: "local-demo",
+          providerKind: "local",
+          providerAccountId: "local-demo",
+          externalConversationId: "terminal-retention",
+        },
+        rawPayload: "terminal raw marker",
+      },
+    });
+    await client.execute({
+      sql: "UPDATE support_cases SET accepted_at = ? WHERE id = ?",
+      args: [old, "terminal-retention-case"],
+    });
+    await store.enforceRetention(() => now);
+    const redacted = await store.get("terminal-retention-case");
+    expect(JSON.stringify(redacted)).not.toContain("terminal approval marker");
+    // Simulate an older deployment that wrote only table projections after
+    // the tombstone marker. The case JSON remains clean, so this cannot be
+    // repaired by inspecting feedback/messages on the projection alone.
+    await client.execute({
+      sql: "INSERT INTO support_messages(id, case_id, data, created_at) VALUES (?, ?, ?, ?)",
+      args: [
+        "residual-message",
+        "terminal-retention-case",
+        JSON.stringify({ body: "residual table marker" }),
+        now.toISOString(),
+      ],
+    });
+    await client.execute({
+      sql: "INSERT INTO support_turns(id, case_id, event_id, sequence, state, created_at, updated_at, message_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      args: [
+        "residual-turn",
+        "terminal-retention-case",
+        "residual-event",
+        1,
+        "resolved",
+        now.toISOString(),
+        now.toISOString(),
+        JSON.stringify({ body: "residual turn marker" }),
+      ],
+    });
+    await client.execute({
+      sql: "INSERT INTO support_outbox(id, case_id, binding, body, status, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      args: [
+        "residual-outbox",
+        "terminal-retention-case",
+        "{}",
+        "residual outbox marker",
+        "resolved",
+        "delivered",
+        now.toISOString(),
+        now.toISOString(),
+      ],
+    });
+    await expect(
+      store.update("terminal-retention-case", { subject: "blocked" }),
+    ).rejects.toThrow("retention tombstone");
+    await expect(
+      store.appendMessage("terminal-retention-case", {
+        id: "blocked-message",
+        author: "customer",
+        body: "blocked",
+        createdAt: now.toISOString(),
+      }),
+    ).rejects.toThrow("retention tombstone");
+    await expect(
+      store.appendFollowUp({
+        caseId: "terminal-retention-case",
+        eventId: "blocked-event",
+        runId: "blocked-run",
+        message: {
+          id: "blocked-follow-up",
+          author: "customer",
+          body: "blocked",
+          createdAt: now.toISOString(),
+        },
+        expectedOwnerId: "customer-terminal",
+      }),
+    ).rejects.toThrow("retention tombstone");
+    await store.enforceRetention(() => now);
+    const repaired = await client.execute({
+      sql: "SELECT (SELECT COUNT(*) FROM support_messages WHERE case_id = ?) AS messages, (SELECT message_data FROM support_turns WHERE id = 'residual-turn') AS turn_data, (SELECT body FROM support_outbox WHERE id = 'residual-outbox') AS outbox_body",
+      args: ["terminal-retention-case"],
+    });
+    expect(repaired.rows[0]).toMatchObject({
+      messages: 0,
+      turn_data: null,
+      outbox_body: "[redacted]",
+    });
+    expect(
+      JSON.stringify(await store.get("terminal-retention-case")),
+    ).not.toContain("residual");
+    expect((await store.enforceRetention(() => now)).casesRedacted).toBe(0);
+    await store.close();
+  });
+
   it("uses installed LibSQL retention for persisted Mastra memory and traces, then fails stale pending work closed", async () => {
     const store = await storeForTest();
     const now = new Date("2026-09-05T00:00:00.000Z");
@@ -438,7 +562,7 @@ describe("DEC-015 retention", () => {
     const path = `/private/tmp/phase003-retention-cli-${crypto.randomUUID()}.db`;
     files.push(path, `${path}-shm`, `${path}-wal`);
     const store = new CaseStore({ url: `file:${path}` });
-    const old = "2026-05-01T00:00:00.000Z";
+    const old = "2025-05-01T00:00:00.000Z";
     await store.acceptInbound(
       {
         id: "cli-retention-case",
@@ -454,7 +578,12 @@ describe("DEC-015 retention", () => {
             createdAt: old,
           },
         ],
-        status: "resolved",
+        status: "escalated",
+        approval: {
+          approved: false,
+          approverId: "cli-approver",
+          note: "cli terminal approval marker",
+        },
         createdAt: old,
         updatedAt: old,
         metadata: {
@@ -495,6 +624,8 @@ describe("DEC-015 retention", () => {
         env: {
           ...process.env,
           TURSO_DATABASE_URL: `file:${path}`,
+          NODE_ENV: "test",
+          SUPPORT_TEST_RETENTION_NOW: "2026-09-05T00:00:00.000Z",
         },
       },
     );
@@ -506,9 +637,28 @@ describe("DEC-015 retention", () => {
     expect(output.snapshotsDeleted).toEqual([
       "ingest-support-case:cli-ingress-storage-uuid",
     ]);
+    const reopened = new CaseStore({ url: `file:${path}` });
+    expect(
+      JSON.stringify(await reopened.get("cli-retention-case")),
+    ).not.toContain("cli terminal approval marker");
+    await reopened.close();
+    const repeated = await execFileAsync(
+      process.execPath,
+      ["scripts/retention.mjs"],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          TURSO_DATABASE_URL: `file:${path}`,
+          NODE_ENV: "test",
+          SUPPORT_TEST_RETENTION_NOW: "2027-09-05T00:00:00.000Z",
+        },
+      },
+    );
+    expect(JSON.parse(repeated.stdout).cases.casesRedacted).toBe(0);
   });
 
-  it("upgrades populated v6/v7 turn history to v8 and refuses every unsupported downgrade without mutation", async () => {
+  it("upgrades populated v6/v7 turn history through v9 and refuses every unsupported downgrade without mutation", async () => {
     const path = `/private/tmp/phase003-migration-${crypto.randomUUID()}.db`;
     files.push(path, `${path}-shm`, `${path}-wal`);
     const store = new CaseStore({ url: `file:${path}` });
@@ -578,16 +728,16 @@ describe("DEC-015 retention", () => {
       INSERT INTO support_turns(id, case_id, event_id, sequence, state, created_at, updated_at, run_id) VALUES ('migration-turn-one', 'migration-case', 'migration-event', 1, 'resolved', '${createdAt}', '${createdAt}', 'migration-run-one');
       INSERT INTO support_turns(id, case_id, event_id, sequence, state, created_at, updated_at, run_id) VALUES ('migration-turn-two', 'migration-case', 'migration-event-two', 2, 'resolved', '${createdAt}', '${createdAt}', 'migration-run-two');
     `);
-    await store.migrate(8);
-    await store.migrate(8);
+    await store.migrate(9);
+    await store.migrate(9);
     const beforeRefusal = await client.execute(`
       SELECT
         (SELECT group_concat(version, ',') FROM support_schema_migrations) AS versions,
         (SELECT group_concat(id, ',') FROM support_turns WHERE case_id = 'migration-case' ORDER BY id) AS turns,
         (SELECT group_concat(message_data, '|') FROM support_turns WHERE case_id = 'migration-case' ORDER BY id) AS messages
     `);
-    await expect(store.migrate(7)).rejects.toThrow(
-      "Refusing unsupported downgrade from support schema v8 to v7.",
+    await expect(store.migrate(8)).rejects.toThrow(
+      "Refusing unsupported downgrade from support schema v9 to v8.",
     );
     const afterRefusal = await client.execute(`
       SELECT
@@ -597,7 +747,7 @@ describe("DEC-015 retention", () => {
     `);
     expect(afterRefusal.rows).toEqual(beforeRefusal.rows);
     expect(afterRefusal.rows[0]).toMatchObject({
-      versions: "1,2,3,4,5,6,7,8",
+      versions: "1,2,3,4,5,6,7,8,9",
       turns: "migration-turn-one,migration-turn-two",
     });
     await store.close();
@@ -605,6 +755,138 @@ describe("DEC-015 retention", () => {
     expect(await reopened.get("migration-case")).toMatchObject({
       id: "migration-case",
       externalId: "migration-event",
+    });
+    await reopened.close();
+  });
+
+  it("rolls back an ambiguous v9 canonical migration before markers or data change, then backfills trusted acceptance evidence", async () => {
+    const path = `/private/tmp/phase003-v9-conflict-${crypto.randomUUID()}.db`;
+    files.push(path, `${path}-shm`, `${path}-wal`);
+    const store = new CaseStore({ url: `file:${path}` });
+    await store.migrate(8);
+    const client = store.getClientForTests();
+    const caseData = (id: string, conversation: string, createdAt: string) =>
+      JSON.stringify({
+        id,
+        externalId: `${id}-event`,
+        source: "mock-email",
+        customer: { email: `${id}@example.test` },
+        subject: `migration ${id}`,
+        messages: [],
+        status: "resolved",
+        createdAt,
+        updatedAt: createdAt,
+        metadata: {
+          providerBinding: {
+            tenantId: "local-demo",
+            providerKind: "local",
+            providerAccountId: "local-demo",
+            externalConversationId: conversation,
+          },
+          ownerId: `owner-${id}`,
+        },
+      });
+    const insert = async (
+      id: string,
+      conversation: string,
+      createdAt: string,
+    ) =>
+      client.execute({
+        sql: "INSERT INTO support_cases(id, source, external_id, data, created_at, updated_at, version, tenant_id, provider_account_id, provider_binding) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+        args: [
+          id,
+          "mock-email",
+          `${id}-event`,
+          caseData(id, conversation, createdAt),
+          createdAt,
+          createdAt,
+          "local-demo",
+          "local-demo",
+          JSON.stringify({
+            tenantId: "local-demo",
+            providerKind: "local",
+            providerAccountId: "local-demo",
+            externalConversationId: conversation,
+          }),
+        ],
+      });
+    await insert(
+      "canonical-one",
+      "ambiguous-conversation",
+      "2026-08-01T00:00:00.000Z",
+    );
+    await insert(
+      "canonical-two",
+      "ambiguous-conversation",
+      "2026-08-02T00:00:00.000Z",
+    );
+    await insert(
+      "future-fallback",
+      "future-conversation",
+      "2099-01-01T00:00:00.000Z",
+    );
+    await client.execute({
+      sql: "INSERT INTO support_events(id, tenant_id, provider_account_id, source, external_id, case_id, accepted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      args: [
+        "trusted-acceptance-evidence",
+        "local-demo",
+        "local-demo",
+        "mock-email",
+        "canonical-one-event",
+        "canonical-one",
+        "2026-08-15T12:00:00.000Z",
+      ],
+    });
+    const beforeFailure = await client.execute(
+      "SELECT id, data, created_at FROM support_cases ORDER BY id",
+    );
+    await expect(store.migrate(9)).rejects.toThrow(
+      "Refusing canonical conversation migration: ambiguous historical conversation",
+    );
+    expect(
+      (await client.execute("PRAGMA table_info(support_cases)")).rows.map(
+        (column) => column.name,
+      ),
+    ).not.toContain("accepted_at");
+    expect(
+      (
+        await client.execute(
+          "SELECT version FROM support_schema_migrations ORDER BY version",
+        )
+      ).rows.map((row) => row.version),
+    ).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(
+      (
+        await client.execute(
+          "SELECT id, data, created_at FROM support_cases ORDER BY id",
+        )
+      ).rows,
+    ).toEqual(beforeFailure.rows);
+
+    await client.execute(
+      "DELETE FROM support_cases WHERE id = 'canonical-two'",
+    );
+    const beforeRepair = new Date();
+    await store.migrate(9);
+    const afterRepair = new Date();
+    const accepted = await client.execute(
+      "SELECT id, accepted_at FROM support_cases ORDER BY id",
+    );
+    expect(accepted.rows).toContainEqual({
+      id: "canonical-one",
+      accepted_at: "2026-08-15T12:00:00.000Z",
+    });
+    const future = accepted.rows.find((row) => row.id === "future-fallback");
+    expect(
+      new Date(String(future?.accepted_at)).getTime(),
+    ).toBeGreaterThanOrEqual(beforeRepair.getTime());
+    expect(new Date(String(future?.accepted_at)).getTime()).toBeLessThanOrEqual(
+      afterRepair.getTime(),
+    );
+    await store.close();
+    const reopened = new CaseStore({ url: `file:${path}` });
+    expect(await reopened.get("canonical-one")).toMatchObject({
+      id: "canonical-one",
     });
     await reopened.close();
   });

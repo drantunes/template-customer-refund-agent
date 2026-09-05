@@ -38,6 +38,21 @@ function cutoff(days, current) {
   ).toISOString();
 }
 
+function retentionClock() {
+  const supplied = process.env.SUPPORT_TEST_RETENTION_NOW;
+  if (supplied !== undefined) {
+    if (process.env.NODE_ENV !== "test")
+      throw new Error(
+        "SUPPORT_TEST_RETENTION_NOW is available only under NODE_ENV=test.",
+      );
+    const parsed = new Date(supplied);
+    if (Number.isNaN(parsed.getTime()))
+      throw new Error("SUPPORT_TEST_RETENTION_NOW must be an ISO timestamp.");
+    return parsed;
+  }
+  return new Date();
+}
+
 async function tableExists(client, name) {
   return Boolean(
     (
@@ -73,29 +88,61 @@ async function sweepCases(client, policy, current = new Date()) {
     expiredWorkflowRunIds: [],
   };
   const rows = await client.execute({
-    sql: "SELECT id, data, version, created_at FROM support_cases WHERE created_at < ? OR updated_at < ?",
+    sql: "SELECT id, data, version, created_at, accepted_at FROM support_cases WHERE COALESCE(accepted_at, created_at) < ? OR updated_at < ?",
     args: [rawCutoff, traceCutoff],
   });
   for (const row of rows.rows) {
     const data = JSON.parse(String(row.data));
-    const createdAt = String(row.created_at);
+    const acceptedAt = String(row.accepted_at ?? row.created_at);
     const metadata = { ...(data.metadata ?? {}) };
     if (metadata.retentionRedactedAt !== undefined)
       result.expiredCaseIds.push(String(row.id));
     let updated = { ...data, metadata };
     let changed = false;
     let redactedCase = false;
-    if (createdAt < rawCutoff && "rawPayload" in metadata) {
+    if (acceptedAt < rawCutoff && "rawPayload" in metadata) {
       delete metadata.rawPayload;
       result.rawPayloadsRedacted += 1;
       changed = true;
     }
-    if (createdAt < traceCutoff && updated.traceId) {
+    if (acceptedAt < traceCutoff && updated.traceId) {
       updated = { ...updated, traceId: undefined };
       result.tracesRedacted += 1;
       changed = true;
     }
-    if (createdAt < caseCutoff && metadata.retentionRedactedAt === undefined) {
+    // A tombstone may have been contaminated by an older deployment. Include
+    // table-only copies in the repair predicate so repeated CLI sweeps remain
+    // idempotent once every durable content projection is clean.
+    const residualContent =
+      acceptedAt < caseCutoff && metadata.retentionRedactedAt !== undefined
+        ? await client.execute({
+            sql: `SELECT 1 FROM support_messages WHERE case_id = ?
+              UNION ALL SELECT 1 FROM support_turns WHERE case_id = ? AND (message_data IS NOT NULL OR outcome_data IS NOT NULL)
+              UNION ALL SELECT 1 FROM support_outbox WHERE case_id = ? AND (body <> '[redacted]' OR receipt IS NOT NULL OR last_error IS NOT NULL)
+              UNION ALL SELECT 1 FROM support_decisions WHERE case_id = ? AND note IS NOT NULL
+              UNION ALL SELECT 1 FROM support_actions WHERE case_id = ? AND data <> '{}'
+              LIMIT 1`,
+            args: [
+              String(row.id),
+              String(row.id),
+              String(row.id),
+              String(row.id),
+              String(row.id),
+            ],
+          })
+        : undefined;
+    if (
+      acceptedAt < caseCutoff &&
+      (metadata.retentionRedactedAt === undefined ||
+        data.messages.length > 0 ||
+        data.approval !== undefined ||
+        data.feedback !== undefined ||
+        data.customer?.email !== "redacted@invalid.local" ||
+        data.subject !== "Redacted support case" ||
+        data.finalResponse !== undefined ||
+        data.draft !== undefined ||
+        Boolean(residualContent?.rows[0]))
+    ) {
       const wasPending = ["new", "processing", "waiting_approval"].includes(
         data.status,
       );
@@ -105,10 +152,10 @@ async function sweepCases(client, policy, current = new Date()) {
         customer: { email: "redacted@invalid.local" },
         subject: "Redacted support case",
         messages: [],
+        approval: undefined,
         ...(wasPending
           ? {
               status: "failed",
-              approval: undefined,
             }
           : {}),
         triage: undefined,
@@ -272,8 +319,13 @@ try {
       throw new Error(
         `Refusing retention cleanup: ${table} is missing. Start the local app once so its supported migrations finish first.`,
       );
+  const caseColumns = await client.execute("PRAGMA table_info(support_cases)");
+  if (!caseColumns.rows.some((column) => column.name === "accepted_at"))
+    throw new Error(
+      "Refusing retention cleanup: support schema v9 acceptance-time migration is missing. Start the local app once so its supported migrations finish first.",
+    );
 
-  const cases = await sweepCases(client, policy);
+  const cases = await sweepCases(client, policy, retentionClock());
   const storage = new LibSQLStore({
     id: "support-retention-cli",
     client,

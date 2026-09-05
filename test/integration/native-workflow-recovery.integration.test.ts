@@ -3,10 +3,13 @@ import { RequestContext } from "@mastra/core/request-context";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { issueLocalSession } from "../../src/mastra/server/auth";
 
 const files: string[] = [];
 const runtimes: Array<{ shutdown(): Promise<void> }> = [];
+const execFileAsync = promisify(execFile);
 
 function jsonModel(
   value: Record<string, unknown>,
@@ -77,6 +80,73 @@ function refundModel(
   };
 }
 
+function responseLookupModel(
+  input: {
+    customerEmail?: string;
+    orderId?: string;
+    binding?: {
+      tenantId: string;
+      providerKind: "local";
+      providerAccountId: string;
+      externalConversationId: string;
+    };
+  } = { customerEmail: "alex@example.com", orderId: "ORD-1001" },
+  prompts: string[] = [],
+): LanguageModelV2 {
+  let called = false;
+  return {
+    specificationVersion: "v2",
+    provider: "phase003-test",
+    modelId: "deterministic-response-lookup",
+    supportedUrls: {},
+    async doGenerate(options) {
+      prompts.push(JSON.stringify(options.prompt));
+      if (
+        !called &&
+        options.tools?.some(
+          (tool) => tool.type === "function" && tool.name === "lookup_order",
+        )
+      ) {
+        called = true;
+        return {
+          content: [
+            {
+              type: "tool-call" as const,
+              toolCallId: "response-lookup",
+              toolName: "lookup_order",
+              input: JSON.stringify(input),
+            },
+          ],
+          finishReason: "tool-calls" as const,
+          usage: { inputTokens: 1, outputTokens: 1 },
+          warnings: [],
+        };
+      }
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              draftResponse: "Verified lookup response.",
+              citedSources: ["duplicate-charge-policy"],
+              recommendRefund: false,
+              requiresEscalation: false,
+            }),
+          },
+        ],
+        finishReason: "stop" as const,
+        usage: { inputTokens: 1, outputTokens: 1 },
+        warnings: [],
+      };
+    },
+    async doStream() {
+      throw new Error(
+        "This deterministic integration model only supports generate.",
+      );
+    },
+  };
+}
+
 async function setup(
   caseId: string,
   configuredBinding?: {
@@ -92,6 +162,7 @@ async function setup(
   options?: {
     deferInitialWorkflow?: boolean;
     responseBeforeGenerate?: () => Promise<void>;
+    responseModel?: LanguageModelV2;
     executionBeforeGenerate?: () => Promise<void>;
   },
 ) {
@@ -123,8 +194,12 @@ async function setup(
     await import("../../src/mastra/agents/response-agent");
   const { refundExecutionAgent } =
     await import("../../src/mastra/agents/refund-execution-agent");
-  const { supportCaseApproveRoute, supportCaseFollowUpRoute } =
-    await import("../../src/mastra/server/routes");
+  const {
+    supportCaseApproveRoute,
+    supportCaseFeedbackRoute,
+    supportCaseFollowUpRoute,
+    supportInboundRoute,
+  } = await import("../../src/mastra/server/routes");
 
   // These spies replace only the provider transport. The registered Agents,
   // native approval snapshot, tool execution, workflow suspension and resume
@@ -142,18 +217,20 @@ async function setup(
   const refundAmount = refund?.amount ?? 20;
   const refundCurrency = refund?.currency ?? "USD";
   responseAgent.__updateModel({
-    model: jsonModel(
-      {
-        draftResponse: "We will process the duplicate-charge refund.",
-        citedSources: ["duplicate-charge-policy"],
-        recommendRefund: true,
-        refundAmount,
-        refundCurrency,
-        refundReason: "duplicate charge",
-        requiresEscalation: false,
-      },
-      options?.responseBeforeGenerate,
-    ) as never,
+    model:
+      options?.responseModel ??
+      (jsonModel(
+        {
+          draftResponse: "We will process the duplicate-charge refund.",
+          citedSources: ["duplicate-charge-policy"],
+          recommendRefund: true,
+          refundAmount,
+          refundCurrency,
+          refundReason: "duplicate charge",
+          requiresEscalation: false,
+        },
+        options?.responseBeforeGenerate,
+      ) as never),
   });
 
   const binding =
@@ -259,6 +336,8 @@ async function setup(
     supportCaseFollowUpRoute.handler,
   );
   app.post("/support/cases/:caseId/approve", supportCaseApproveRoute.handler);
+  app.post("/support/cases/:caseId/feedback", supportCaseFeedbackRoute.handler);
+  app.post("/support/inbound", supportInboundRoute.handler);
 
   if (options?.deferInitialWorkflow)
     return {
@@ -343,6 +422,169 @@ afterEach(async () => {
 });
 
 describe("native approval workflow recovery", () => {
+  it("lets the registered response Agent read only the durable current customer commerce scope", async () => {
+    const caseId = `response-agent-lookup-${crypto.randomUUID()}`;
+    const observedPrompts: string[] = [];
+    const { caseStore } = await setup(
+      caseId,
+      undefined,
+      undefined,
+      { amount: 1001, currency: "USD" },
+      { responseModel: responseLookupModel(undefined, observedPrompts) },
+    );
+    // The second real Agent model turn carries the registered tool result.
+    // A draft-only assertion would pass even if lookup_order failed closed.
+    expect(observedPrompts.join("\n")).toContain("Pro Plan - Monthly");
+    expect(observedPrompts.join("\n")).toContain("alex@example.com");
+    expect((await caseStore.get(caseId))?.draft).toMatchObject({
+      draftResponse: "Verified lookup response.",
+    });
+  });
+
+  it("denies foreign response-agent lookup arguments without exposing foreign commerce data", async () => {
+    const caseId = `response-agent-foreign-lookup-${crypto.randomUUID()}`;
+    const observedPrompts: string[] = [];
+    const { caseStore } = await setup(
+      caseId,
+      undefined,
+      undefined,
+      { amount: 1001, currency: "USD" },
+      {
+        responseModel: responseLookupModel(
+          {
+            customerEmail: "jordan@example.com",
+            orderId: "ORD-1002",
+            binding: {
+              tenantId: "local-demo",
+              providerKind: "local",
+              providerAccountId: "foreign-account",
+              externalConversationId: "foreign-conversation",
+            },
+          },
+          observedPrompts,
+        ),
+      },
+    );
+    expect((await caseStore.get(caseId))?.draft).toMatchObject({
+      draftResponse: "Verified lookup response.",
+    });
+    // The model authored Jordan's identifiers, so those can appear in its
+    // request. The response Agent must never receive Jordan's durable order.
+    const modelInput = observedPrompts.join("\n");
+    expect(modelInput).not.toContain("Wireless Headphones");
+    expect(modelInput).not.toContain("12999");
+  });
+
+  it("uses the authenticated server acceptance time for future and past inbound retention in runtime and CLI", async () => {
+    const caseId = `acceptance-clock-${crypto.randomUUID()}`;
+    const { app, caseStore } = await setup(caseId);
+    const before = new Date();
+    const accepted: Array<{ caseId: string; receivedAt: string }> = [];
+    for (const receivedAt of [
+      "2099-01-01T00:00:00.000Z",
+      "2001-01-01T00:00:00.000Z",
+    ]) {
+      const response = await app.request(
+        "http://support.test/support/inbound",
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${issueLocalSession({ id: "customer-alex" })}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            externalId: `acceptance-event-${crypto.randomUUID()}`,
+            conversationId: `acceptance-conversation-${crypto.randomUUID()}`,
+            from: "alex@example.com",
+            subject: "Acceptance-time retention",
+            body: `synthetic body from ${receivedAt}`,
+            receivedAt,
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      accepted.push({
+        caseId: ((await response.json()) as { caseId: string }).caseId,
+        receivedAt,
+      });
+    }
+    const after = new Date();
+    // Retention must not use the untrusted occurrence timestamp to purge a
+    // newly accepted case, regardless of the asynchronous resolution result.
+    await vi.waitFor(async () => {
+      for (const item of accepted)
+        expect(await caseStore.get(item.caseId)).toMatchObject({
+          id: item.caseId,
+          customer: { email: "alex@example.com" },
+        });
+    });
+    const client = caseStore.getClientForTests();
+    const stored = await Promise.all(
+      accepted.map(async (item) => ({
+        ...item,
+        row: (
+          await client.execute({
+            sql: "SELECT accepted_at, data FROM support_cases WHERE id = ?",
+            args: [item.caseId],
+          })
+        ).rows[0] as { accepted_at: string; data: string },
+      })),
+    );
+    for (const item of stored) {
+      const acceptedAt = new Date(item.row.accepted_at);
+      expect(acceptedAt.getTime()).toBeGreaterThanOrEqual(before.getTime());
+      expect(acceptedAt.getTime()).toBeLessThanOrEqual(after.getTime());
+      expect(item.row.accepted_at).not.toBe(item.receivedAt);
+      expect(JSON.parse(item.row.data).metadata.sourceOccurredAt).toBe(
+        item.receivedAt,
+      );
+    }
+    const latestAcceptedAt = Math.max(
+      ...stored.map((item) => new Date(item.row.accepted_at).getTime()),
+    );
+    await caseStore.enforceRetention(
+      () => new Date(latestAcceptedAt + 6 * 24 * 60 * 60 * 1_000),
+    );
+    for (const item of accepted)
+      expect((await caseStore.get(item.caseId))?.metadata).toHaveProperty(
+        "rawPayload",
+      );
+    await caseStore.enforceRetention(
+      () => new Date(latestAcceptedAt + 8 * 24 * 60 * 60 * 1_000),
+    );
+    for (const item of accepted)
+      expect((await caseStore.get(item.caseId))?.metadata).not.toHaveProperty(
+        "rawPayload",
+      );
+
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      ["scripts/retention.mjs"],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          NODE_ENV: "test",
+          SUPPORT_TEST_RETENTION_NOW: new Date(
+            latestAcceptedAt + 91 * 24 * 60 * 60 * 1_000,
+          ).toISOString(),
+        },
+      },
+    );
+    // setup also contains its own registered fixture case, which has the
+    // same server-time window. Both authenticated ingress cases must be in
+    // this durable CLI sweep regardless of that fixture.
+    expect(JSON.parse(stdout).cases.casesRedacted).toBeGreaterThanOrEqual(2);
+    for (const item of accepted) {
+      const tombstone = await caseStore.get(item.caseId);
+      expect(tombstone).toMatchObject({
+        customer: { email: "redacted@invalid.local" },
+        messages: [],
+      });
+      expect(tombstone?.metadata).toHaveProperty("retentionRedactedAt");
+    }
+  });
+
   it("fails a real portal follow-up when its registered response agent transport fails", async () => {
     const caseId = `portal-agent-failure-${crypto.randomUUID()}`;
     let responseCalls = 0;
@@ -589,7 +831,13 @@ describe("native approval workflow recovery", () => {
         status: "new",
         createdAt,
         updatedAt: createdAt,
-        metadata: { providerBinding: binding, ownerId: "customer-alex" },
+        metadata: {
+          providerBinding: {
+            ...binding,
+            externalConversationId: `conversation-${activeCaseId}`,
+          },
+          ownerId: "customer-alex",
+        },
       },
       `event-${activeCaseId}`,
       activeRunId,
@@ -638,8 +886,8 @@ describe("native approval workflow recovery", () => {
     ]).toContain(activeSnapshot?.workflowName);
     const old = "2026-05-01T00:00:00.000Z";
     await caseStore.getClientForTests().execute({
-      sql: "UPDATE support_cases SET created_at = ? WHERE id = ?",
-      args: [old, caseId],
+      sql: "UPDATE support_cases SET created_at = ?, accepted_at = ? WHERE id = ?",
+      args: [old, old, caseId],
     });
     const retention = await caseStore.enforceRetention(
       () => new Date("2026-09-05T00:00:00.000Z"),

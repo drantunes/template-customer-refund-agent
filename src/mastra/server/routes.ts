@@ -1,5 +1,5 @@
 import { registerApiRoute, type ContextWithMastra } from "@mastra/core/server";
-import { caseStore } from "../lib/case-store";
+import { caseStore, isRetentionTombstone } from "../lib/case-store";
 import {
   renewDispatchLeaseWhileRunning,
   withDispatchLeaseScope,
@@ -222,6 +222,13 @@ export const supportInboundRoute = registerApiRoute("/support/inbound", {
           errorResponseSchema.parse({ error: "Case access denied." }),
           403,
         );
+      if (existing && isRetentionTombstone(existing))
+        return c.json(
+          errorResponseSchema.parse({
+            error: "This expired support case cannot accept new content.",
+          }),
+          410,
+        );
     }
 
     const mastra = c.get("mastra");
@@ -282,6 +289,13 @@ export const supportCaseFollowUpRoute = registerApiRoute(
         return c.json(
           errorResponseSchema.parse({ error: "Insufficient authority." }),
           403,
+        );
+      if (isRetentionTombstone(supportCase))
+        return c.json(
+          errorResponseSchema.parse({
+            error: "This expired support case cannot accept new content.",
+          }),
+          410,
         );
       let input: unknown;
       try {
@@ -836,6 +850,13 @@ export const supportCaseFeedbackRoute = registerApiRoute(
       if (!supportCase) return c.json({ error: "Case not found." }, 404);
       const current = caseScope(c, supportCase);
       if (current instanceof Response) return current;
+      if (isRetentionTombstone(supportCase))
+        return c.json(
+          errorResponseSchema.parse({
+            error: "This expired support case cannot accept new content.",
+          }),
+          410,
+        );
 
       let body: { rating?: string; comment?: string } = {};
       try {
