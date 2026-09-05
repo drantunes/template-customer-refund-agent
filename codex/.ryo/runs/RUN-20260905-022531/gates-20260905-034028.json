@@ -1,0 +1,207 @@
+{
+  "passed": true,
+  "results": [
+    {
+      "finished_at": "2026-09-05T03:39:56+00:00",
+      "id": "backend-format",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:39:55+00:00",
+      "stderr": "",
+      "stdout": "\n> mastra-customer-refund-agent@1.0.0 format:check\n> prettier --check . --ignore-path .prettierignore\n\nChecking formatting...\nAll matched files use Prettier code style!\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:39:56+00:00",
+      "id": "backend-style",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:39:56+00:00",
+      "stderr": "",
+      "stdout": "\n> mastra-customer-refund-agent@1.0.0 lint\n> oxlint --deny-warnings src test\n\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:39:58+00:00",
+      "id": "backend-typecheck",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:39:56+00:00",
+      "stderr": "",
+      "stdout": "\n> mastra-customer-refund-agent@1.0.0 typecheck\n> tsc --noEmit\n\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:39:58+00:00",
+      "id": "backend-unit-test",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:39:58+00:00",
+      "stderr": "",
+      "stdout": "\n> mastra-customer-refund-agent@1.0.0 test:unit\n> vitest run --project unit\n\n\n RUN  v4.1.11 /Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent\n\n\n Test Files  3 passed (3)\n      Tests  5 passed (5)\n   Start at  00:39:58\n   Duration  141ms (transform 46ms, setup 42ms, import 54ms, tests 61ms, environment 0ms)\n\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:01+00:00",
+      "id": "backend-integration-test",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:39:58+00:00",
+      "stderr": "",
+      "stdout": "\n> mastra-customer-refund-agent@1.0.0 test:integration\n> vitest run --project integration\n\n\n RUN  v4.1.11 /Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent\n\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.524 -0300] (support-refund-agent): \u001b[36mThis storage provider does not support batch creating metrics\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.527 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 6\n    \u001b[35mretryAttempt\u001b[39m: 1\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 500\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.527 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 6\n    \u001b[35mretryAttempt\u001b[39m: 2\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 1000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.528 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 6\n    \u001b[35mretryAttempt\u001b[39m: 3\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 2000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.528 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 6\n    \u001b[35mretryAttempt\u001b[39m: 4\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 4000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.528 -0300] (support-refund-agent): \u001b[36mMastraStorageExporter shutdown complete\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.528 -0300] (support-refund-agent): \u001b[36m[Observability] Shutdown completed [name=support-refund-agent]\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.528 -0300] (support-refund-agent): \u001b[36mMastra shutdown completed\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.567 -0300] (support-refund-agent): \u001b[36mThis storage provider does not support batch creating metrics\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.567 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 9\n    \u001b[35mretryAttempt\u001b[39m: 1\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 500\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.568 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 9\n    \u001b[35mretryAttempt\u001b[39m: 2\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 1000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.568 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 9\n    \u001b[35mretryAttempt\u001b[39m: 3\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 2000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.568 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 9\n    \u001b[35mretryAttempt\u001b[39m: 4\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 4000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.568 -0300] (support-refund-agent): \u001b[36mMastraStorageExporter shutdown complete\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.568 -0300] (support-refund-agent): \u001b[36m[Observability] Shutdown completed [name=support-refund-agent]\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.568 -0300] (support-refund-agent): \u001b[36mMastra shutdown completed\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.605 -0300] (support-refund-agent): \u001b[36mThis storage provider does not support batch creating metrics\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.605 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 9\n    \u001b[35mretryAttempt\u001b[39m: 1\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 500\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.605 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 9\n    \u001b[35mretryAttempt\u001b[39m: 2\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 1000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.606 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 9\n    \u001b[35mretryAttempt\u001b[39m: 3\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 2000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.606 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 9\n    \u001b[35mretryAttempt\u001b[39m: 4\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 4000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.606 -0300] (support-refund-agent): \u001b[36mMastraStorageExporter shutdown complete\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.606 -0300] (support-refund-agent): \u001b[36m[Observability] Shutdown completed [name=support-refund-agent]\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.606 -0300] (support-refund-agent): \u001b[36mMastra shutdown completed\u001b[39m\n\u001b[31mERROR\u001b[39m [2026-09-05 00:39:59.639 -0300] (support-refund-agent): \u001b[36mError executing step workflow.resolve-support-case.step.resolve-case: Error: Refund execution must exactly match the persisted command.\n    at execute (/Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/src/mastra/tools/issue-refund.ts:78:13)\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at Tool.execute (file:///Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/node_modules/@mastra/core/dist/tool-BwroCWv4.js:791:20)\n    at Object.execute (/Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/src/mastra/workflows/resolve-support-case.ts:427:13)\n    at engine.executeStepWithRetry.retries.retries (file:///Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/node_modules/@mastra/core/dist/agent-B8m3ps7U.js:2900:18)\n    at DefaultExecutionEngine.executeStepWithRetry (file:///Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/node_modules/@mastra/core/dist/agent-B8m3ps7U.js:3481:14)\n    at executeStep (file:///Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/node_modules/@mastra/core/dist/agent-B8m3ps7U.js:2885:26)\n    at executeEntry (file:///Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/node_modules/@mastra/core/dist/agent-B8m3ps7U.js:1911:50)\n    at DefaultExecutionEngine.execute (file:///Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/node_modules/@mastra/core/dist/agent-B8m3ps7U.js:3773:17)\n    at /Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/test/integration/resolve-support-case.characterization.test.ts:285:21\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.640 -0300] (support-refund-agent): \u001b[36mThis storage provider does not support batch creating logs\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.640 -0300] (support-refund-agent): \u001b[36mThis storage provider does not support batch creating metrics\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.641 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 9\n    \u001b[35mretryAttempt\u001b[39m: 1\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 500\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.641 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 9\n    \u001b[35mretryAttempt\u001b[39m: 2\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 1000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.641 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 9\n    \u001b[35mretryAttempt\u001b[39m: 3\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 2000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.641 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 9\n    \u001b[35mretryAttempt\u001b[39m: 4\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 4000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.641 -0300] (support-refund-agent): \u001b[36mMastraStorageExporter shutdown complete\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.641 -0300] (support-refund-agent): \u001b[36m[Observability] Shutdown completed [name=support-refund-agent]\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.641 -0300] (support-refund-agent): \u001b[36mMastra shutdown completed\u001b[39m\n\u001b[31mERROR\u001b[39m [2026-09-05 00:39:59.686 -0300] (support-refund-agent): \u001b[36mError executing step workflow.resolve-support-case.step.request-approval: Error: Refund exceeds the remaining balance.\n    at LocalRuntime.quoteRefund (/Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/src/mastra/runtime/local-runtime.ts:399:13)\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at Object.execute (/Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/src/mastra/workflows/resolve-support-case.ts:336:7)\n    at engine.executeStepWithRetry.retries.retries (file:///Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/node_modules/@mastra/core/dist/agent-B8m3ps7U.js:2900:18)\n    at DefaultExecutionEngine.executeStepWithRetry (file:///Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/node_modules/@mastra/core/dist/agent-B8m3ps7U.js:3481:14)\n    at executeStep (file:///Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/node_modules/@mastra/core/dist/agent-B8m3ps7U.js:2885:26)\n    at executeEntry (file:///Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/node_modules/@mastra/core/dist/agent-B8m3ps7U.js:1911:50)\n    at DefaultExecutionEngine.execute (file:///Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/node_modules/@mastra/core/dist/agent-B8m3ps7U.js:3773:17)\n    at Run._start (file:///Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/node_modules/@mastra/core/dist/agent-B8m3ps7U.js:6107:18)\u001b[39m\n    \u001b[35mtrace_id\u001b[39m: \"b3ffd8681ae1161b7db7703047d22611\"\n    \u001b[35mspan_id\u001b[39m: \"8640e46212143277\"\n\u001b[31mERROR\u001b[39m [2026-09-05 00:39:59.687 -0300] (support-refund-agent): \u001b[36mresolve-support-case run failed\u001b[39m\n    \u001b[35mtrace_id\u001b[39m: \"b3ffd8681ae1161b7db7703047d22611\"\n    \u001b[35mspan_id\u001b[39m: \"8640e46212143277\"\n    \u001b[35mcaseId\u001b[39m: \"case_31890b21\"\n    error: \"Workflow start failed.\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.734 -0300] (support-refund-agent): \u001b[36mThis storage provider does not support batch creating logs\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.734 -0300] (support-refund-agent): \u001b[36mThis storage provider does not support batch creating metrics\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.735 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 18\n    \u001b[35mretryAttempt\u001b[39m: 1\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 500\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.735 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 18\n    \u001b[35mretryAttempt\u001b[39m: 2\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 1000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.735 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 18\n    \u001b[35mretryAttempt\u001b[39m: 3\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 2000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.735 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 18\n    \u001b[35mretryAttempt\u001b[39m: 4\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 4000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.735 -0300] (support-refund-agent): \u001b[36mMastraStorageExporter shutdown complete\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.735 -0300] (support-refund-agent): \u001b[36m[Observability] Shutdown completed [name=support-refund-agent]\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.735 -0300] (support-refund-agent): \u001b[36mMastra shutdown completed\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.767 -0300] (support-refund-agent): \u001b[36mThis storage provider does not support batch creating metrics\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.767 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 7\n    \u001b[35mretryAttempt\u001b[39m: 1\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 500\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.767 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 7\n    \u001b[35mretryAttempt\u001b[39m: 2\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 1000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.768 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 7\n    \u001b[35mretryAttempt\u001b[39m: 3\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 2000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.768 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 7\n    \u001b[35mretryAttempt\u001b[39m: 4\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 4000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.768 -0300] (support-refund-agent): \u001b[36mMastraStorageExporter shutdown complete\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.768 -0300] (support-refund-agent): \u001b[36m[Observability] Shutdown completed [name=support-refund-agent]\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.768 -0300] (support-refund-agent): \u001b[36mMastra shutdown completed\u001b[39m\n\u001b[31mERROR\u001b[39m [2026-09-05 00:39:59.791 -0300] (support-refund-agent): \u001b[36mError executing step workflow.resolve-support-case.step.classify: Error: Synthetic triage failure.\n    at /Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/test/integration/resolve-support-case.characterization.test.ts:361:7\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at file:///Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.792 -0300] (support-refund-agent): \u001b[36mThis storage provider does not support batch creating logs\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.792 -0300] (support-refund-agent): \u001b[36mThis storage provider does not support batch creating metrics\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.792 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 2\n    \u001b[35mretryAttempt\u001b[39m: 1\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 500\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.792 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 2\n    \u001b[35mretryAttempt\u001b[39m: 2\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 1000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.792 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 2\n    \u001b[35mretryAttempt\u001b[39m: 3\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 2000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.792 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 2\n    \u001b[35mretryAttempt\u001b[39m: 4\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 4000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.793 -0300] (support-refund-agent): \u001b[36mMastraStorageExporter shutdown complete\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.793 -0300] (support-refund-agent): \u001b[36m[Observability] Shutdown completed [name=support-refund-agent]\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.793 -0300] (support-refund-agent): \u001b[36mMastra shutdown completed\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.879 -0300] (support-refund-agent): \u001b[36mThis storage provider does not support batch creating metrics\u001b[39m\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.880 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 13\n    \u001b[35mretryAttempt\u001b[39m: 1\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 500\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.880 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 13\n    \u001b[35mretryAttempt\u001b[39m: 2\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 1000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.880 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 13\n    \u001b[35mretryAttempt\u001b[39m: 3\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 2000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[33mWARN\u001b[39m [2026-09-05 00:39:59.880 -0300] (support-refund-agent): \u001b[36mFailed to persist observability events\u001b[39m\n    \u001b[35msignal\u001b[39m: \"tracing\"\n    \u001b[35meventCount\u001b[39m: 13\n    \u001b[35mretryAttempt\u001b[39m: 4\n    \u001b[35mmaxRetries\u001b[39m: 4\n    \u001b[35mnextRetryDelayMs\u001b[39m: 4000\n    error: \"CLIENT_CLOSED: The client is closed\"\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.880 -0300] (support-refund-agent): \u001b[36mMastraStorageExporter shutdown complete\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.880 -0300] (support-refund-agent): \u001b[36m[Observability] Shutdown completed [name=support-refund-agent]\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:39:59.881 -0300] (support-refund-agent): \u001b[36mMastra shutdown completed\u001b[39m\n\n Test Files  6 passed (6)\n      Tests  37 passed (37)\n   Start at  00:39:58\n   Duration  3.21s (transform 195ms, setup 33ms, import 557ms, tests 2.27s, environment 0ms)\n\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:02+00:00",
+      "id": "backend-contract-test",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:40:01+00:00",
+      "stderr": "",
+      "stdout": "\n> mastra-customer-refund-agent@1.0.0 test:contract\n> vitest run --project contract\n\n\n RUN  v4.1.11 /Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent\n\n\n Test Files  1 passed (1)\n      Tests  4 passed (4)\n   Start at  00:40:02\n   Duration  343ms (transform 54ms, setup 12ms, import 268ms, tests 4ms, environment 0ms)\n\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:03+00:00",
+      "id": "backend-eval",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:40:02+00:00",
+      "stderr": "",
+      "stdout": "\n> mastra-customer-refund-agent@1.0.0 test:eval\n> vitest run --project eval\n\n\n RUN  v4.1.11 /Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent\n\n\n Test Files  1 passed (1)\n      Tests  1 passed (1)\n   Start at  00:40:02\n   Duration  445ms (transform 49ms, setup 14ms, import 371ms, tests 2ms, environment 0ms)\n\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:19+00:00",
+      "id": "backend-build",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:40:03+00:00",
+      "stderr": "",
+      "stdout": "\n> mastra-customer-refund-agent@1.0.0 build\n> mastra build\n\n\u001b[32mINFO\u001b[39m [2026-09-05 00:40:04.864 -0300] (Mastra CLI): \u001b[36mAnalyzing dependencies...\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:40:06.732 -0300] (Mastra CLI): \u001b[36mOptimizing dependencies...\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:40:06.734 -0300] (Mastra CLI): \u001b[36mBundling Mastra application\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:40:08.033 -0300] (Mastra CLI): \u001b[36mBundling Mastra done\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:40:08.033 -0300] (Mastra CLI): \u001b[36mCopying public files\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:40:08.034 -0300] (Mastra CLI): \u001b[36mDone copying public files\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:40:08.034 -0300] (Mastra CLI): \u001b[36mCopying .npmrc file\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:40:08.034 -0300] (Mastra CLI): \u001b[36mDone copying .npmrc file\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:40:08.034 -0300] (Mastra CLI): \u001b[36mInstalling dependencies\u001b[39m\nadded 287 packages in 11s\n\u001b[32mINFO\u001b[39m [2026-09-05 00:40:19.485 -0300] (Mastra CLI): \u001b[36madded 287 packages in 11s\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:40:19.504 -0300] (Mastra CLI): \u001b[36mDone installing dependencies\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:40:19.505 -0300] (Mastra CLI): \u001b[36mGenerating package-lock.json for deploy\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:40:19.855 -0300] (Mastra CLI): \u001b[36mDone generating package-lock.json\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:40:19.880 -0300] (Mastra CLI): \u001b[36mBuild successful, you can now deploy the .mastra/output directory to your target platform.\u001b[39m\n\u001b[32mINFO\u001b[39m [2026-09-05 00:40:19.881 -0300] (Mastra CLI): \u001b[36mTo start the server, run: node .mastra/output/index.mjs\u001b[39m\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:20+00:00",
+      "id": "frontend-format",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:40:19+00:00",
+      "stderr": "",
+      "stdout": "\n> support-refund-agent-web@0.0.0 format:check\n> prettier --check . --ignore-path ../.prettierignore\n\nChecking formatting...\nAll matched files use Prettier code style!\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:20+00:00",
+      "id": "frontend-style",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:40:20+00:00",
+      "stderr": "",
+      "stdout": "\n> support-refund-agent-web@0.0.0 lint\n> oxlint --deny-warnings src\n\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:21+00:00",
+      "id": "frontend-typecheck",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:40:20+00:00",
+      "stderr": "",
+      "stdout": "\n> support-refund-agent-web@0.0.0 typecheck\n> tsc -b --pretty false\n\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:22+00:00",
+      "id": "frontend-unit-test",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:40:21+00:00",
+      "stderr": "",
+      "stdout": "\n> support-refund-agent-web@0.0.0 test:unit\n> vitest run --root .. --config vitest.config.ts --project web-unit\n\n\n RUN  v4.1.11 /Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent\n\n\n Test Files  1 passed (1)\n      Tests  1 passed (1)\n   Start at  00:40:22\n   Duration  91ms (transform 16ms, setup 14ms, import 9ms, tests 2ms, environment 0ms)\n\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:22+00:00",
+      "id": "frontend-integration-test",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:40:22+00:00",
+      "stderr": "",
+      "stdout": "\n> support-refund-agent-web@0.0.0 test:integration\n> vitest run --root .. --config vitest.config.ts --project web-integration\n\n\n RUN  v4.1.11 /Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent\n\n\n Test Files  1 passed (1)\n      Tests  2 passed (2)\n   Start at  00:40:22\n   Duration  93ms (transform 15ms, setup 12ms, import 9ms, tests 12ms, environment 0ms)\n\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:23+00:00",
+      "id": "frontend-contract-test",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:40:22+00:00",
+      "stderr": "",
+      "stdout": "\n> support-refund-agent-web@0.0.0 test:contract\n> vitest run --root .. --config vitest.config.ts --project web-contract\n\n\n RUN  v4.1.11 /Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent\n\n\n Test Files  1 passed (1)\n      Tests  1 passed (1)\n   Start at  00:40:22\n   Duration  126ms (transform 19ms, setup 15ms, import 43ms, tests 3ms, environment 0ms)\n\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:23+00:00",
+      "id": "frontend-eval",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:40:23+00:00",
+      "stderr": "",
+      "stdout": "\n> support-refund-agent-web@0.0.0 test:eval\n> vitest run --root .. --config vitest.config.ts --project web-eval\n\n\n RUN  v4.1.11 /Users/drantunes/Code/mastra-consulting-support-resolution/template-customer-refund-agent\n\n\n Test Files  1 passed (1)\n      Tests  1 passed (1)\n   Start at  00:40:23\n   Duration  88ms (transform 16ms, setup 13ms, import 9ms, tests 2ms, environment 0ms)\n\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:25+00:00",
+      "id": "frontend-build",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:40:23+00:00",
+      "stderr": "[plugin builtin:vite-reporter] \n(!) Some chunks are larger than 500 kB after minification. Consider:\n- Using dynamic import() to code-split the application\n- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting\n- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.\n",
+      "stdout": "\n> support-refund-agent-web@0.0.0 build\n> tsc -b && vite build\n\nvite v8.2.2 building client environment for production...\ntransforming...\n\u2713 2197 modules transformed.\nrendering chunks...\ncomputing gzip size...\ndist/index.html                                              0.45 kB \u2502 gzip:   0.29 kB\ndist/assets/geist-cyrillic-ext-wght-normal-DjL33-gN.woff2    7.42 kB\ndist/assets/geist-vietnamese-wght-normal-6IgcOCM7.woff2      8.00 kB\ndist/assets/geist-cyrillic-wght-normal-BEAKL7Jp.woff2       15.08 kB\ndist/assets/geist-latin-ext-wght-normal-DC-KSUi6.woff2      16.51 kB\ndist/assets/geist-latin-wght-normal-BgDaEnEv.woff2          29.40 kB\ndist/assets/index-CJYd_CBJ.css                              69.18 kB \u2502 gzip:  12.00 kB\ndist/assets/index-hDj3heNH.js                              531.20 kB \u2502 gzip: 167.20 kB\n\n\u2713 built in 193ms\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:25+00:00",
+      "id": "runtime",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:40:25+00:00",
+      "stderr": "",
+      "stdout": "\n> mastra-customer-refund-agent@1.0.0 check:runtime\n> node scripts/check-runtime.mjs\n\nRuntime verified: Node.js v24.20.0, npm 11.19.0.\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:25+00:00",
+      "id": "frozen-install",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:40:25+00:00",
+      "stderr": "",
+      "stdout": "\nup to date in 379ms\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:28+00:00",
+      "id": "end-to-end",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:40:25+00:00",
+      "stderr": "[WebServer] (node:74448) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\n[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)\n(node:74450) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\n(Use `node --trace-warnings ...` to show where the warning was created)\n[WebServer] 12:40:28 AM [vite] (client) [console.error] Base UI: A component that acts as a button expected a native <button> because the `nativeButton` prop is true. Rendering a non-<button> removes native button semantics, which can impact forms and accessibility. Use a real <button> in the `render` prop, or set `nativeButton` to `false`.\n[WebServer]     at Button (http://127.0.0.1:5173/src/components/ui/button.tsx:33:25)\n[WebServer]     at Portal (http://127.0.0.1:5173/src/pages/portal.tsx:550:74)\n[WebServer]     at App (http://127.0.0.1:5173/src/App.tsx:27:31)\n[WebServer] 12:40:28 AM [vite] (client) [console.error] Base UI: A component that acts as a button expected a native <button> because the `nativeButton` prop is true. Rendering a non-<button> removes native button semantics, which can impact forms and accessibility. Use a real <button> in the `render` prop, or set `nativeButton` to `false`.\n[WebServer]     at Button (http://127.0.0.1:5173/src/components/ui/button.tsx:33:25)\n[WebServer]     at Portal (http://127.0.0.1:5173/src/pages/portal.tsx:570:33)\n[WebServer]     at App (http://127.0.0.1:5173/src/App.tsx:27:31)\n[WebServer] 12:40:28 AM [vite] (client) [console.error] Base UI: A component that acts as a button expected a native <button> because the `nativeButton` prop is true. Rendering a non-<button> removes native button semantics, which can impact forms and accessibility. Use a real <button> in the `render` prop, or set `nativeButton` to `false`.\n[WebServer]     at Button (http://127.0.0.1:5173/src/components/ui/button.tsx:33:25)\n[WebServer]     at Portal (http://127.0.0.1:5173/src/pages/portal.tsx:550:74)\n[WebServer]     at App (http://127.0.0.1:5173/src/App.tsx:27:31)\n[WebServer] 12:40:28 AM [vite] (client) [console.error] Base UI: A component that acts as a button expected a native <button> because the `nativeButton` prop is true. Rendering a non-<button> removes native button semantics, which can impact forms and accessibility. Use a real <button> in the `render` prop, or set `nativeButton` to `false`.\n[WebServer]     at Button (http://127.0.0.1:5173/src/components/ui/button.tsx:33:25)\n[WebServer]     at Portal (http://127.0.0.1:5173/src/pages/portal.tsx:570:33)\n[WebServer]     at App (http://127.0.0.1:5173/src/App.tsx:27:31)\n[WebServer] 12:40:28 AM [vite] (client) [console.error] Base UI: A component that acts as a button expected a native <button> because the `nativeButton` prop is true. Rendering a non-<button> removes native button semantics, which can impact forms and accessibility. Use a real <button> in the `render` prop, or set `nativeButton` to `false`.\n[WebServer]     at Button (http://127.0.0.1:5173/src/components/ui/button.tsx:33:25)\n[WebServer]     at Portal (http://127.0.0.1:5173/src/pages/portal.tsx:550:74)\n[WebServer]     at App (http://127.0.0.1:5173/src/App.tsx:27:31)\n[WebServer] 12:40:28 AM [vite] (client) [console.error] Base UI: A component that acts as a button expected a native <button> because the `nativeButton` prop is true. Rendering a non-<button> removes native button semantics, which can impact forms and accessibility. Use a real <button> in the `render` prop, or set `nativeButton` to `false`.\n[WebServer]     at Button (http://127.0.0.1:5173/src/components/ui/button.tsx:33:25)\n[WebServer]     at Portal (http://127.0.0.1:5173/src/pages/portal.tsx:570:33)\n[WebServer]     at App (http://127.0.0.1:5173/src/App.tsx:27:31)\n",
+      "stdout": "\n> mastra-customer-refund-agent@1.0.0 test:e2e\n> playwright test\n\n\nRunning 2 tests using 1 worker\n\n  \u2713  1 test/e2e/local-demo.spec.ts:114:1 \u203a renders the local deterministic demo and reaches the portal (350ms)\n  \u2713  2 test/e2e/local-demo.spec.ts:126:1 \u203a submits through real handlers and lets admin approve or reject the workflow (1.7s)\n\n  2 passed (2.9s)\n"
+    },
+    {
+      "finished_at": "2026-09-05T03:40:28+00:00",
+      "id": "diff-integrity",
+      "passed": true,
+      "required": true,
+      "returncode": 0,
+      "started_at": "2026-09-05T03:40:28+00:00",
+      "stderr": "",
+      "stdout": ""
+    }
+  ],
+  "run_id": "RUN-20260905-022531",
+  "schema_version": 1
+}

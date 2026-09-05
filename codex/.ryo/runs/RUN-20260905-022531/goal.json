@@ -1,0 +1,21 @@
+{
+  "stage": "GOAL", "status": "success", "run_id": "RUN-20260905-022531", "phase": "PHASE-002",
+  "role": {"model": "gpt-6-astra", "effort": "medium"},
+  "summary": "Deliver provider-neutral contracts and a persistent Studio-first local runtime with recoverable processing/delivery, exact money, and shared local/HTTP conformance.",
+  "scope_checked": ["PHASE-002", "REQ-P0-003", "REQ-P0-004", "REQ-P0-011", "REQ-P0-012", "REV-009", "REV-010", "REV-011"],
+  "evidence": ["codex/development-plan.md", "codex/tech-spec.md", "codex/.ryo/spec-baseline.json", "codex/.ryo/gates.json", "codex/.ryo/runs/RUN-20260905-022531/planning.json"],
+  "acceptance_criteria": [
+    {"id":"AC-002-01","criterion":"Validated four ports isolate workflow/tool code from concrete mocks/vendor SDKs. Independent tenant/case bindings persist; defaults cannot redirect existing effects.","proof":"Import audit and contract tests across distinct accounts/tenants/bindings."},
+    {"id":"AC-002-02","criterion":"Versioned reversible migrations preserve legacy cases and Mastra tables; CAS and all domain, action, event, dispatch/outbox records survive reopen.","proof":"Migration up/down/up, failed rollback, stale-write rejection and reopen assertions."},
+    {"id":"AC-002-03","criterion":"Exact money with checked legacy boundary; atomic refunds prevent over-refund; replay returns persisted effect and conflicting reuse fails.","proof":"Precision/currency/range, concurrent partial refunds, key conflict and restart after effect."},
+    {"id":"AC-002-04","criterion":"Existing approval persists immutable command linkage; missing/rejected/tampered commands and execution bypass fail. Existing approve/reject works without claiming PHASE003 compliance.","proof":"Success/rejection/tamper/bypass/replay/restart tests."},
+    {"id":"AC-002-05","criterion":"Persistent deterministic commerce/knowledge, ambiguous lookup rejection, repeatable seed and scoped reset preserving unrelated data.","proof":"Persistence/provenance/ambiguity/seed/reset-isolation tests and commands."},
+    {"id":"AC-002-06","criterion":"Inbound acceptance atomically persists deduplicated event/message/case/dispatch. Stable run IDs and bounded claims recover work without approving suspended runs.","proof":"Concurrent duplicates and actual workflow restart across pre-start/active/suspended boundaries."},
+    {"id":"AC-002-07","criterion":"Durable bound outbox with classified bounded retry and receipts; workflow/action/delivery status separate and terminal failure visible.","proof":"Timeout/429/5xx/permanent/dropped-response, concurrent claims, restart and receipt replay."},
+    {"id":"AC-002-08","criterion":"Optional loopback HTTP facade and adapter pass shared in-process conformance with validated boundaries.","proof":"Shared tests both transports including timeout and post-commit dropped response."},
+    {"id":"AC-002-09","criterion":"Documented Studio startup uses deterministic local fixtures, preserves registry/context and compatible demo flows.","proof":"Startup smoke, context/registry checks and relevant E2E journeys."}
+  ],
+  "non_goals": ["PHASE003 auth/RBAC/native approval/multi-turn memory", "PHASE004 index swap/evals/monitoring", "External SDKs/credentials/sandbox/live", "New dependencies/models/release work"],
+  "test_obligations": {"runtime":"PATH=/private/tmp/ryo-phase001-runtime/bin:$PATH", "mandatory_gates":"All20 approved gates check-only, no exceptions", "coverage":"New meaningful unit, shared contract, real SQLite/restart/migration/concurrency and E2E evidence; existing green gates alone insufficient", "review":"P0/P1 resolved; P2 resolved or human-approved deferral; mandatory human merge authorization"},
+  "findings": [], "decisions_required": [], "next_recommendation": "IMPLEMENTING"
+}

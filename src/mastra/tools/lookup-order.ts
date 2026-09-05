@@ -1,64 +1,76 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
+import { moneyToLegacyAmount } from "../lib/money";
 import {
-  findOrderByEmail,
-  findOrderById,
-  findRefundsByOrderId,
-  findSubscriptionByEmail,
-} from "../lib/mock-commerce";
+  ensureProviderFixtures,
+  providerRegistry,
+  resolveConfiguredBinding,
+} from "../providers/registry";
 
-/**
- * Read-only commerce lookups. These stand in for calls to a real order
- * management system (Shopify, internal orders API, Stripe). Swap the bodies
- * for real API calls when wiring this template to a live backend - the
- * schemas the resolution workflow depends on stay the same.
- */
+const bindingSchema = z
+  .object({
+    tenantId: z.string(),
+    providerKind: z.literal("local"),
+    providerAccountId: z.string(),
+    externalConversationId: z.string(),
+  })
+  .optional();
+const fallbackBinding = {
+  tenantId: "local-demo",
+  providerKind: "local" as const,
+  providerAccountId: "local-demo",
+  externalConversationId: "tool",
+};
+const orderSchema = z.object({
+  orderId: z.string(),
+  customerEmail: z.email(),
+  product: z.string(),
+  amount: z.number(),
+  currency: z.string(),
+  status: z.enum([
+    "fulfilled",
+    "shipped",
+    "processing",
+    "cancelled",
+    "refunded",
+  ]),
+  chargeCount: z.number(),
+  placedAt: z.string(),
+});
 
 export const lookupOrderTool = createTool({
   id: "lookup_order",
   description:
-    "Look up a customer's most recent order by email address, or a specific order by id.",
+    "Look up a scoped local commerce order by customer email or explicit id.",
   inputSchema: z.object({
     customerEmail: z.email().optional(),
     orderId: z.string().optional(),
+    binding: bindingSchema,
   }),
-  outputSchema: z.object({
-    found: z.boolean(),
-    order: z
-      .object({
-        orderId: z.string(),
-        customerEmail: z.email(),
-        product: z.string(),
-        amount: z.number(),
-        currency: z.string(),
-        status: z.enum([
-          "fulfilled",
-          "shipped",
-          "processing",
-          "cancelled",
-          "refunded",
-        ]),
-        chargeCount: z.number(),
-        placedAt: z.string(),
-      })
-      .optional(),
-  }),
-  execute: async ({ customerEmail, orderId }) => {
-    const order = orderId
-      ? findOrderById(orderId)
-      : customerEmail
-        ? findOrderByEmail(customerEmail)
-        : undefined;
-    return order ? { found: true, order } : { found: false };
+  outputSchema: z.object({ found: z.boolean(), order: orderSchema.optional() }),
+  execute: async ({ customerEmail, orderId, binding }) => {
+    const configured = resolveConfiguredBinding(binding ?? fallbackBinding);
+    await ensureProviderFixtures(configured);
+    const order = await providerRegistry(configured)
+      .commerce(configured)
+      .findOrder(configured, customerEmail ?? "", orderId);
+    return order
+      ? {
+          found: true,
+          order: {
+            ...order,
+            amount: moneyToLegacyAmount(order.amount),
+            currency: order.amount.currency,
+          },
+        }
+      : { found: false };
   },
 });
 
 export const lookupSubscriptionTool = createTool({
   id: "lookup_subscription",
-  description: "Look up a customer's subscription by email address.",
-  inputSchema: z.object({
-    customerEmail: z.email(),
-  }),
+  description: "Look up a scoped local subscription by email.",
+  inputSchema: z.object({ customerEmail: z.email(), binding: bindingSchema }),
   outputSchema: z.object({
     found: z.boolean(),
     subscription: z
@@ -73,19 +85,29 @@ export const lookupSubscriptionTool = createTool({
       })
       .optional(),
   }),
-  execute: async ({ customerEmail }) => {
-    const subscription = findSubscriptionByEmail(customerEmail);
-    return subscription ? { found: true, subscription } : { found: false };
+  execute: async ({ customerEmail, binding }) => {
+    const configured = resolveConfiguredBinding(binding ?? fallbackBinding);
+    await ensureProviderFixtures(configured);
+    const subscription = await providerRegistry(configured)
+      .commerce(configured)
+      .findSubscription(configured, customerEmail);
+    return subscription
+      ? {
+          found: true,
+          subscription: {
+            ...subscription,
+            amount: moneyToLegacyAmount(subscription.amount),
+            currency: subscription.amount.currency,
+          },
+        }
+      : { found: false };
   },
 });
 
 export const lookupCustomerRefundHistoryTool = createTool({
   id: "lookup_customer_refund_history",
-  description:
-    "List prior refunds issued for a given order id, so the agent avoids double-refunding.",
-  inputSchema: z.object({
-    orderId: z.string(),
-  }),
+  description: "List durable local refund effects for an order.",
+  inputSchema: z.object({ orderId: z.string(), binding: bindingSchema }),
   outputSchema: z.object({
     refunds: z.array(
       z.object({
@@ -98,7 +120,18 @@ export const lookupCustomerRefundHistoryTool = createTool({
       }),
     ),
   }),
-  execute: async ({ orderId }) => {
-    return { refunds: findRefundsByOrderId(orderId) };
+  execute: async ({ orderId, binding }) => {
+    const configured = resolveConfiguredBinding(binding ?? fallbackBinding);
+    await ensureProviderFixtures(configured);
+    const refunds = await providerRegistry(configured)
+      .commerce(configured)
+      .refunds(configured, orderId);
+    return {
+      refunds: refunds.map((refund) => ({
+        ...refund,
+        amount: moneyToLegacyAmount(refund.amount),
+        currency: refund.amount.currency,
+      })),
+    };
   },
 });

@@ -27,8 +27,8 @@ You can also connect this workflow to your React, Next.js, or Vue app using the 
    - Copy `.env.example` to `.env` and set `OPENAI_API_KEY`.
 3. **Install the pinned workspace**
    - Run `npm ci`.
-4. **Start the Mastra app**
-   - Run `npm run dev` and open [localhost:4111](http://localhost:4111).
+4. **Seed and start the Mastra app**
+   - Set `TURSO_DATABASE_URL=file:./support-local.db`, run `npm run local:seed`, then run `npm run dev` and open [localhost:4111](http://localhost:4111). Studio startup also performs a bounded recovery sweep for durable dispatches and deliveries, then repeats it in the local process.
 5. **Start the demo UI**
    - In a second terminal, run `npm run --workspace support-refund-agent-web dev`, then open [localhost:5173](http://localhost:5173).
 
@@ -39,9 +39,11 @@ From the customer portal, submit a sample case such as "I was charged twice". Th
 This template is meant to be a starting point for real support operations.
 
 - **Support channel scope**: the default adapter is a deterministic mock inbound email source so the demo works without external accounts. This baseline does not include an external support adapter; setting another `SUPPORT_SOURCE` returns an explicit diagnostic instead of silently using the mock.
-- **Replace the mock commerce backend**: `src/mastra/lib/mock-commerce.ts` contains deterministic order, subscription, and refund fixtures. Replace it with calls to Shopify, Stripe Billing, or your internal orders system.
-- **Case storage**: `src/mastra/lib/case-store.ts` persists cases to the same libSQL database as the rest of the app's Mastra storage - a local `file:./mastra.db` file by default, or Turso in production when `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` are set (see `.env.example`). Swap in a different backend if you need one (e.g. a dedicated Postgres table) by reimplementing `CaseStore`.
-- **Approval limitation**: `resolveSupportCaseWorkflow` preserves the existing demo suspension and resume checkpoint. Native agent tool approval, an immutable financial command, and durable idempotency are later-phase work; direct `tool.execute` does not activate `requireApproval`.
+- **Local providers**: `src/mastra/providers/contracts.ts` defines separate support, commerce, transaction, and knowledge ports. `src/mastra/runtime/local-runtime.ts` supplies persistent SQLite fixtures; `LocalRuntime.seed(binding)` is repeatable and `reset(binding)` deletes only that tenant/account fixture scope.
+- **Safe fixture commands**: `TURSO_DATABASE_URL=file:./support-local.db npm run local:seed` is repeatable. `TURSO_DATABASE_URL=file:./support-local.db npm run local:reset` only clears the selected fixture scope and refuses if it contains durable refund/idempotency effects. Both commands reject non-`file:` database URLs and leave Mastra tables and unrelated tenant/account data untouched.
+- **Recovery lifecycle**: Use `npm run dev` for Studio or `npm run start` for the built server. Both load `src/mastra/index.ts`, which seeds the local default fixture and runs bounded dispatch/outbox recovery. Existing `suspended`, `waiting`, and `paused` Mastra runs remain suspended; only pending work is started and active runs are restarted with their stable persisted run ID.
+- **Case storage**: `src/mastra/lib/case-store.ts` owns versioned app tables for cases, messages, events, dispatch, actions, idempotency, and outbox records. Its migrations do not alter Mastra tables and refuse a downgrade that would discard durable records.
+- **Approval limitation**: the existing demo suspension now persists and checks an immutable local refund command. This is a local decision bridge only; authenticated principals, RBAC, and native approval remain Phase 003 work.
 - **Extend the agent system**: `triageAgent`, `responseAgent`, and `supportSupervisorAgent` live in `src/mastra/agents/`. Add more specialist agents or evals in `src/mastra/index.ts` as your workflow grows.
 - **Customize the knowledge base**: support policy docs live in `src/mastra/knowledge/docs/` and are indexed for `search_support_knowledge`. Replace them with your own refund, shipping, subscription, and escalation policies.
 
