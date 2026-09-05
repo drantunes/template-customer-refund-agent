@@ -882,6 +882,15 @@ export const supportCaseFeedbackRoute = registerApiRoute(
         rating: parsed.data.rating,
         comment: parsed.data.comment,
         submittedAt: new Date().toISOString(),
+        actorId: current.id,
+        turnId:
+          typeof (supportCase.metadata as Record<string, unknown>)
+            .activeTurnId === "string"
+            ? ((supportCase.metadata as Record<string, unknown>)
+                .activeTurnId as string)
+            : undefined,
+        runId: supportCase.workflowRunId,
+        traceId: supportCase.traceId,
       };
       const updated = await caseStore.update(caseId, { feedback });
 
@@ -894,7 +903,9 @@ export const supportCaseFeedbackRoute = registerApiRoute(
               feedbackSource: "user",
               feedbackType: "thumbs",
               value: feedback.rating === "up" ? 1 : -1,
-              comment: feedback.comment,
+              // Free-form feedback is retained only in the case store. Do not
+              // bypass the application redactor by exporting it as a span
+              // payload; the rating and trace association are sufficient.
             },
           });
         } catch (error) {
@@ -934,7 +945,7 @@ export const supportMonitoringSummaryRoute = registerApiRoute(
       const current = requireRole(c, "admin");
       if (current instanceof Response) return current;
       const mastra = c.get("mastra");
-      const summary = await computeMonitoringSummary(mastra);
+      const summary = await computeMonitoringSummary(mastra, current.tenantId);
       return c.json(monitoringSummarySchema.parse(summary));
     },
   },

@@ -52,6 +52,14 @@ export const policyMatchSchema = z.object({
   text: z.string(),
   source: z.string(),
   score: z.number(),
+  version: z.string().optional(),
+  documentHash: z.string().optional(),
+  generationId: z.string().optional(),
+  effectiveAt: z.string().optional(),
+  indexedAt: z.string().optional(),
+  expiresAt: z.string().optional(),
+  providerKind: z.string().optional(),
+  providerAccountId: z.string().optional(),
 });
 export type PolicyMatch = z.infer<typeof policyMatchSchema>;
 
@@ -133,6 +141,10 @@ export const caseFeedbackSchema = z.object({
   rating: z.enum(["up", "down"]),
   comment: z.string().optional(),
   submittedAt: z.string(),
+  actorId: z.string().optional(),
+  turnId: z.string().optional(),
+  runId: z.string().optional(),
+  traceId: z.string().optional(),
 });
 export type CaseFeedback = z.infer<typeof caseFeedbackSchema>;
 

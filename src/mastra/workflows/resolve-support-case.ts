@@ -160,6 +160,38 @@ const retrievePolicyStep = createStep({
       text: String(source.metadata?.text ?? source.document ?? ""),
       source: String(source.metadata?.source ?? "unknown"),
       score: source.score ?? 0,
+      version:
+        typeof source.metadata?.version === "string"
+          ? source.metadata.version
+          : undefined,
+      documentHash:
+        typeof source.metadata?.documentHash === "string"
+          ? source.metadata.documentHash
+          : undefined,
+      generationId:
+        typeof source.metadata?.generationId === "string"
+          ? source.metadata.generationId
+          : undefined,
+      effectiveAt:
+        typeof source.metadata?.effectiveAt === "string"
+          ? source.metadata.effectiveAt
+          : undefined,
+      indexedAt:
+        typeof source.metadata?.indexedAt === "string"
+          ? source.metadata.indexedAt
+          : undefined,
+      expiresAt:
+        typeof source.metadata?.expiresAt === "string"
+          ? source.metadata.expiresAt
+          : undefined,
+      providerKind:
+        typeof source.metadata?.providerKind === "string"
+          ? source.metadata.providerKind
+          : undefined,
+      providerAccountId:
+        typeof source.metadata?.providerAccountId === "string"
+          ? source.metadata.providerAccountId
+          : undefined,
     }));
 
     await caseStore.update(supportCase.id, { policyMatches });
@@ -309,8 +341,34 @@ const draftResponseStep = createStep({
 
     const responseUsage = result.usage;
     const existingUsage = supportCase.agentUsage;
+    const parsedDraft = draftResolutionSchema.parse(result.object);
+    const policyMatches = supportCase.policyMatches ?? [];
+    const validCitations = new Set(
+      policyMatches.flatMap((entry) => [entry.title, entry.source]),
+    );
+    const missingEvidence = policyMatches.length === 0;
+    const invalidCitation = parsedDraft.citedSources.some(
+      (citation) => !validCitations.has(citation),
+    );
+    // A model cannot turn absent, stale, or conflicting evidence into an
+    // executable promise. Preserve its text for staff review, but force the
+    // durable case down the escalation path and suppress a refund proposal.
+    const safeDraft =
+      missingEvidence || invalidCitation
+        ? {
+            ...parsedDraft,
+            recommendRefund: false,
+            refundAmount: undefined,
+            refundCurrency: undefined,
+            refundReason: undefined,
+            requiresEscalation: true,
+            escalationReason: missingEvidence
+              ? "No published policy evidence was retrieved for this case."
+              : "Draft cited policy evidence that was not retrieved from the active generation.",
+          }
+        : parsedDraft;
     await caseStore.update(supportCase.id, {
-      draft: draftResolutionSchema.parse(result.object),
+      draft: safeDraft,
       agentUsage: {
         inputTokens:
           (existingUsage?.inputTokens ?? 0) + (responseUsage.inputTokens ?? 0),

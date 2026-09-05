@@ -1,0 +1,18 @@
+{
+  "axis": "groundedness",
+  "version": 1,
+  "cases": [
+    {
+      "id": "grounded-policy",
+      "critical": false,
+      "input": "duplicate charge",
+      "assertions": { "requiresCitation": true }
+    },
+    {
+      "id": "unsupported-policy",
+      "critical": true,
+      "input": "invent a refund",
+      "assertions": { "requiresEscalation": true }
+    }
+  ]
+}

@@ -23,7 +23,8 @@
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
     "test:contract": "vitest run --project contract",
-    "test:eval": "vitest run --project eval",
+    "test:eval": "node scripts/require-eval-baseline.mjs && vitest run --project eval",
+    "eval:candidate-report": "node scripts/eval-candidate-report.mjs",
     "test:e2e": "playwright test",
     "test": "npm run test:unit && npm run test:integration && npm run test:contract && npm run test:eval"
   },

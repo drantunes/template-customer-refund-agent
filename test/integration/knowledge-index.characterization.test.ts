@@ -11,7 +11,7 @@ afterEach(async () => {
 });
 
 describe("support knowledge index", () => {
-  it("indexes and searches the temporary libSQL vector store with deterministic embeddings", async () => {
+  it("publishes and searches an authoritative generation without model credentials", async () => {
     const databasePath = `/private/tmp/phase001-rag-${crypto.randomUUID()}.db`;
     databaseFiles.push(
       databasePath,
@@ -34,9 +34,9 @@ describe("support knowledge index", () => {
       };
     });
 
-    const [{ mastra }, { KNOWLEDGE_INDEX, vectorStore }] = await Promise.all([
+    const [{ mastra }, { searchSupportKnowledgeTool }] = await Promise.all([
       import("../../src/mastra/index"),
-      import("../../src/mastra/lib/vector-store"),
+      import("../../src/mastra/tools/search-support-knowledge"),
     ]);
     const run = await mastra
       .getWorkflow("indexSupportKnowledgeWorkflow")
@@ -49,13 +49,21 @@ describe("support knowledge index", () => {
     expect(
       indexed.status === "success" && indexed.result.indexed,
     ).toBeGreaterThan(0);
-
-    const results = await vectorStore.query({
-      indexName: KNOWLEDGE_INDEX,
-      queryVector: [1, ...Array(1535).fill(0)],
+    const results = await searchSupportKnowledgeTool.execute({
+      queryText: "duplicate charge refund policy",
       topK: 3,
+      binding: {
+        tenantId: "local-demo",
+        providerKind: "local",
+        providerAccountId: "local-demo",
+        externalConversationId: "test",
+      },
     });
-    expect(results).not.toHaveLength(0);
-    expect(results[0]?.metadata).toMatchObject({ source: expect.any(String) });
+    expect(results.sources).not.toHaveLength(0);
+    expect(results.sources[0]?.metadata).toMatchObject({
+      source: expect.any(String),
+      generationId: expect.any(String),
+      documentHash: expect.any(String),
+    });
   });
 });

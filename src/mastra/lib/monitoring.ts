@@ -1,6 +1,7 @@
 import type { Mastra } from "@mastra/core/mastra";
 import { caseStore } from "./case-store";
 import type { SupportCase } from "../domain/support-case";
+import { bindingsForCase } from "../providers/contracts";
 
 function minutesBetween(startIso: string, endIso: string): number {
   return (new Date(endIso).getTime() - new Date(startIso).getTime()) / 60_000;
@@ -144,7 +145,9 @@ export function computeFeedbackMetrics(cases: SupportCase[]): FeedbackMetrics {
         caseId: c.id,
         subject: c.subject,
         rating: c.feedback.rating,
-        comment: c.feedback.comment,
+        // The dashboard never re-exports free-form feedback. The durable case
+        // keeps it under its retention policy; monitoring only needs its
+        // rating and correlation references.
         submittedAt: c.feedback.submittedAt,
       })),
   };
@@ -152,8 +155,11 @@ export function computeFeedbackMetrics(cases: SupportCase[]): FeedbackMetrics {
 
 export async function computeMonitoringSummary(
   _mastra: Mastra,
+  tenantId: string,
 ): Promise<MonitoringSummary> {
-  const cases = await caseStore.list();
+  const cases = (await caseStore.list()).filter(
+    (supportCase) => bindingsForCase(supportCase).support.tenantId === tenantId,
+  );
   return {
     generatedAt: new Date().toISOString(),
     casesConsidered: cases.length,
