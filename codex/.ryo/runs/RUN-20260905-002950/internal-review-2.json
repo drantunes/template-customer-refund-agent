@@ -1,9 +1,0 @@
-{
-  "stage":"INTERNAL_REVIEW","status":"success","model":"gpt-6-astra","effort":"medium",
-  "summary":"Fresh independent review validates both fixes at d7a56dd; no new actionable regression or security finding.",
-  "scope_checked":["PHASE-001","REV-001","REV-002","REV-003","REV-004","REV-015","f5b1cb2..d7a56dd and surrounding routes/contracts/runtime/tests"],
-  "evidence":["Installed Mastra start/resume and server/workflow context declarations", "Actual Hono inbound and approval correlation reaches agents/tools", "Absent/whitespace/valid/malformed body coverage with no resume on malformed input", "Registered-route/OpenAPI contract comparison", "gates-20260905-013336.json: all20 required gates passed"],
-  "resolution_validation":[{"id":"IR-001","status":"resolved"},{"id":"IR-002","status":"resolved"}],
-  "security_delta":"Existing runtime context is forwarded without adding trust sources or financial capabilities; optional-body compatibility is restored and malformed JSON remains rejected.",
-  "findings":[],"decisions_required":[],"next_recommendation":"PR_READY"
-}
