@@ -1,0 +1,22 @@
+{
+  "approval": {
+    "approved_at": "2026-09-05T00:21:22+00:00",
+    "approved_by": "Diego Antunes"
+  },
+  "files": {
+    "codex/.ryo/codebase-inventory.md": "55eeaeaee6f9b7d4bbb773f5d93836ca875c428802dea8b944d1c0d157c94801",
+    "codex/.ryo/open-questions.md": "81bda099ec7e1e5c7d181f5288b23804881fc0942a82c8b01c097a5fbbf590fd",
+    "codex/.ryo/project.json": "b2a822b73120cfc6f96bd46c8f5aaae752aa617c54f7bef788fe04e25e0255e4",
+    "codex/.ryo/spec-sources.json": "182ab92d6919ec03d0a855f28da61bda1690ba011e7f6477e2caf43f0bdf125c",
+    "codex/.ryo/traceability.md": "a1a0145b5829009efd3ba3b8cb2ee32ccb0d3d91a23c03715a2a6b7902842814",
+    "codex/decision-matrix.md": "d8551accdca85ca4f4256dbcc209a6555b111652358b5d832cba28893e5a2827",
+    "codex/decisions.md": "b6c1d48e18381a47ae63acaaacf11d3c3e7f3e8859b4cf5d92e2ec0e0d92953a",
+    "codex/development-plan.md": "d29ed1ef084d4b8434b2e5ea20f3da01096554926530196e60ecec07f3418115",
+    "codex/project-instructions.md": "60d9ef9211a5de52ba0037cb560bdb5acb16b0c1d7b7d3b3da2b427cc11d8c6f",
+    "codex/proposal.md": "c2f4378816e738521429655524bc9eb55de4ade09aeb63f2fcd1c5199416b7fc",
+    "codex/tech-spec.md": "bbc5645a6d7de395e34bfa17aa8ac15035107f5dc895da5af8491c7c9ef38b35"
+  },
+  "human_approved": true,
+  "schema_version": 1,
+  "status": "DISCOVERY_APPROVED"
+}

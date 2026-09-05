@@ -1,0 +1,15 @@
+{
+  "checked_at": "2026-09-04T23:53:30+00:00",
+  "findings": [
+    {
+      "code": "TEMPORARY_BOOTSTRAP_GATE_EXCEPTION",
+      "path": "codex/.ryo/gates.json",
+      "severity": "P3",
+      "summary": "DEC-018 temporarily excepts backend and frontend format, style, unit-test and integration-test capabilities so PHASE-001 can implement the missing npm scripts.",
+      "required_action": "Remove every exception, regenerate complete npm gates and execute them before PR_READY."
+    }
+  ],
+  "human_approved": false,
+  "schema_version": 1,
+  "status": "READY"
+}
