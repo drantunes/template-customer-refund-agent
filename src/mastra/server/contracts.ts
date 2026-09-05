@@ -8,6 +8,7 @@ export const mockEmailPayloadSchema = z
     fromName: z.string().min(1).optional(),
     subject: z.string().optional(),
     body: z.string().min(1),
+    conversationId: z.string().min(1).max(200).optional(),
     receivedAt: z.iso.datetime().optional(),
   })
   .strict();
@@ -22,8 +23,26 @@ export const caseListResponseSchema = z.object({
   cases: z.array(supportCaseSchema),
 });
 export const approvalRequestSchema = z.object({
-  approverId: z.string().min(1).optional(),
+  commandFingerprint: z.string().min(1),
   note: z.string().max(2_000).optional(),
+});
+export const followUpRequestSchema = z.object({
+  body: z.string().min(1).max(10_000),
+});
+
+export const loginRequestSchema = z.object({
+  email: z.email(),
+  password: z.string().min(1).max(256),
+});
+export const loginResponseSchema = z.object({
+  token: z.string(),
+  expiresAt: z.string(),
+  principal: z.object({
+    id: z.string(),
+    email: z.email(),
+    tenantId: z.string(),
+    roles: z.array(z.enum(["customer", "support-agent", "approver", "admin"])),
+  }),
 });
 export const feedbackRequestSchema = caseFeedbackSchema.pick({
   rating: true,
@@ -88,6 +107,30 @@ export const supportOpenApiDocument = {
   openapi: "3.1.0",
   info: { title: "Support demo API", version: "0.1.0" },
   paths: {
+    "/support/auth/login": {
+      post: {
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": { schema: jsonSchema(loginRequestSchema) },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Authenticated local session",
+            content: {
+              "application/json": { schema: jsonSchema(loginResponseSchema) },
+            },
+          },
+          "401": {
+            description: "Invalid credentials",
+            content: {
+              "application/json": { schema: jsonSchema(errorResponseSchema) },
+            },
+          },
+        },
+      },
+    },
     "/support/inbound": {
       post: {
         requestBody: {
@@ -197,6 +240,25 @@ export const supportOpenApiDocument = {
         responses: {
           "200": {
             description: "Updated support case",
+            content: {
+              "application/json": { schema: jsonSchema(supportCaseSchema) },
+            },
+          },
+        },
+      },
+    },
+    "/support/cases/{caseId}/follow-ups": {
+      post: {
+        parameters: [caseIdParameter],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": { schema: jsonSchema(followUpRequestSchema) },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Appended authorized customer follow-up",
             content: {
               "application/json": { schema: jsonSchema(supportCaseSchema) },
             },

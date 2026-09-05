@@ -1,0 +1,147 @@
+import { createHmac } from "node:crypto";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  authenticateSeededCredentials,
+  canAccessCase,
+  issueLocalSession,
+  verifyLocalSession,
+} from "../../src/mastra/server/auth";
+import { CaseStore } from "../../src/mastra/lib/case-store";
+import { rm } from "node:fs/promises";
+
+const previous = process.env.LOCAL_AUTH_SIGNING_KEY;
+const key = "phase003-test-signing-key-must-be-at-least-32-chars";
+
+afterEach(() => {
+  if (previous === undefined) delete process.env.LOCAL_AUTH_SIGNING_KEY;
+  else process.env.LOCAL_AUTH_SIGNING_KEY = previous;
+});
+
+describe("local support auth", () => {
+  it("issues an opaque session and reloads roles from the seeded identity", () => {
+    process.env.LOCAL_AUTH_SIGNING_KEY = key;
+    const token = authenticateSeededCredentials(
+      "approver@local.test",
+      "local-approver",
+    );
+    expect(token).toBeTruthy();
+    expect(
+      Buffer.from(token!.split(".")[0], "base64url").toString(),
+    ).not.toContain("password");
+    expect(verifyLocalSession(token!)).toMatchObject({
+      id: "approver-demo",
+      roles: ["approver"],
+    });
+  });
+
+  it("rejects a correctly signed token that attempts to grant its own role", () => {
+    process.env.LOCAL_AUTH_SIGNING_KEY = key;
+    const payload = Buffer.from(
+      JSON.stringify({
+        id: "customer-alex",
+        roles: ["admin"],
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ).toString("base64url");
+    const token = `${payload}.${createHmac("sha256", key).update(payload).digest("base64url")}`;
+    expect(verifyLocalSession(token)).toMatchObject({
+      id: "customer-alex",
+      roles: ["customer"],
+    });
+  });
+
+  it("scopes customers by immutable owner id instead of client email", () => {
+    process.env.LOCAL_AUTH_SIGNING_KEY = key;
+    const alex = verifyLocalSession(
+      issueLocalSession({ id: "customer-alex" }),
+    )!;
+    expect(
+      canAccessCase(alex, {
+        customer: { email: "alex@example.com" },
+        metadata: {
+          providerBinding: { tenantId: "local-demo" },
+          ownerId: "customer-alex",
+        },
+      }),
+    ).toBe(true);
+    expect(
+      canAccessCase(alex, {
+        customer: { email: "alex@example.com" },
+        metadata: {
+          providerBinding: { tenantId: "local-demo" },
+          ownerId: "customer-jordan",
+        },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("durable follow-up turns", () => {
+  it("appends one event/turn and invalidates a waiting approval", async () => {
+    const path = `/private/tmp/phase003-turn-${crypto.randomUUID()}.db`;
+    const store = new CaseStore({ url: `file:${path}` });
+    const createdAt = "2026-09-05T00:00:00.000Z";
+    try {
+      await store.create({
+        id: "case-turn",
+        externalId: "event-1",
+        source: "mock-email",
+        customer: { email: "alex@example.com" },
+        subject: "Refund",
+        messages: [
+          { id: "message-1", author: "customer", body: "Refund", createdAt },
+        ],
+        status: "waiting_approval",
+        createdAt,
+        updatedAt: createdAt,
+        approval: { approved: true, approverId: "approver-demo" },
+        metadata: {
+          providerBinding: {
+            tenantId: "local-demo",
+            providerKind: "local",
+            providerAccountId: "local-demo",
+            externalConversationId: "conversation-1",
+          },
+        },
+      });
+      const first = await store.appendFollowUp({
+        caseId: "case-turn",
+        eventId: "event-2",
+        runId: "run-2",
+        message: {
+          id: "message-2",
+          author: "customer",
+          body: "Actually, please review again.",
+          createdAt,
+        },
+      });
+      const duplicate = await store.appendFollowUp({
+        caseId: "case-turn",
+        eventId: "event-2",
+        runId: "run-3",
+        message: {
+          id: "message-3",
+          author: "customer",
+          body: "duplicate",
+          createdAt,
+        },
+      });
+      expect(first.appended).toBe(true);
+      expect(duplicate.appended).toBe(false);
+      expect((await store.get("case-turn"))!).toMatchObject({
+        status: "new",
+      });
+      // Dispatch ownership is assigned after the route claims this pending
+      // turn. Appending alone must not overwrite an in-flight run pointer.
+      expect((await store.get("case-turn"))!.workflowRunId).toBeUndefined();
+      expect((await store.get("case-turn"))!.approval).toBeUndefined();
+    } finally {
+      await store.close();
+      await Promise.all([
+        rm(path, { force: true }),
+        rm(`${path}-shm`, { force: true }),
+        rm(`${path}-wal`, { force: true }),
+      ]);
+    }
+  });
+});

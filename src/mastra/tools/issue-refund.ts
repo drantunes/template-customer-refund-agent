@@ -1,6 +1,7 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { caseStore } from "../lib/case-store";
+import { activeDispatchLeaseScope } from "../lib/dispatch-lease-scope";
 import {
   legacyAmountToMoney,
   moneyToLegacyAmount,
@@ -12,6 +13,8 @@ import {
   providerRegistry,
   resolveConfiguredBinding,
 } from "../providers/registry";
+import { withNativeRefundExecutionAuthorization } from "../providers/native-execution";
+import { activePrincipalHasRole } from "../server/auth";
 
 export const MAX_AUTO_APPROVABLE_REFUND = 1000;
 const commandSchema = z.object({
@@ -23,23 +26,24 @@ const commandSchema = z.object({
   idempotencyKey: z.string(),
   fingerprint: z.string(),
 });
+export const refundExecutionInputSchema = z.object({
+  caseId: z.string(),
+  orderId: z.string(),
+  amount: z.number().positive(),
+  currency: z.string().default("USD"),
+  reason: z.string(),
+  idempotencyKey: z.string(),
+  fingerprint: z.string(),
+});
 
 /**
- * A Phase-002 local decision bridge: callers must reference the immutable
- * command persisted at suspension. Native approval/RBAC belongs to Phase 003.
+ * The Phase-003 financial boundary: the native approved tool context, durable
+ * decision, immutable command, and current approver role must all agree.
  */
 export const issueRefundTool = createTool({
   id: "issue_refund",
   description: "Execute the already-approved persisted local refund command.",
-  inputSchema: z.object({
-    caseId: z.string(),
-    orderId: z.string(),
-    amount: z.number().positive(),
-    currency: z.string().default("USD"),
-    reason: z.string(),
-    idempotencyKey: z.string(),
-    fingerprint: z.string(),
-  }),
+  inputSchema: refundExecutionInputSchema,
   outputSchema: z.object({
     refundId: z.string(),
     orderId: z.string(),
@@ -50,11 +54,55 @@ export const issueRefundTool = createTool({
     executedAt: z.string(),
   }),
   requireApproval: true,
-  execute: async (input) => {
+  execute: async (input, context) => {
     const supportCase = await caseStore.get(input.caseId);
     if (!supportCase?.approval?.approved)
       throw new Error(
         "A persisted approved local decision is required before issuing a refund.",
+      );
+    const lease = activeDispatchLeaseScope();
+    if (
+      !lease ||
+      lease.caseId !== input.caseId ||
+      !(await caseStore.hasDispatchLease(lease))
+    )
+      throw new Error(
+        "Refund execution requires the current durable workflow dispatch lease.",
+      );
+    const decision = await caseStore.approvalDecision(
+      input.caseId,
+      (
+        (supportCase.metadata as Record<string, unknown>).nativeApproval as
+          | {
+              turnId?: string;
+            }
+          | undefined
+      )?.turnId,
+    );
+    const native = (supportCase.metadata as Record<string, unknown>)
+      .nativeApproval as
+      | {
+          runId?: string;
+          toolCallId?: string;
+          fingerprint?: string;
+          turnId?: string;
+        }
+      | undefined;
+    const decisionBinding = bindingsForPersistedCase(supportCase).transactions;
+    if (
+      !decision?.approved ||
+      decision.commandFingerprint !== input.fingerprint ||
+      decision.nativeRunId !== native?.runId ||
+      decision.nativeToolCallId !== native?.toolCallId ||
+      native?.fingerprint !== input.fingerprint ||
+      !activePrincipalHasRole(
+        decision.principalId,
+        decisionBinding.tenantId,
+        "approver",
+      )
+    )
+      throw new Error(
+        "Refund execution requires a current authorized decision bound to the native tool call.",
       );
     const stored = commandSchema.safeParse(
       (supportCase.metadata as Record<string, unknown>).refundCommand,
@@ -88,18 +136,25 @@ export const issueRefundTool = createTool({
       throw new Error("The persisted refund command fingerprint is invalid.");
     const binding = resolveConfiguredBinding(bindings.transactions);
     await ensureProviderFixtures(binding);
-    const effect = await providerRegistry(binding)
-      .transactions(binding)
-      .issueRefund({
-        binding,
-        approvalCaseId: input.caseId,
-        orderId: command.orderId,
-        amount,
-        reason: command.reason,
-        idempotencyKey: command.idempotencyKey,
-        fingerprint: command.fingerprint,
-      });
-    return {
+    const effect = await withNativeRefundExecutionAuthorization(
+      context,
+      native,
+      command.fingerprint,
+      (authorization) =>
+        providerRegistry(binding).transactions(binding).issueRefund(
+          {
+            binding,
+            approvalCaseId: input.caseId,
+            orderId: command.orderId,
+            amount,
+            reason: command.reason,
+            idempotencyKey: command.idempotencyKey,
+            fingerprint: command.fingerprint,
+          },
+          authorization,
+        ),
+    );
+    const result = {
       refundId: effect.refundId,
       orderId: effect.orderId,
       amount: moneyToLegacyAmount(effect.amount),
@@ -108,5 +163,17 @@ export const issueRefundTool = createTool({
       idempotencyKey: effect.idempotencyKey,
       executedAt: effect.executedAt,
     };
+    await caseStore.update(input.caseId, {
+      refundResult: result,
+      metadata: {
+        ...supportCase.metadata,
+        refundEffects: {
+          ...((supportCase.metadata as Record<string, unknown>)
+            .refundEffects as Record<string, unknown> | undefined),
+          [input.fingerprint]: result,
+        },
+      },
+    });
+    return result;
   },
 });

@@ -8,6 +8,7 @@ import {
 const writeChains = new WeakMap<object, Promise<void>>();
 const serializedClients = new WeakMap<Client, Client>();
 let sharedLocalClient: Client | undefined;
+let mastraSharedLocalClient: Client | undefined;
 
 function isLockError(error: unknown) {
   const value = error as { code?: string; message?: string };
@@ -178,4 +179,29 @@ export function getSharedLocalSqliteClient() {
     }),
   );
   return sharedLocalClient;
+}
+
+/**
+ * Mastra closes its storage before it flushes observability. Its storage
+ * exporter uses the same app-owned SQLite client, so defer only that close
+ * until the composition root has completed its shutdown sequence.
+ */
+export function getMastraSharedLocalSqliteClient() {
+  if (mastraSharedLocalClient) return mastraSharedLocalClient;
+  const client = getSharedLocalSqliteClient();
+  mastraSharedLocalClient = new Proxy(client, {
+    get(target, property, receiver) {
+      if (property === "close") return async () => undefined;
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  return mastraSharedLocalClient;
+}
+
+/** Close the client only after Mastra observability has finished flushing. */
+export async function closeSharedLocalSqliteClient() {
+  const client = sharedLocalClient;
+  sharedLocalClient = undefined;
+  mastraSharedLocalClient = undefined;
+  if (client && !client.closed) await client.close();
 }

@@ -47,7 +47,11 @@ export function CaseDetail({
 }: {
   supportCase: SupportCase;
   approverId: string;
-  onDecision: (approved: boolean, note?: string) => Promise<void>;
+  onDecision: (
+    approved: boolean,
+    commandFingerprint: string,
+    note?: string,
+  ) => Promise<void>;
 }) {
   const c = supportCase;
 

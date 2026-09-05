@@ -1,6 +1,8 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { moneyToLegacyAmount } from "../lib/money";
+import { caseStore } from "../lib/case-store";
+import { requireTrustedCommerceScope } from "../lib/trusted-run-scope";
 import {
   ensureProviderFixtures,
   providerRegistry,
@@ -38,6 +40,43 @@ const orderSchema = z.object({
   placedAt: z.string(),
 });
 
+async function verifiedCommerceBinding(
+  binding: z.infer<typeof bindingSchema>,
+  customerEmail?: string,
+) {
+  const scope = requireTrustedCommerceScope();
+  const supportCase = await caseStore.get(scope.caseId);
+  if (!supportCase)
+    throw new Error(
+      "Trusted commerce scope references a missing support case.",
+    );
+  const metadata = supportCase.metadata as Record<string, unknown>;
+  const persistedBindings = metadata.providerBindings as
+    { commerce?: typeof fallbackBinding } | undefined;
+  const persisted = resolveConfiguredBinding(
+    persistedBindings?.commerce ?? fallbackBinding,
+  );
+  if (
+    binding &&
+    (binding.tenantId !== persisted.tenantId ||
+      binding.providerKind !== persisted.providerKind ||
+      binding.providerAccountId !== persisted.providerAccountId ||
+      binding.externalConversationId !== persisted.externalConversationId)
+  )
+    throw new Error("Commerce lookup binding does not match the durable case.");
+  const configured = persisted;
+  if (
+    metadata.ownerId !== scope.ownerId ||
+    configured.tenantId !== scope.tenantId ||
+    (customerEmail &&
+      customerEmail.toLowerCase() !== supportCase.customer.email.toLowerCase())
+  )
+    throw new Error(
+      "Commerce lookup scope does not match the verified case owner.",
+    );
+  return { configured, customerEmail: supportCase.customer.email };
+}
+
 export const lookupOrderTool = createTool({
   id: "lookup_order",
   description:
@@ -49,11 +88,12 @@ export const lookupOrderTool = createTool({
   }),
   outputSchema: z.object({ found: z.boolean(), order: orderSchema.optional() }),
   execute: async ({ customerEmail, orderId, binding }) => {
-    const configured = resolveConfiguredBinding(binding ?? fallbackBinding);
+    const scoped = await verifiedCommerceBinding(binding, customerEmail);
+    const configured = scoped.configured;
     await ensureProviderFixtures(configured);
     const order = await providerRegistry(configured)
       .commerce(configured)
-      .findOrder(configured, customerEmail ?? "", orderId);
+      .findOrder(configured, scoped.customerEmail, orderId);
     return order
       ? {
           found: true,
@@ -86,11 +126,12 @@ export const lookupSubscriptionTool = createTool({
       .optional(),
   }),
   execute: async ({ customerEmail, binding }) => {
-    const configured = resolveConfiguredBinding(binding ?? fallbackBinding);
+    const scoped = await verifiedCommerceBinding(binding, customerEmail);
+    const configured = scoped.configured;
     await ensureProviderFixtures(configured);
     const subscription = await providerRegistry(configured)
       .commerce(configured)
-      .findSubscription(configured, customerEmail);
+      .findSubscription(configured, scoped.customerEmail);
     return subscription
       ? {
           found: true,
@@ -121,8 +162,16 @@ export const lookupCustomerRefundHistoryTool = createTool({
     ),
   }),
   execute: async ({ orderId, binding }) => {
-    const configured = resolveConfiguredBinding(binding ?? fallbackBinding);
+    const scoped = await verifiedCommerceBinding(binding);
+    const configured = scoped.configured;
     await ensureProviderFixtures(configured);
+    const order = await providerRegistry(configured)
+      .commerce(configured)
+      .findOrder(configured, scoped.customerEmail, orderId);
+    if (!order)
+      throw new Error(
+        "Refund history order is outside the verified case owner scope.",
+      );
     const refunds = await providerRegistry(configured)
       .commerce(configured)
       .refunds(configured, orderId);

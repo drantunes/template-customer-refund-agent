@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { submitCaseFeedback } from "@/lib/api";
+import type { SupportSession } from "@/lib/api";
 import type { SupportCase } from "@/lib/types";
 import { Send, ThumbsDown, ThumbsUp } from "lucide-react";
 import { Spinner } from "@/components/ui/spinner";
@@ -15,13 +16,22 @@ import { Spinner } from "@/components/ui/spinner";
 export function CaseFeedback({
   supportCase,
   onSubmitted,
+  session,
 }: {
   supportCase: SupportCase;
   onSubmitted: (updated: SupportCase) => void;
+  session: SupportSession;
 }) {
+  const mounted = useRef(true);
   const [choosing, setChoosing] = useState<"up" | "down" | null>(null);
   const [comment, setComment] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   if (supportCase.feedback) {
     const RatingIcon =
@@ -41,15 +51,18 @@ export function CaseFeedback({
         supportCase.id,
         rating,
         comment || undefined,
+        session,
       );
+      if (!mounted.current) return;
       onSubmitted(updated);
       toast.success("Thanks for the feedback!");
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Failed to submit feedback",
-      );
+      if (mounted.current)
+        toast.error(
+          error instanceof Error ? error.message : "Failed to submit feedback",
+        );
     } finally {
-      setSubmitting(false);
+      if (mounted.current) setSubmitting(false);
     }
   }
 

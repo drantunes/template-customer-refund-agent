@@ -1,7 +1,19 @@
 import type { Client } from "@libsql/client";
+import type { LanguageModelV2 } from "@ai-sdk/provider";
+import type { Mastra } from "@mastra/core/mastra";
 import { createHash } from "node:crypto";
 import { caseStore, type CaseStore } from "../lib/case-store";
-import { refundFingerprint } from "../lib/money";
+import {
+  renewDispatchLeaseWhileRunning,
+  withDispatchLeaseScope,
+} from "../lib/dispatch-lease-scope";
+import type { DispatchRecord } from "../lib/case-store";
+import type { SupportCase } from "../domain/support-case";
+import {
+  legacyAmountToMoney,
+  moneyToLegacyAmount,
+  refundFingerprint,
+} from "../lib/money";
 import { POLICY_DOCUMENTS } from "../knowledge/policy-docs";
 import type {
   CommerceOrder,
@@ -20,6 +32,21 @@ import type {
   TransactionalActionProvider,
 } from "../providers/contracts";
 import { bindingsForCase } from "../providers/contracts";
+import {
+  hasNativeRefundExecutionAuthorization,
+  resumeApprovedNativeTool,
+  type NativeRefundExecutionAuthorization,
+} from "../providers/native-execution";
+import { activePrincipalHasRole, ownerIdForCustomer } from "../server/auth";
+
+// Keep this runtime boundary independent of the workflow module: the workflow
+// itself uses LocalRuntime through providers and importing it here would create
+// an ESM initialization cycle. This is the registered workflow step id.
+const REQUEST_APPROVAL_STEP_ID = "request-approval";
+// Local policy is deliberately evaluated both before a native command is
+// offered and in the same transaction as the provider effect.
+const maxAutoApprovableRefundMinor = (currency: string) =>
+  legacyAmountToMoney(1000, currency).minor;
 
 const LOCAL = "local" as const;
 export const defaultLocalBinding = (
@@ -31,6 +58,30 @@ export const defaultLocalBinding = (
   externalConversationId,
 });
 const text = (value: unknown) => String(value ?? "");
+
+/** Compare the persisted authorization command structurally. JSON text is not
+ * an authority format: equivalent objects may have a different key order. */
+function matchesPersistedRefundCommand(
+  value: unknown,
+  command: RefundCommand,
+): boolean {
+  if (!value || typeof value !== "object") return false;
+  const stored = value as Partial<RefundCommand>;
+  const binding = stored.binding;
+  return (
+    stored.approvalCaseId === command.approvalCaseId &&
+    stored.orderId === command.orderId &&
+    stored.reason === command.reason &&
+    stored.idempotencyKey === command.idempotencyKey &&
+    stored.fingerprint === command.fingerprint &&
+    stored.amount?.currency === command.amount.currency &&
+    stored.amount?.minor === command.amount.minor &&
+    binding?.tenantId === command.binding.tenantId &&
+    binding?.providerKind === command.binding.providerKind &&
+    binding?.providerAccountId === command.binding.providerAccountId &&
+    binding?.externalConversationId === command.binding.externalConversationId
+  );
+}
 
 export function bindingsForPersistedCase(case_: {
   externalId: string;
@@ -252,11 +303,19 @@ export class LocalRuntime
   }
   async findOrder(binding: ProviderBinding, email: string, orderId?: string) {
     await this.ensured();
-    const where = orderId ? "order_id = ?" : "lower(customer_email) = lower(?)";
-    const value = orderId ?? email;
+    const where = orderId
+      ? email
+        ? "order_id = ? AND lower(customer_email) = lower(?)"
+        : "order_id = ?"
+      : "lower(customer_email) = lower(?)";
+    const args = orderId
+      ? email
+        ? [binding.tenantId, binding.providerAccountId, orderId, email]
+        : [binding.tenantId, binding.providerAccountId, orderId]
+      : [binding.tenantId, binding.providerAccountId, email];
     const result = await this.client.execute({
       sql: `SELECT * FROM local_orders WHERE tenant_id = ? AND provider_account_id = ? AND ${where} ORDER BY placed_at DESC`,
-      args: [binding.tenantId, binding.providerAccountId, value],
+      args,
     });
     if (result.rows.length > 1 && !orderId)
       throw new Error(
@@ -306,7 +365,10 @@ export class LocalRuntime
       } satisfies CommerceRefund;
     });
   }
-  async issueRefund(command: RefundCommand): Promise<RefundEffect> {
+  async issueRefund(
+    command: RefundCommand,
+    authorization?: NativeRefundExecutionAuthorization,
+  ): Promise<RefundEffect> {
     await this.ensured();
     if (
       !Number.isSafeInteger(command.amount.minor) ||
@@ -324,33 +386,102 @@ export class LocalRuntime
     const fingerprint = refundFingerprint(command);
     if (fingerprint !== command.fingerprint)
       throw new Error("Refund command fingerprint was tampered with.");
-    const approval = await this.client.execute({
-      sql: "SELECT data FROM support_cases WHERE id = ?",
-      args: [command.approvalCaseId],
-    });
-    const approvedCase = approval.rows[0]
-      ? (JSON.parse(String(approval.rows[0].data)) as {
-          approval?: { approved?: boolean };
-          metadata?: { refundCommand?: { fingerprint?: string } };
-        })
-      : undefined;
-    const action = await this.client.execute({
-      sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = ? AND fingerprint = ?",
-      args: [command.approvalCaseId, "refund-command", fingerprint],
-    });
-    const approvedAction = action.rows[0]
-      ? JSON.parse(String(action.rows[0].data))
-      : undefined;
-    if (
-      !approvedCase?.approval?.approved ||
-      !approvedAction ||
-      JSON.stringify(approvedAction) !== JSON.stringify(command)
-    )
-      throw new Error(
-        "Refund execution requires the matching persisted approved command.",
-      );
     const tx = await this.client.transaction("write");
     try {
+      const approval = await tx.execute({
+        sql: "SELECT data FROM support_cases WHERE id = ?",
+        args: [command.approvalCaseId],
+      });
+      const approvedCase = approval.rows[0]
+        ? (JSON.parse(String(approval.rows[0].data)) as {
+            approval?: { approved?: boolean };
+            customer?: { email?: string };
+            draft?: { requiresEscalation?: boolean };
+            metadata?: {
+              ownerId?: string;
+              refundCommand?: { fingerprint?: string };
+              nativeApproval?: {
+                runId?: string;
+                toolCallId?: string;
+                fingerprint?: string;
+                turnId?: string;
+              };
+            };
+          })
+        : undefined;
+      const action = await tx.execute({
+        sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = ? AND fingerprint = ?",
+        args: [command.approvalCaseId, "refund-command", fingerprint],
+      });
+      const approvedAction = action.rows[0]
+        ? JSON.parse(String(action.rows[0].data))
+        : undefined;
+      const native = approvedCase?.metadata?.nativeApproval;
+      if (
+        !native?.runId ||
+        !native.toolCallId ||
+        !hasNativeRefundExecutionAuthorization(authorization, {
+          nativeRunId: native.runId,
+          nativeToolCallId: native.toolCallId,
+          commandFingerprint: command.fingerprint,
+          caseId: command.approvalCaseId,
+        })
+      )
+        throw new Error(
+          "Refund execution requires the approved native refund tool context.",
+        );
+      const decision = native?.turnId
+        ? await tx.execute({
+            sql: "SELECT command_fingerprint, native_run_id, native_tool_call_id, principal_id, approved FROM support_decisions WHERE case_id = ? AND turn_id = ? AND command_fingerprint = ?",
+            args: [command.approvalCaseId, native.turnId, command.fingerprint],
+          })
+        : undefined;
+      const decisionRow = decision?.rows[0] as
+        Record<string, unknown> | undefined;
+      if (
+        !approvedCase?.approval?.approved ||
+        !matchesPersistedRefundCommand(approvedAction, command) ||
+        !native?.runId ||
+        !native.toolCallId ||
+        native.fingerprint !== command.fingerprint ||
+        !decisionRow ||
+        Number(decisionRow.approved) !== 1 ||
+        String(decisionRow.command_fingerprint) !== command.fingerprint ||
+        String(decisionRow.native_run_id) !== native.runId ||
+        String(decisionRow.native_tool_call_id) !== native.toolCallId ||
+        !activePrincipalHasRole(
+          String(decisionRow.principal_id),
+          command.binding.tenantId,
+          "approver",
+        )
+      )
+        throw new Error(
+          "Refund execution requires a current authorized native decision bound to the immutable command.",
+        );
+      if (
+        authorization!.turnId !== native.turnId ||
+        authorization!.caseId !== command.approvalCaseId ||
+        approvedCase?.draft?.requiresEscalation ||
+        command.amount.minor >
+          maxAutoApprovableRefundMinor(command.amount.currency)
+      )
+        throw new Error(
+          "Refund execution is not permitted by the current deterministic policy.",
+        );
+      const durableLease = await tx.execute({
+        sql: "SELECT id FROM support_dispatch WHERE id = ? AND case_id = ? AND turn_id = ? AND lease_token = ? AND state IN ('claimed', 'started') AND lease_until > ?",
+        args: [
+          authorization!.dispatchId,
+          command.approvalCaseId,
+          authorization!.turnId,
+          authorization!.leaseToken,
+          new Date().toISOString(),
+        ],
+      });
+      if (!durableLease.rows[0])
+        throw new Error(
+          "Refund execution requires the current durable workflow dispatch lease.",
+        );
       const replay = await tx.execute({
         sql: "SELECT fingerprint, effect FROM support_idempotency WHERE idempotency_key = ?",
         args: [command.idempotencyKey],
@@ -376,6 +507,19 @@ export class LocalRuntime
       if (!order)
         throw new Error(
           `Cannot issue refund: order ${command.orderId} not found.`,
+        );
+      const email = approvedCase?.customer?.email;
+      const verifiedOwner =
+        typeof email === "string" && email.length > 0
+          ? ownerIdForCustomer(command.binding.tenantId, email)
+          : undefined;
+      if (
+        !verifiedOwner ||
+        approvedCase?.metadata?.ownerId !== verifiedOwner ||
+        text(order.customer_email).toLowerCase() !== email!.toLowerCase()
+      )
+        throw new Error(
+          "Refund execution requires the current verified order owner.",
         );
       if (text(order.currency) !== command.amount.currency)
         throw new Error("Refund currency does not match the original charge.");
@@ -537,12 +681,13 @@ class LocalSupportProvider implements SupportChannelProvider {
       subject?: string;
       body?: string;
       receivedAt?: string;
+      conversationId?: string;
     };
     if (!value?.externalId || !value.from || !value.body)
       throw new Error("Invalid local inbound payload.");
     const createdAt = value.receivedAt ?? new Date().toISOString();
     return {
-      binding: defaultLocalBinding(value.externalId),
+      binding: defaultLocalBinding(value.conversationId ?? value.externalId),
       externalId: value.externalId,
       source: "mock-email" as const,
       customer: { email: value.from, name: value.fromName },
@@ -792,7 +937,7 @@ export async function recoverLocalWorkflows(
       // revealed that another worker owns this dispatch.
       await renew();
       if (lostOwnership) break;
-      await store.update(dispatch.caseId, { workflowRunId: run.runId });
+      if (!(await store.activateDispatch(dispatch))) break;
       // `restart()` only resumes an installed active run.  A process can die
       // after acceptance but before first start, which has no run record yet.
       // Renew immediately before this external workflow effect instead of
@@ -801,10 +946,23 @@ export async function recoverLocalWorkflows(
       if (lostOwnership) break;
       heartbeat = setInterval(() => void renew(), 10_000);
       heartbeat.unref();
-      const result =
-        existing?.status === "running" || existing?.status === "pending"
-          ? await run.restart()
-          : await run.start({ inputData: { caseId: dispatch.caseId } });
+      const result = await withDispatchLeaseScope<{ status: string }>(
+        {
+          dispatchId: dispatch.id,
+          caseId: dispatch.caseId,
+          turnId: dispatch.turnId,
+          leaseToken: dispatch.leaseToken!,
+        },
+        () =>
+          existing?.status === "running" || existing?.status === "pending"
+            ? run.restart()
+            : run.start({
+                inputData: {
+                  caseId: dispatch.caseId,
+                  turnId: dispatch.turnId,
+                },
+              }),
+      );
       if (lostOwnership) break;
       if (result.status === "failed")
         await store.failDispatchAndCase(
@@ -838,16 +996,345 @@ export async function recoverLocalWorkflows(
   return claimed;
 }
 
+/** Recover the crash window after the durable decision commit but before the
+ * HTTP process resumed Mastra. A missing native snapshot is never authority;
+ * it is tolerated only when the same immutable provider effect already exists. */
+type NativeRecoveryMastra = Mastra;
+
+type WorkflowRetentionStorage = NonNullable<
+  ReturnType<NonNullable<NativeRecoveryMastra["getStorage"]>>
+>;
+
+/** Delete only snapshots whose app-owned copies have already expired. This
+ * enumerates Mastra's supported workflow store so native suspension names are
+ * not guessed from a resolution run id or deleted through direct SQL. */
+export async function purgeExpiredWorkflowSnapshots(
+  storage: WorkflowRetentionStorage | undefined,
+  retention: {
+    rawWorkflowSnapshotBefore: string;
+    expiredCaseIds: readonly string[];
+    expiredWorkflowRunIds: readonly string[];
+  },
+) {
+  const workflows = await storage?.getStore?.("workflows");
+  const expiredRunIds = new Set(retention.expiredWorkflowRunIds);
+  const expiredCaseIds = new Set(retention.expiredCaseIds);
+  const inboundWorkflowNames = new Set([
+    "ingest-support-case",
+    "ingestSupportCaseWorkflow",
+  ]);
+  const recoverableWorkflowNames = new Set([
+    "resolve-support-case",
+    "resolveSupportCaseWorkflow",
+    "agentic-loop",
+    "durable-agentic-loop",
+    // Installed registered refundExecutionAgent currently persists its native
+    // suspension under this storage workflow name.
+    "executionWorkflow",
+  ]);
+  const runs = await workflows?.listWorkflowRuns({ perPage: false });
+  const deleted: string[] = [];
+  const snapshotContainsExpiredCase = (snapshot: unknown) => {
+    const visit = (value: unknown): boolean => {
+      if (!value || typeof value !== "object") return false;
+      if (Array.isArray(value)) return value.some(visit);
+      for (const [key, nested] of Object.entries(value)) {
+        if (key === "caseId" && expiredCaseIds.has(String(nested))) return true;
+        if (visit(nested)) return true;
+      }
+      return false;
+    };
+    try {
+      return visit(
+        typeof snapshot === "string" ? JSON.parse(snapshot) : snapshot,
+      );
+    } catch {
+      return false;
+    }
+  };
+  for (const run of runs?.runs ?? []) {
+    const isExpiredInbound =
+      inboundWorkflowNames.has(run.workflowName) &&
+      run.createdAt.toISOString() < retention.rawWorkflowSnapshotBefore;
+    const isExpiredAuthority =
+      recoverableWorkflowNames.has(run.workflowName) &&
+      (expiredRunIds.has(run.runId) ||
+        snapshotContainsExpiredCase(run.snapshot));
+    if (!isExpiredInbound && !isExpiredAuthority) continue;
+    await workflows?.deleteWorkflowRunById({
+      workflowName: run.workflowName,
+      runId: run.runId,
+    });
+    deleted.push(`${run.workflowName}:${run.runId}`);
+  }
+  return deleted;
+}
+
+type PersistedRefundCommand = {
+  orderId?: string;
+  idempotencyKey?: string;
+  fingerprint?: string;
+  amount?: number;
+  currency?: string;
+};
+
+/** Projects only an exact durable provider effect. A normal native-resume
+ * return does not prove that its tool completed, so callers use this before
+ * resuming the enclosing workflow. */
+export async function reconcileApprovedRefundEffect(input: {
+  store: CaseStore;
+  supportCase: SupportCase;
+  dispatch: DispatchRecord;
+  fingerprint: string;
+  command: PersistedRefundCommand | undefined;
+}) {
+  const { store, supportCase, dispatch, fingerprint, command } = input;
+  if (!command?.idempotencyKey) return false;
+  if (command.fingerprint !== fingerprint)
+    throw new Error(
+      "The persisted refund command does not match the approved fingerprint.",
+    );
+  const existing = await store.idempotency(command.idempotencyKey);
+  if (!existing) return false;
+  if (existing.fingerprint !== fingerprint)
+    throw new Error(
+      "A durable refund effect does not match the immutable approved command.",
+    );
+  const effect = existing.effect as RefundEffect;
+  const expectedAmount =
+    typeof command.amount === "number" && typeof command.currency === "string"
+      ? legacyAmountToMoney(command.amount, command.currency)
+      : undefined;
+  if (
+    effect.idempotencyKey !== command.idempotencyKey ||
+    effect.orderId !== command.orderId ||
+    !effect.amount ||
+    !effect.refundId ||
+    !expectedAmount ||
+    effect.amount.currency !== expectedAmount.currency ||
+    effect.amount.minor !== expectedAmount.minor ||
+    !Number.isFinite(Date.parse(effect.executedAt))
+  )
+    throw new Error(
+      "A durable refund effect does not exactly match the approved command.",
+    );
+  const reconciled = {
+    refundId: effect.refundId,
+    orderId: effect.orderId,
+    amount: moneyToLegacyAmount(effect.amount),
+    currency: effect.amount.currency,
+    status: effect.replayed ? ("skipped" as const) : ("executed" as const),
+    idempotencyKey: effect.idempotencyKey,
+    executedAt: effect.executedAt,
+  };
+  await withDispatchLeaseScope(
+    {
+      dispatchId: dispatch.id,
+      caseId: dispatch.caseId,
+      turnId: dispatch.turnId,
+      leaseToken: dispatch.leaseToken!,
+    },
+    () =>
+      store.update(dispatch.caseId, {
+        refundResult: reconciled,
+        metadata: {
+          ...supportCase.metadata,
+          refundEffects: {
+            ...((supportCase.metadata as Record<string, unknown>)
+              .refundEffects as Record<string, unknown> | undefined),
+            [fingerprint]: reconciled,
+          },
+        },
+      }),
+  );
+  return true;
+}
+
+export async function recoverApprovedNativeDecisions(
+  mastra: NativeRecoveryMastra,
+  store: CaseStore = caseStore,
+  options: { model?: LanguageModelV2; disableScorers?: boolean } = {},
+) {
+  let recovered = 0;
+  for (const item of await store.nativeDecisionsNeedingRecovery()) {
+    // Claim before touching the native run.  The durable dispatch lease fences
+    // HTTP and recovery workers from approving/declining the same snapshot.
+    const dispatch = await store.claimDispatchForResume(
+      item.caseId,
+      item.workflowRunId,
+      item.turnId,
+    );
+    if (!dispatch || !item.workflowRunId) continue;
+    const command = (item.supportCase.metadata as Record<string, unknown>)
+      .refundCommand as PersistedRefundCommand | undefined;
+    const lease = renewDispatchLeaseWhileRunning(store, dispatch);
+    try {
+      await lease.renew();
+      if (lease.lostOwnership) continue;
+      lease.start();
+      const reconciledBefore = item.approved
+        ? await reconcileApprovedRefundEffect({
+            store,
+            supportCase: item.supportCase,
+            dispatch,
+            fingerprint: item.fingerprint,
+            command,
+          })
+        : false;
+      await withDispatchLeaseScope(
+        {
+          dispatchId: dispatch.id,
+          caseId: dispatch.caseId,
+          turnId: dispatch.turnId,
+          leaseToken: dispatch.leaseToken!,
+        },
+        () =>
+          reconciledBefore
+            ? Promise.resolve(undefined)
+            : resumeApprovedNativeTool({
+                mastra,
+                approved: item.approved,
+                scope: {
+                  caseId: dispatch.caseId,
+                  turnId: dispatch.turnId,
+                  nativeRunId: item.nativeRunId,
+                  nativeToolCallId: item.nativeToolCallId,
+                  commandFingerprint: item.fingerprint,
+                  dispatchId: dispatch.id,
+                  leaseToken: dispatch.leaseToken!,
+                },
+                ...(options.model ? { model: options.model } : {}),
+              }),
+      );
+      if (lease.lostOwnership) continue;
+      // A normal native transition can contain a caught tool failure.  Do not
+      // resume and terminalize the enclosing workflow until its exact effect
+      // is durable and projected. A missing effect after that normal return
+      // is an explicit failed tool result; thrown native/snapshot errors use
+      // the recoverable catch path below.
+      if (
+        item.approved &&
+        !(await reconcileApprovedRefundEffect({
+          store,
+          supportCase: (await store.get(item.caseId)) ?? item.supportCase,
+          dispatch,
+          fingerprint: item.fingerprint,
+          command,
+        }))
+      ) {
+        // The official native transition returned normally and the exact
+        // durable effect is still absent. This is a completed tool failure,
+        // not an uncertain provider response: leave a visible terminal case
+        // instead of repeatedly resuming an already-consumed native snapshot.
+        await store.failDispatchAndCase(
+          dispatch.id,
+          item.caseId,
+          "Native approval completed without a durable refund effect.",
+          dispatch.leaseToken,
+        );
+        continue;
+      }
+      const run = await mastra
+        .getWorkflow("resolveSupportCaseWorkflow")
+        .createRun({
+          runId: item.workflowRunId,
+          ...(options.disableScorers ? { disableScorers: true } : {}),
+        });
+      const result = await withDispatchLeaseScope<{ status: string }>(
+        {
+          dispatchId: dispatch.id,
+          caseId: dispatch.caseId,
+          turnId: dispatch.turnId,
+          leaseToken: dispatch.leaseToken!,
+        },
+        () =>
+          run.resume({
+            step: REQUEST_APPROVAL_STEP_ID,
+            resumeData: {
+              approved: item.approved,
+              approverId: item.principalId,
+              note: item.note,
+            },
+          }),
+      );
+      if (lease.lostOwnership) continue;
+      if (result.status === "failed")
+        await store.failDispatchAndCase(
+          dispatch.id,
+          item.caseId,
+          "Workflow recovery failed after the native decision.",
+          dispatch.leaseToken,
+        );
+      else if (result.status === "success")
+        await store.completeDispatch(
+          dispatch.id,
+          "completed",
+          undefined,
+          dispatch.leaseToken,
+        );
+      else
+        await store.completeDispatch(
+          dispatch.id,
+          "suspended",
+          `Workflow recovery returned ${result.status}.`,
+          dispatch.leaseToken,
+        );
+      recovered += 1;
+    } catch (error) {
+      // The native snapshot may be temporarily unavailable after a process
+      // crash. Return its lease to the suspended queue so a later bounded
+      // sweep can reconcile it; never invent an approval or effect.
+      if (/does not match the immutable approved command/.test(String(error)))
+        await store
+          .failDispatchAndCase(
+            dispatch.id,
+            item.caseId,
+            error,
+            dispatch.leaseToken,
+          )
+          .catch(() => undefined);
+      else
+        await store
+          .completeDispatch(
+            dispatch.id,
+            "suspended",
+            error,
+            dispatch.leaseToken,
+          )
+          .catch(() => undefined);
+      continue;
+    } finally {
+      lease.stop();
+    }
+  }
+  return recovered;
+}
+
 /**
  * Studio/start lifecycle hook. It seeds only the configured local fixture and
  * runs one bounded recovery sweep immediately, then keeps a non-blocking
  * worker alive for interrupted dispatch and delivery work.
  */
 export function startLocalRuntimeWorkers(
-  mastra: Parameters<typeof recoverLocalWorkflows>[0],
-  logger?: { warn(message: string, meta?: Record<string, unknown>): void },
+  mastra: NativeRecoveryMastra,
+  logger?: {
+    warn(message: string, meta?: Record<string, unknown>): void;
+    info?(message: string, meta?: Record<string, unknown>): void;
+  },
 ) {
   let running = false;
+  let lastRetentionSweep = 0;
+  const retentionInterval = Number(
+    process.env.SUPPORT_RETENTION_SWEEP_MS ?? 86_400_000,
+  );
+  if (
+    !Number.isInteger(retentionInterval) ||
+    retentionInterval < 60_000 ||
+    retentionInterval > 604_800_000
+  )
+    throw new Error(
+      "SUPPORT_RETENTION_SWEEP_MS must be an integer from 60000 through 604800000.",
+    );
   const sweep = async () => {
     if (running) return;
     running = true;
@@ -858,8 +1345,25 @@ export function startLocalRuntimeWorkers(
           "Refusing local runtime worker: TURSO_DATABASE_URL must use a file: URL.",
         );
       await localRuntime.seed(defaultLocalBinding());
+      await recoverApprovedNativeDecisions(mastra).catch((error) =>
+        logger?.warn("Native approval recovery failed.", { error }),
+      );
       await recoverLocalWorkflows(mastra);
       await deliverOutbox();
+      if (Date.now() - lastRetentionSweep >= retentionInterval) {
+        const caseRetention = await caseStore.enforceRetention();
+        const storage = mastra.getStorage?.();
+        await purgeExpiredWorkflowSnapshots(storage, caseRetention);
+        const mastraRetention = await storage?.prune({
+          maxBatches: 10,
+          maxRows: 5_000,
+        });
+        logger?.info?.("Completed bounded DEC-015 retention sweep.", {
+          caseRetention,
+          mastraRetention,
+        });
+        lastRetentionSweep = Date.now();
+      }
     } catch (error) {
       logger?.warn("Local runtime recovery sweep failed.", { error });
     } finally {

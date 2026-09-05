@@ -5,32 +5,32 @@ import { responseAgent } from "../../src/mastra/agents/response-agent";
 import { searchSupportKnowledgeTool } from "../../src/mastra/tools/search-support-knowledge";
 import { triageAgent } from "../../src/mastra/agents/triage-agent";
 import { issueRefundTool } from "../../src/mastra/tools/issue-refund";
+import {
+  deterministicJsonModel,
+  deterministicRefundModel,
+} from "./deterministic-language-model";
 
-triageAgent.generate = async () =>
-  ({
-    object: {
-      intent: "duplicate_charge",
-      urgency: "normal",
-      sentiment: "negative",
-      requiresHumanReview: true,
-      confidence: 1,
-      rationale: "two-process recovery fixture",
-    },
-    usage: { inputTokens: 1, outputTokens: 1 },
-  }) as never;
-responseAgent.generate = async () =>
-  ({
-    object: {
-      draftResponse: "Two-process refund response",
-      citedSources: ["duplicate-charge-policy"],
-      recommendRefund: true,
-      refundAmount: 10,
-      refundCurrency: "USD",
-      refundReason: "duplicate",
-      requiresEscalation: false,
-    },
-    usage: { inputTokens: 1, outputTokens: 1 },
-  }) as never;
+triageAgent.__updateModel({
+  model: deterministicJsonModel({
+    intent: "duplicate_charge",
+    urgency: "normal",
+    sentiment: "negative",
+    requiresHumanReview: true,
+    confidence: 1,
+    rationale: "two-process recovery fixture",
+  }) as never,
+});
+responseAgent.__updateModel({
+  model: deterministicJsonModel({
+    draftResponse: "Two-process refund response",
+    citedSources: ["duplicate-charge-policy"],
+    recommendRefund: true,
+    refundAmount: 10,
+    refundCurrency: "USD",
+    refundReason: "duplicate",
+    requiresEscalation: false,
+  }) as never,
+});
 searchSupportKnowledgeTool.execute = async () =>
   ({
     sources: [
@@ -46,7 +46,6 @@ searchSupportKnowledgeTool.execute = async () =>
   }) as never;
 
 await caseStore.list();
-const workflow = mastra.getWorkflow("resolveSupportCaseWorkflow");
 const mode = process.argv[2];
 
 if (mode === "init") {
@@ -69,34 +68,116 @@ if (mode === "init") {
       ],
       createdAt,
       updatedAt: createdAt,
-      metadata: {},
+      metadata: { ownerId: "customer-alex" },
     },
     "post-refund-recovery-event",
     "post-refund-recovery-run",
   );
+  const executionModel = async () => {
+    const action = await caseStore.getClientForTests().execute({
+      sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = 'refund-command'",
+      args: ["post-refund-recovery-case"],
+    });
+    const command = JSON.parse(String(action.rows[0]?.data ?? "{}")) as {
+      orderId?: string;
+      amount?: { minor?: number; currency?: string };
+      reason?: string;
+      idempotencyKey?: string;
+      fingerprint?: string;
+    };
+    return deterministicRefundModel({
+      caseId: "post-refund-recovery-case",
+      orderId: command.orderId,
+      amount: (command.amount?.minor ?? 0) / 100,
+      currency: command.amount?.currency,
+      reason: command.reason,
+      idempotencyKey: command.idempotencyKey,
+      fingerprint: command.fingerprint,
+    }) as never;
+  };
+  mastra.getAgent("refundExecutionAgent").__updateModel({
+    model: executionModel,
+  });
   await recoverLocalWorkflows(mastra);
+  const suspended = await caseStore.get("post-refund-recovery-case");
+  if (!suspended) throw new Error("Expected native approval suspension.");
+  const native = (suspended.metadata as Record<string, unknown>)
+    .nativeApproval as {
+    runId: string;
+    toolCallId: string;
+    turnId: string;
+    fingerprint: string;
+  };
+  const command = (suspended.metadata as Record<string, unknown>)
+    .refundCommand as {
+    orderId: string;
+    amount: number;
+    currency: string;
+    reason: string;
+    idempotencyKey: string;
+    fingerprint: string;
+  };
+  if (!native?.runId || !native.toolCallId || !native.turnId || !command)
+    throw new Error("Expected a real native approval snapshot and command.");
+  const decision = await caseStore.recordApprovalDecision({
+    caseId: "post-refund-recovery-case",
+    turnId: native.turnId,
+    commandFingerprint: native.fingerprint,
+    principalId: "approver-demo",
+    approved: true,
+    nativeRunId: native.runId,
+    nativeToolCallId: native.toolCallId,
+  });
+  if (!decision.won) throw new Error("Expected the first durable decision.");
   const original = issueRefundTool.execute!;
   issueRefundTool.execute = async (...args: any[]) => {
     const effect = await (original as any)(...args);
     console.log("POST_REFUND_EFFECT", JSON.stringify(effect));
     process.exit(71);
   };
-  await caseStore.claimDispatchForResume(
+  const dispatch = await caseStore.claimDispatchForResume(
     "post-refund-recovery-case",
     "post-refund-recovery-run",
+    native.turnId,
   );
-  await caseStore.update("post-refund-recovery-case", { status: "processing" });
-  const run = await workflow.createRun({ runId: "post-refund-recovery-run" });
-  await run.resume({
-    step: "request-approval",
-    resumeData: { approved: true, approverId: "recovery-reviewer" },
-  });
+  if (!dispatch) throw new Error("Expected a resume dispatch lease.");
+  const { withDispatchLeaseScope } =
+    await import("../../src/mastra/lib/dispatch-lease-scope");
+  const { resumeApprovedNativeTool } =
+    await import("../../src/mastra/providers/native-execution");
+  await withDispatchLeaseScope(
+    {
+      dispatchId: dispatch.id,
+      caseId: dispatch.caseId,
+      turnId: dispatch.turnId,
+      leaseToken: dispatch.leaseToken!,
+    },
+    () =>
+      resumeApprovedNativeTool({
+        mastra,
+        approved: true,
+        scope: {
+          caseId: dispatch.caseId,
+          turnId: dispatch.turnId,
+          nativeRunId: native.runId,
+          nativeToolCallId: native.toolCallId,
+          commandFingerprint: native.fingerprint,
+          dispatchId: dispatch.id,
+          leaseToken: dispatch.leaseToken!,
+        },
+      }),
+  );
 } else if (mode === "recover") {
   await caseStore
     .getClientForTests()
     .execute(
       "UPDATE support_dispatch SET lease_until = '2000-01-01' WHERE case_id = 'post-refund-recovery-case'",
     );
+  const { recoverApprovedNativeDecisions } =
+    await import("../../src/mastra/runtime/local-runtime");
+  await recoverApprovedNativeDecisions(mastra, caseStore, {
+    disableScorers: true,
+  });
   await recoverLocalWorkflows(mastra);
   const supportCase = await caseStore.get("post-refund-recovery-case");
   const counts = await caseStore

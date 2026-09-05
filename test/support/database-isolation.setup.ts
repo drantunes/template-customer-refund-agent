@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { afterAll } from "vitest";
 
 const inheritedDatabaseUrl = process.env.TURSO_DATABASE_URL;
+process.env.LOCAL_AUTH_SIGNING_KEY =
+  "phase003-test-signing-key-must-be-at-least-32-chars";
 const inheritedAuthToken = process.env.TURSO_AUTH_TOKEN;
 const databaseDirectory = mkdtempSync(join(tmpdir(), "phase001-vitest-"));
 const databasePath = join(databaseDirectory, "support.db");

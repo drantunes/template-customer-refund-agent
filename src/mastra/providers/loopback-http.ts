@@ -14,6 +14,7 @@ import type {
   SupportChannelProvider,
   TransactionalActionProvider,
 } from "./contracts";
+import type { NativeRefundExecutionAuthorization } from "./native-execution";
 import { sameBinding } from "./contracts";
 import { z } from "zod";
 
@@ -139,18 +140,34 @@ const commandSchema = z
     fingerprint: z.string().min(1),
   })
   .strict();
+const nativeAuthorizationSchema = z
+  .object({
+    issuedAt: z.number().int(),
+    nativeRunId: z.string().min(1),
+    nativeToolCallId: z.string().min(1),
+    commandFingerprint: z.string().min(1),
+    caseId: z.string().min(1),
+    turnId: z.string().min(1),
+    dispatchId: z.string().min(1),
+    leaseToken: z.string().min(1),
+    signature: z.string().min(1),
+  })
+  .strict();
 
 export type LoopbackFailure = "timeout" | "429" | "500" | "drop-after-commit";
 export type LoopbackFetch = (request: Request) => Promise<Response>;
+export type LoopbackFailureSelector = (
+  request: Request,
+) => LoopbackFailure | undefined;
 
 /** Optional in-process HTTP boundary used to prove the local port contract. */
 export function createLocalLoopbackFacade(
   provider: ProviderRegistry,
-  failure?: () => LoopbackFailure | undefined,
+  failure?: LoopbackFailureSelector,
 ): LoopbackFetch {
   return async (request) => {
     try {
-      const injected = failure?.();
+      const injected = failure?.(request);
       if (injected === "timeout") return new Promise(() => undefined);
       if (injected === "429")
         return Response.json({ error: "rate limited" }, { status: 429 });
@@ -309,9 +326,17 @@ export function createLocalLoopbackFacade(
             },
             { status: 400 },
           );
+        const authorization = nativeAuthorizationSchema.safeParse(
+          body.authorization,
+        );
+        if (!authorization.success)
+          return Response.json(
+            { error: "missing or invalid native refund authorization" },
+            { status: 403 },
+          );
         const effect = await provider
           .transactions(body.binding)
-          .issueRefund(command);
+          .issueRefund(command, authorization.data);
         if (injected === "drop-after-commit")
           return new Promise(() => undefined);
         return Response.json(effectSchema.parse(effect));
@@ -552,12 +577,16 @@ class LoopbackHttpTransactionalProvider implements TransactionalActionProvider {
       quoteSchema,
     );
   }
-  issueRefund(command: RefundCommand) {
+  issueRefund(
+    command: RefundCommand,
+    authorization?: NativeRefundExecutionAuthorization,
+  ) {
     return this.http.call<RefundEffect>(
       "/transactions/issue-refund",
       {
         binding: command.binding,
         command,
+        authorization,
       },
       effectSchema,
     );

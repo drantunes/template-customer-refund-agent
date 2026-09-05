@@ -48,7 +48,7 @@ describe("support API client", () => {
         ),
     );
 
-    await expect(listCases("alex@example.test")).resolves.toEqual({
+    await expect(listCases()).resolves.toEqual({
       cases: [],
     });
   });

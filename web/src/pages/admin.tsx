@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -9,14 +9,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -31,8 +23,6 @@ import {
   EmptyTitle,
   EmptyDescription,
 } from "@/components/ui/empty";
-import { Field, FieldLabel } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -49,15 +39,17 @@ import { MonitoringSection } from "@/components/admin/monitoring-section";
 import { StatusBadge } from "@/components/status-badge";
 import {
   approveCase,
+  clearSession,
+  currentSession,
   listCases,
   rejectCase,
   reindexKnowledge,
+  type SupportSession,
 } from "@/lib/api";
+import { SessionLogin } from "@/components/session-login";
 import type { SupportCase } from "@/lib/types";
 import { Ellipsis, RefreshCcw } from "lucide-react";
 import { Spinner } from "@/components/ui/spinner";
-
-const APPROVER_STORAGE_KEY = "support-demo:approver-id";
 
 const FILTERS = [
   { value: "all", label: "All" },
@@ -68,32 +60,76 @@ const FILTERS = [
 ] as const;
 
 export function Admin() {
+  const [session, setSession] = useState<SupportSession | undefined>(() =>
+    currentSession(),
+  );
+  if (!session)
+    return (
+      <SessionLogin
+        email="approver@local.test"
+        password="local-approver"
+        onSession={setSession}
+      />
+    );
+  if (
+    !session.principal.roles.includes("approver") &&
+    !session.principal.roles.includes("admin")
+  )
+    return (
+      <p className="text-muted-foreground">
+        This session cannot review refunds.
+      </p>
+    );
+
+  return (
+    <AdminSession
+      key={session.token}
+      session={session}
+      onSignOut={() => {
+        clearSession();
+        setSession(undefined);
+      }}
+    />
+  );
+}
+
+function AdminSession({
+  session,
+  onSignOut,
+}: {
+  session: SupportSession;
+  onSignOut: () => void;
+}) {
+  const mounted = useRef(true);
   const { caseId } = useParams<{ caseId?: string }>();
   const navigate = useNavigate();
 
   const [cases, setCases] = useState<SupportCase[]>([]);
   const [filter, setFilter] =
     useState<(typeof FILTERS)[number]["value"]>("all");
-  const [approverId, setApproverId] = useState(
-    () => localStorage.getItem(APPROVER_STORAGE_KEY) ?? "demo-support-lead",
-  );
   const [reindexing, setReindexing] = useState(false);
-  const [approverDialogOpen, setApproverDialogOpen] = useState(false);
-  const [approverDraft, setApproverDraft] = useState(approverId);
   const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
-      const res = await listCases();
+      const res = await listCases(session);
+      if (!mounted.current) return;
       setCases(res.cases);
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Failed to load cases",
-      );
+      if (mounted.current)
+        toast.error(
+          error instanceof Error ? error.message : "Failed to load cases",
+        );
     } finally {
-      setLoading(false);
+      if (mounted.current) setLoading(false);
     }
-  }, []);
+  }, [session]);
 
   useEffect(() => {
     refresh();
@@ -103,10 +139,6 @@ export function Admin() {
     const interval = setInterval(refresh, 3000);
     return () => clearInterval(interval);
   }, [refresh]);
-
-  useEffect(() => {
-    localStorage.setItem(APPROVER_STORAGE_KEY, approverId);
-  }, [approverId]);
 
   const filteredCases = useMemo(() => {
     switch (filter) {
@@ -128,29 +160,37 @@ export function Admin() {
   async function handleReindex() {
     setReindexing(true);
     try {
-      const result = await reindexKnowledge();
+      const result = await reindexKnowledge(session);
+      if (!mounted.current) return;
       toast.success(`Indexed ${result.indexed} policy chunks`);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Reindex failed");
+      if (mounted.current)
+        toast.error(error instanceof Error ? error.message : "Reindex failed");
     } finally {
-      setReindexing(false);
+      if (mounted.current) setReindexing(false);
     }
   }
 
-  async function handleDecision(approved: boolean, note?: string) {
+  async function handleDecision(
+    approved: boolean,
+    commandFingerprint: string,
+    note?: string,
+  ) {
     if (!selectedCase) return;
     try {
       const updated = approved
-        ? await approveCase(selectedCase.id, approverId, note)
-        : await rejectCase(selectedCase.id, approverId, note);
+        ? await approveCase(selectedCase.id, commandFingerprint, note, session)
+        : await rejectCase(selectedCase.id, commandFingerprint, note, session);
+      if (!mounted.current) return;
       setCases((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
       toast.success(
         approved ? "Refund approved" : "Refund rejected and case escalated",
       );
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Failed to submit decision",
-      );
+      if (mounted.current)
+        toast.error(
+          error instanceof Error ? error.message : "Failed to submit decision",
+        );
     }
   }
 
@@ -182,63 +222,36 @@ export function Admin() {
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-fit min-w-0">
             <DropdownMenuGroup>
+              <DropdownMenuItem disabled>
+                Signed in as {session.principal.email}
+              </DropdownMenuItem>
+              {session.principal.roles.includes("admin") && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={handleReindex}
+                    disabled={reindexing}
+                  >
+                    {reindexing ? (
+                      <Spinner data-icon="inline-start" />
+                    ) : (
+                      <RefreshCcw data-icon="inline-start" />
+                    )}
+                    Reindex knowledge
+                  </DropdownMenuItem>
+                </>
+              )}
+              <DropdownMenuSeparator />
               <DropdownMenuItem
                 onClick={() => {
-                  setApproverDraft(approverId);
-                  setApproverDialogOpen(true);
+                  onSignOut();
                 }}
               >
-                Acting approver: {approverId}
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={handleReindex} disabled={reindexing}>
-                {reindexing ? (
-                  <Spinner data-icon="inline-start" />
-                ) : (
-                  <RefreshCcw data-icon="inline-start" />
-                )}
-                Reindex knowledge
+                Sign out
               </DropdownMenuItem>
             </DropdownMenuGroup>
           </DropdownMenuContent>
         </DropdownMenu>
-
-        <Dialog open={approverDialogOpen} onOpenChange={setApproverDialogOpen}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Change acting approver</DialogTitle>
-              <DialogDescription>
-                This name is recorded with the next approval decision.
-              </DialogDescription>
-            </DialogHeader>
-            <Field>
-              <FieldLabel htmlFor="approver">Acting approver</FieldLabel>
-              <Input
-                id="approver"
-                value={approverDraft}
-                onChange={(e) => setApproverDraft(e.target.value)}
-              />
-            </Field>
-            <DialogFooter>
-              <Button
-                variant="outline"
-                onClick={() => setApproverDialogOpen(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                onClick={() => {
-                  if (approverDraft.trim()) {
-                    setApproverId(approverDraft.trim());
-                    setApproverDialogOpen(false);
-                  }
-                }}
-              >
-                Save approver
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
       </section>
 
       <section className="flex flex-col gap-6">
@@ -345,7 +358,7 @@ export function Admin() {
             {selectedCase ? (
               <CaseDetail
                 supportCase={selectedCase}
-                approverId={approverId}
+                approverId={session.principal.id}
                 onDecision={handleDecision}
               />
             ) : (
@@ -365,7 +378,7 @@ export function Admin() {
 
       <Separator />
 
-      <MonitoringSection />
+      <MonitoringSection session={session} />
     </div>
   );
 }

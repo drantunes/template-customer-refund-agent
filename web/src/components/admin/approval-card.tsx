@@ -26,17 +26,29 @@ export function ApprovalCard({
 }: {
   supportCase: SupportCase;
   approverId: string;
-  onDecision: (approved: boolean, note?: string) => Promise<void>;
+  onDecision: (
+    approved: boolean,
+    commandFingerprint: string,
+    note?: string,
+  ) => Promise<void>;
 }) {
   const [note, setNote] = useState("");
   const [pending, setPending] = useState<"approve" | "reject" | null>(null);
   const draft = supportCase.draft;
+  const commandFingerprint = (
+    (supportCase.metadata as Record<string, unknown>).refundCommand as
+      { fingerprint?: string } | undefined
+  )?.fingerprint;
   if (!draft) return null;
 
   async function handle(approved: boolean) {
     setPending(approved ? "approve" : "reject");
     try {
-      await onDecision(approved, note || undefined);
+      if (!commandFingerprint)
+        throw new Error(
+          "This approval command is unavailable. Refresh the case.",
+        );
+      await onDecision(approved, commandFingerprint, note || undefined);
     } finally {
       setPending(null);
     }
@@ -58,6 +70,15 @@ export function ApprovalCard({
             <p className="font-medium">
               {draft.refundAmount} {draft.refundCurrency}
             </p>
+          </div>
+          <div className="min-w-52">
+            <p className="text-muted-foreground">Immutable command</p>
+            <code
+              className="block truncate font-medium"
+              title={commandFingerprint}
+            >
+              {commandFingerprint ?? "Unavailable"}
+            </code>
           </div>
           <div>
             <p className="text-muted-foreground">Order</p>
