@@ -30,12 +30,42 @@
       "evidence": "codex/.ryo/runs/RUN-20260905-002950/tests.json",
       "from": "IMPLEMENTING",
       "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T01:19:32+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-002950/gates-20260905-011908.json",
+      "from": "VERIFYING",
+      "to": "INTERNAL_REVIEW"
+    },
+    {
+      "at": "2026-09-05T01:24:38+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-002950/internal-review-1.json",
+      "from": "INTERNAL_REVIEW",
+      "to": "FIXING"
+    },
+    {
+      "at": "2026-09-05T01:33:02+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-002950/fix-1.json",
+      "from": "FIXING",
+      "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T01:33:47+00:00",
+      "evidence": "All 20 supervisor gates passed after d7a56dd; gates-fix1 output and run evidence",
+      "from": "VERIFYING",
+      "to": "INTERNAL_REVIEW"
+    },
+    {
+      "at": "2026-09-05T01:35:58+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-002950/internal-review-2.json",
+      "from": "INTERNAL_REVIEW",
+      "to": "PR_READY"
     }
   ],
-  "fix_cycles": 0,
+  "fix_cycles": 1,
   "phase": "PHASE-001",
   "run_id": "RUN-20260905-002950",
   "schema_version": 1,
-  "state": "VERIFYING",
-  "updated_at": "2026-09-05T01:18:14+00:00"
+  "state": "PR_READY",
+  "updated_at": "2026-09-05T01:35:58+00:00"
 }

@@ -1,5 +1,30 @@
 {
-  "findings": [],
+  "schema_version": 1,
   "run_id": "RUN-20260905-002950",
-  "schema_version": 1
+  "findings": [
+    {
+      "id": "IR-001",
+      "severity": "P2",
+      "status": "resolved",
+      "title": "Preserve context through actual workflow entrypoints",
+      "file": "src/mastra/workflows/ingest-support-case.ts",
+      "line": 56,
+      "summary": "HTTP start/resume and ingest-to-resolve start omit nonempty RequestContext; child run tracing context is also lost. Direct resolve test bypasses production entrypoints.",
+      "requested_fix": "Forward installed API context through HTTP start/resume and ingest child start; prove correlation via real HTTP/ingest and approval resume.",
+      "resolution_commit": "d7a56dd",
+      "resolution_evidence": "fix-1.json; actual Hono HTTP context/approval contracts; pending fresh independent review"
+    },
+    {
+      "id": "IR-002",
+      "severity": "P2",
+      "status": "resolved",
+      "title": "Honor documented optional approval body",
+      "file": "src/mastra/server/routes.ts",
+      "line": 135,
+      "summary": "OpenAPI requestBody.required=false conflicts with unconditional req.json(): absent body now returns400 despite previous valid default behavior.",
+      "requested_fix": "Empty body validates as {}; malformed nonempty JSON remains400/no resume. Test absent/valid/malformed bodies against actual handlers and route/OpenAPI contract agreement.",
+      "resolution_commit": "d7a56dd",
+      "resolution_evidence": "fix-1.json; actual Hono HTTP context/approval contracts; pending fresh independent review"
+    }
+  ]
 }
