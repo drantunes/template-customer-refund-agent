@@ -1,0 +1,31 @@
+{
+  "stage": "PR_REVIEW",
+  "status": "success",
+  "pr_url": "https://github.com/drantunes/template-customer-refund-agent/pull/2",
+  "head_sha": "77519b2bfdd85beccadb5489e73710ee122495c3",
+  "base_sha": "9dba654bc4f6515ec31ffd78abfd411e92107c89",
+  "mergeable": true,
+  "mergeable_state": "clean",
+  "check_runs": [],
+  "workflow_runs": [],
+  "combined_status": {
+    "state": "pending",
+    "total_count": 0,
+    "statuses": [],
+    "interpretation": "GitHub returns pending with zero statuses; no pending job is represented. No remote status checks configured or reported."
+  },
+  "branch_protection": {
+    "protected": false,
+    "protection": {
+      "enabled": false,
+      "required_status_checks": {
+        "enforcement_level": "off",
+        "contexts": [],
+        "checks": []
+      }
+    }
+  },
+  "rulesets": [],
+  "reviews": [],
+  "policy": "No protection/rules/status checks changed. All20 local deterministic gates remain mandatory. Published-SHA independent review still pending; human final merge authorization required."
+}

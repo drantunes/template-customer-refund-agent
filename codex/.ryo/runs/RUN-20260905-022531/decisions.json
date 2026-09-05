@@ -38,7 +38,7 @@
     {
       "id": "HITL-PUBLISH-002-001",
       "type": "publication-authorization",
-      "status": "pending",
+      "status": "approved",
       "requested_action": "Push reviewed branch ryo/phase-002-local-runtime to origin https://github.com/drantunes/template-customer-refund-agent and open PHASE-002 PR targeting main with title feat: add persistent local provider runtime and body pr-body.md.",
       "reason": "All gates/reviews and18findings complete. Project instructions reserve authorization of every mutable remote operation to human; phase001 publication authorization covered only phase001 branch/PR.",
       "evidence": [
@@ -49,7 +49,29 @@
         "security-review-3.json",
         "findings-gate-after-fix5.json"
       ],
-      "scope": "PHASE-002 publication only; final merge remains separate mandatory authorization."
+      "scope": "PHASE-002 publication only; final merge remains separate mandatory authorization.",
+      "approved_by": "Diego Antunes",
+      "approved_at": "2026-09-05T09:31:36.592829+00:00",
+      "authorization": "User replied Sim to explicit request to publish ryo/phase-002-local-runtime and open prepared PR in drantunes/template-customer-refund-agent targeting main.",
+      "approved_commit": "77519b2bfdd85beccadb5489e73710ee122495c3"
+    },
+    {
+      "id": "HITL-CYCLES-002-003",
+      "status": "approved",
+      "requested_action": "Authorize one additional PHASE-002 correction cycle (max_fix_cycles5 to6) to fix residual R1-005 batch lease ownership, rerun deterministic gates and fresh independent reviews, and synchronize the corrected commits to existing PR2.",
+      "reason": "Published-SHA PR review reproduced one blocking P2 after5/max5fixcycles. Stale batch worker delivers after item terminalfailure, leaving outboxfailed/no receipt despite localdelivery.",
+      "scope": "PHASE-002 only; samePR2, separatefinalmergeauthorization stillrequired.",
+      "evidence": [
+        "pr-review-1.json",
+        "pr-findings-gate-1.json",
+        "publication.json"
+      ],
+      "blocking_findings": [
+        "R1-005"
+      ],
+      "approved_by": "Diego Antunes",
+      "approved_at": "2026-09-05T09:41:26.158082+00:00",
+      "authorization": "User replied Sim to explicit max_fix_cycles5 to6 request: fix residual lease issue and update existing PR2, repeating gates and independent reviews."
     }
   ]
 }

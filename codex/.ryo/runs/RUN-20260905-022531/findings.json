@@ -58,24 +58,38 @@
     },
     {
       "id": "R1-005",
-      "severity": "P1",
+      "severity": "P2",
       "status": "resolved",
-      "file": "src/mastra/server/routes.ts",
-      "line": 174,
-      "body": "resumeApproval acquires30s lease without heartbeat during run.resume. retryOutbox also mutates case metadata after its fenced UPDATE affects0 rows: stale terminal retry leaves outbox delivered but metadata.deliveryStatus=failed/deliveryError='stale failed'.",
+      "file": "src/mastra/runtime/local-runtime.ts",
+      "line": 645,
+      "body": "deliverOutbox claims up to10items with30s leases but only heartbeats the current item. Waitingitems can be reclaimed/exhausted while firstdelivery is slow. Oldworker then invokes deliver without validating ownership; completeOutbox silently rejects stale token. Realrepro leaves newlocalreceipt while outboxfailed/receiptnull and casefailed.",
       "review_evidence": [
-        "internal-review-3.json",
-        "security-review-3.json"
+        "internal-review-4.json",
+        "security-review-4.json"
       ],
-      "resolution_evidence": "Real31s heartbeat; renewal failure409 without failure projection; stale dispatch/outbox probes pass. failDispatchAndCase, terminal retryOutbox and exhausted paths project only after winning fenced UPDATE within write transaction.",
       "additional_locations": [
         {
-          "file": "src/mastra/lib/case-store.ts",
-          "line": 982,
-          "body": "Check ownership/rowsAffected before case mutation and preserve same ownership across side effects."
+          "file": "src/mastra/runtime/local-runtime.ts",
+          "line": 660
         }
       ],
-      "resolved_by": "supervisor after fresh independent internal and security reviews"
+      "history": [
+        {
+          "status": "resolved",
+          "severity": "P1",
+          "resolution_evidence": "Real31s heartbeat; renewal failure409 without failure projection; stale dispatch/outbox probes pass. failDispatchAndCase, terminal retryOutbox and exhausted paths project only after winning fenced UPDATE within write transaction.",
+          "review_evidence": [
+            "internal-review-3.json",
+            "security-review-3.json"
+          ],
+          "note": "P1 heartbeat/stale-projection facets resolved byfix5; publishedSHA review demonstrated residual batch-effect ownership P2."
+        }
+      ],
+      "title": "Stale worker delivers item after lost lease and terminal failure",
+      "impact": "Delivery occurs after terminalfailure and operational state remains inconsistent. No financial duplication or duplicate idempotentreceipt demonstrated.",
+      "recommendation": "Claim work as execution capacity becomes available or maintain queued leases; require validownership before initiating effect. Add slowfirst/revokedsecond batch regression.",
+      "resolved_by": "supervisor after independent internal-review-4 and security-review-4",
+      "resolution_evidence": "Just-in-time execution capacity, pre-effect lease validation, bounded sweep exclusions; independent exact stale-terminal schedule and security SQL probes pass."
     },
     {
       "id": "R1-006",

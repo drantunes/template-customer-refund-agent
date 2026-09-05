@@ -1022,7 +1022,7 @@ export class CaseStore {
       leaseToken,
     };
   }
-  async claimOutbox(limit = 10) {
+  async claimOutbox(limit = 10, excludeIds: readonly string[] = []) {
     await this.ensured();
     const claimedAt = now();
     const exhausted = await this.client.execute({
@@ -1075,9 +1075,12 @@ export class CaseStore {
       }
     }
     const leaseUntil = new Date(Date.now() + 30_000).toISOString();
+    const excluded = excludeIds.length
+      ? ` AND id NOT IN (${excludeIds.map(() => "?").join(", ")})`
+      : "";
     const rows = await this.client.execute({
-      sql: "SELECT * FROM support_outbox WHERE (state = 'pending' OR (state = 'claimed' AND lease_until < ?)) AND attempts < 3 ORDER BY created_at LIMIT ?",
-      args: [claimedAt, limit],
+      sql: `SELECT * FROM support_outbox WHERE (state = 'pending' OR (state = 'claimed' AND lease_until < ?)) AND attempts < 3${excluded} ORDER BY created_at LIMIT ?`,
+      args: [claimedAt, ...excludeIds, limit],
     });
     const claimed: OutboxRecord[] = [];
     for (const row of rows.rows) {

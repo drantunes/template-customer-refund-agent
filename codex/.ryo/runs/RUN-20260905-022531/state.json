@@ -146,13 +146,69 @@
       "evidence": "codex/.ryo/runs/RUN-20260905-022531/publication-hitl.json",
       "from": "PR_READY",
       "to": "PAUSED_HITL"
+    },
+    {
+      "approved_by": "Diego Antunes",
+      "at": "2026-09-05T09:31:36+00:00",
+      "evidence": "HITL-PUBLISH-002-001 approved: explicit user Sim for branch publication and prepared PR; reviewed SHA77519b2",
+      "from": "PAUSED_HITL",
+      "to": "PR_READY"
+    },
+    {
+      "at": "2026-09-05T09:32:34+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/publication.json",
+      "from": "PR_READY",
+      "to": "PR_OPENED"
+    },
+    {
+      "at": "2026-09-05T09:32:34+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/publication.json",
+      "from": "PR_OPENED",
+      "to": "PR_REVIEW"
+    },
+    {
+      "at": "2026-09-05T09:39:11+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/cycle-limit-hitl-3.json",
+      "from": "PR_REVIEW",
+      "to": "PAUSED_HITL"
+    },
+    {
+      "approved_by": "Diego Antunes",
+      "at": "2026-09-05T09:41:26+00:00",
+      "evidence": "HITL-CYCLES-002-003 approved: user Sim for sixth cycle and same PR2 sync",
+      "from": "PAUSED_HITL",
+      "to": "PR_REVIEW"
+    },
+    {
+      "at": "2026-09-05T09:41:26+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/decisions.json",
+      "from": "PR_REVIEW",
+      "to": "PR_FIXING"
+    },
+    {
+      "at": "2026-09-05T09:48:36+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/fix-6.json",
+      "from": "PR_FIXING",
+      "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T09:49:42+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/gates-20260905-094916.json",
+      "from": "VERIFYING",
+      "to": "INTERNAL_REVIEW"
+    },
+    {
+      "at": "2026-09-05T09:56:51+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/pr-sync-readiness.json",
+      "from": "INTERNAL_REVIEW",
+      "to": "PR_SYNC"
     }
   ],
-  "fix_cycles": 5,
+  "fix_cycles": 6,
   "phase": "PHASE-002",
-  "resume_state": "PR_READY",
+  "pr_opened": true,
   "run_id": "RUN-20260905-022531",
   "schema_version": 1,
-  "state": "PAUSED_HITL",
-  "updated_at": "2026-09-05T08:44:32+00:00"
+  "state": "PR_SYNC",
+  "updated_at": "2026-09-05T09:56:51+00:00"
 }

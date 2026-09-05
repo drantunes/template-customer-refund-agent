@@ -887,6 +887,251 @@ describe("Phase 002 persistent local runtime", () => {
     await store.close();
   });
 
+  it("claims deliveries only when capacity is free and never delivers a terminal item from an old sweep", async () => {
+    const { store, local } = await runtime();
+    await local.seed(binding);
+    const first = supportCase("batch-first");
+    const second = supportCase("batch-second");
+    await store.create(first);
+    await store.create(second);
+    await store.enqueueDelivery({
+      id: "batch-first-outbox",
+      caseId: first.id,
+      binding,
+      body: "first",
+      status: "resolved",
+    });
+    await store.enqueueDelivery({
+      id: "batch-second-outbox",
+      caseId: second.id,
+      binding,
+      body: "second",
+      status: "resolved",
+    });
+    let releaseFirst!: () => void;
+    const firstReleased = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let enteredFirst!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      enteredFirst = resolve;
+    });
+    const localSupport = local.support(binding);
+    const slowWorker: ProviderRegistry = {
+      support: () => ({
+        kind: "local",
+        normalizeInbound: localSupport.normalizeInbound.bind(localSupport),
+        deliver: async (...args) => {
+          if (args[3] === "batch-first-outbox") {
+            enteredFirst();
+            await firstReleased;
+          }
+          return localSupport.deliver(...args);
+        },
+        addInternalNote: localSupport.addInternalNote.bind(localSupport),
+        updateStatus: localSupport.updateStatus.bind(localSupport),
+      }),
+      commerce: () => local,
+      transactions: () => local,
+      knowledge: () => local,
+    };
+    const permanentFailure: ProviderRegistry = {
+      ...slowWorker,
+      support: () => ({
+        kind: "local",
+        normalizeInbound: localSupport.normalizeInbound.bind(localSupport),
+        deliver: async () => {
+          throw new Error("Loopback HTTP 400 permanent");
+        },
+        addInternalNote: localSupport.addInternalNote.bind(localSupport),
+        updateStatus: localSupport.updateStatus.bind(localSupport),
+      }),
+    };
+
+    const oldSweep = deliverOutbox(slowWorker, 2, store);
+    await firstEntered;
+    // This assertion fails against the published batch-claim implementation:
+    // it had already leased the second item while the first delivery waited.
+    expect(
+      (
+        await store.getClientForTests().execute({
+          sql: "SELECT state, attempts FROM support_outbox WHERE id = ?",
+          args: ["batch-second-outbox"],
+        })
+      ).rows[0],
+    ).toMatchObject({ state: "pending", attempts: 0 });
+
+    await deliverOutbox(permanentFailure, 1, store);
+    releaseFirst();
+    await oldSweep;
+
+    expect(
+      (
+        await store.getClientForTests().execute({
+          sql: "SELECT state, attempts, receipt FROM support_outbox WHERE id = ?",
+          args: ["batch-second-outbox"],
+        })
+      ).rows[0],
+    ).toMatchObject({ state: "failed", attempts: 1, receipt: null });
+    expect(
+      (
+        await store.getClientForTests().execute({
+          sql: "SELECT COUNT(*) AS count FROM local_deliveries WHERE idempotency_key = ?",
+          args: ["batch-second-outbox"],
+        })
+      ).rows[0],
+    ).toMatchObject({ count: 0 });
+    expect((await store.get(second.id))?.metadata).toMatchObject({
+      deliveryStatus: "failed",
+    });
+    await store.close();
+  });
+
+  it("does not spend delivery retries more than once per bounded sweep", async () => {
+    const { store, local } = await runtime();
+    const first = supportCase("retry-first");
+    const second = supportCase("retry-second");
+    await store.create(first);
+    await store.create(second);
+    for (const [id, caseId] of [
+      ["retry-first-outbox", first.id],
+      ["retry-second-outbox", second.id],
+    ])
+      await store.enqueueDelivery({
+        id,
+        caseId,
+        binding,
+        body: id,
+        status: "resolved",
+      });
+    let calls = 0;
+    const retryable: ProviderRegistry = {
+      support: () => ({
+        kind: "local",
+        normalizeInbound: async () => ({
+          externalId: "unused",
+          conversationId: "unused",
+          customer: { email: "unused@example.com" },
+          subject: "unused",
+          body: "unused",
+        }),
+        deliver: async () => {
+          calls += 1;
+          throw new Error("Loopback HTTP 500");
+        },
+        addInternalNote: async () => ({ id: "unused" }),
+        updateStatus: async () => ({ id: "unused" }),
+      }),
+      commerce: () => local,
+      transactions: () => local,
+      knowledge: () => local,
+    };
+    expect(await deliverOutbox(retryable, 2, store)).toBe(2);
+    expect(calls).toBe(2);
+    expect(
+      (
+        await store
+          .getClientForTests()
+          .execute(
+            "SELECT attempts FROM support_outbox WHERE id IN ('retry-first-outbox', 'retry-second-outbox') ORDER BY id",
+          )
+      ).rows,
+    ).toEqual([{ attempts: 1 }, { attempts: 1 }]);
+    await store.close();
+  });
+
+  it("claims recovery dispatches only when a run can start and revalidates ownership before start", async () => {
+    const { store } = await runtime();
+    const first = supportCase("recovery-first");
+    const second = supportCase("recovery-second");
+    await store.acceptInbound(
+      first,
+      "recovery-first-event",
+      "recovery-first-run",
+    );
+    await store.acceptInbound(
+      second,
+      "recovery-second-event",
+      "recovery-second-run",
+    );
+    let releaseFirst!: () => void;
+    const firstReleased = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let enteredFirst!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      enteredFirst = resolve;
+    });
+    const starts: string[] = [];
+    const worker = {
+      getWorkflow: () => ({
+        getWorkflowRunById: async () => undefined,
+        createRun: async ({ runId }: { runId: string }) => ({
+          runId,
+          start: async () => {
+            starts.push(runId);
+            if (runId === "recovery-first-run") {
+              enteredFirst();
+              await firstReleased;
+            }
+            return { status: "success" };
+          },
+          restart: async () => ({ status: "success" }),
+          cancel: async () => ({ message: "cancelled" }),
+        }),
+      }),
+    };
+    const oldSweep = recoverLocalWorkflows(worker, 2, store);
+    await firstEntered;
+    expect(
+      (
+        await store.getClientForTests().execute({
+          sql: "SELECT state, attempts FROM support_dispatch WHERE case_id = ?",
+          args: [second.id],
+        })
+      ).rows[0],
+    ).toMatchObject({ state: "pending", attempts: 0 });
+    await recoverLocalWorkflows(worker, 1, store);
+    releaseFirst();
+    await oldSweep;
+    expect(starts.sort()).toEqual([
+      "recovery-first-run",
+      "recovery-second-run",
+    ]);
+
+    const revoked = supportCase("recovery-revoked");
+    await store.acceptInbound(
+      revoked,
+      "recovery-revoked-event",
+      "recovery-revoked-run",
+    );
+    const start = vi.fn(async () => ({ status: "success" }));
+    await recoverLocalWorkflows(
+      {
+        getWorkflow: () => ({
+          getWorkflowRunById: async () => {
+            await store.getClientForTests().execute({
+              sql: "UPDATE support_dispatch SET lease_token = ?, lease_until = ? WHERE case_id = ?",
+              args: ["new-owner", "2099-01-01T00:00:00.000Z", revoked.id],
+            });
+            return undefined;
+          },
+          createRun: async ({ runId }: { runId: string }) => ({
+            runId,
+            start,
+            restart: start,
+            cancel: async () => ({ message: "cancelled" }),
+          }),
+        }),
+      },
+      1,
+      store,
+    );
+    expect(start).not.toHaveBeenCalled();
+    expect((await store.get(revoked.id))?.workflowRunId).toBeUndefined();
+    await store.close();
+  });
+
   it("fences stale leases, renews healthy claims, and visibly fails exhausted abandoned work", async () => {
     const { store } = await runtime();
     await store.create(supportCase("fenced-case"));
