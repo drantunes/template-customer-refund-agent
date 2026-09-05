@@ -1,4 +1,5 @@
 import { createClient, type Client } from "@libsql/client";
+import { createHash } from "node:crypto";
 import type { CaseMessage, SupportCase } from "../domain/support-case";
 import {
   bindingsForCase,
@@ -56,6 +57,16 @@ function now() {
 }
 function parse(row: Record<string, unknown>): SupportCase {
   return JSON.parse(String(row.data)) as SupportCase;
+}
+function scopedEventId(binding: ProviderBinding, eventId: string) {
+  // `support_events.id` is the physical primary key as well as the logical
+  // event key.  Qualify it too: the logical uniqueness constraint is scoped,
+  // and a global physical id must not reintroduce the old collision.
+  return `event_${createHash("sha256")
+    .update(
+      JSON.stringify([binding.tenantId, binding.providerAccountId, eventId]),
+    )
+    .digest("hex")}`;
 }
 
 /** App-owned migrations never enumerate, rename, or drop Mastra-owned tables. */
@@ -524,6 +535,7 @@ export class CaseStore {
     await this.ensured();
     const persisted = this.withBindings(case_);
     const binding = this.binding(persisted);
+    const storageEventId = scopedEventId(binding, eventId);
     const tx = await this.client.transaction("write");
     try {
       const exists = await tx.execute({
@@ -556,7 +568,7 @@ export class CaseStore {
         await tx.execute({
           sql: "INSERT OR IGNORE INTO support_events(id, tenant_id, provider_account_id, source, external_id, case_id, accepted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
           args: [
-            eventId,
+            storageEventId,
             binding.tenantId,
             binding.providerAccountId,
             persisted.source,
@@ -595,7 +607,7 @@ export class CaseStore {
       await tx.execute({
         sql: "INSERT INTO support_events(id, tenant_id, provider_account_id, source, external_id, case_id, accepted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         args: [
-          eventId,
+          storageEventId,
           binding.tenantId,
           binding.providerAccountId,
           persisted.source,
@@ -606,7 +618,7 @@ export class CaseStore {
       });
       await tx.execute({
         sql: "INSERT INTO support_dispatch(id, case_id, run_id, state, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?)",
-        args: [`dispatch_${eventId}`, persisted.id, runId, now(), now()],
+        args: [`dispatch_${storageEventId}`, persisted.id, runId, now(), now()],
       });
       await tx.commit();
       return { caseId: persisted.id, isNew: true };
@@ -739,20 +751,51 @@ export class CaseStore {
       sql: "SELECT case_id FROM support_dispatch WHERE state IN ('claimed', 'started') AND lease_until < ? AND attempts >= 3",
       args: [claimedAt],
     });
-    await this.client.execute({
-      sql: "UPDATE support_dispatch SET state = 'failed', lease_until = NULL, lease_token = NULL, last_error = COALESCE(last_error, 'Dispatch lease exhausted after three attempts.'), updated_at = ? WHERE state IN ('claimed', 'started') AND lease_until < ? AND attempts >= 3",
-      args: [claimedAt, claimedAt],
-    });
     for (const row of exhausted.rows) {
       const caseId = String(row.case_id);
-      const current = await this.get(caseId);
-      if (current && current.status !== "waiting_approval")
-        await this.update(caseId, {
-          status: "failed",
-          escalationReason:
-            "Workflow recovery exhausted its durable lease attempts.",
-          metadata: { ...current.metadata, workflowStatus: "failed" },
+      const tx = await this.client.transaction("write");
+      try {
+        const changed = await tx.execute({
+          sql: "UPDATE support_dispatch SET state = 'failed', lease_until = NULL, lease_token = NULL, last_error = COALESCE(last_error, 'Dispatch lease exhausted after three attempts.'), updated_at = ? WHERE case_id = ? AND state IN ('claimed', 'started') AND lease_until < ? AND attempts >= 3",
+          args: [claimedAt, caseId, claimedAt],
         });
+        if (Number(changed.rowsAffected) === 1) {
+          const caseRow = await tx.execute({
+            sql: "SELECT data, version FROM support_cases WHERE id = ?",
+            args: [caseId],
+          });
+          if (caseRow.rows[0]) {
+            const current = parse(caseRow.rows[0] as Record<string, unknown>);
+            if (current.status !== "waiting_approval") {
+              const updated = this.withBindings({
+                ...current,
+                status: "failed" as const,
+                escalationReason:
+                  "Workflow recovery exhausted its durable lease attempts.",
+                metadata: { ...current.metadata, workflowStatus: "failed" },
+                updatedAt: now(),
+              });
+              const write = await tx.execute({
+                sql: "UPDATE support_cases SET data = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+                args: [
+                  JSON.stringify(updated),
+                  updated.updatedAt,
+                  caseId,
+                  Number(caseRow.rows[0].version ?? 1),
+                ],
+              });
+              if (Number(write.rowsAffected) !== 1)
+                throw new StaleCaseWriteError(caseId);
+            }
+          }
+        }
+        await tx.commit();
+      } catch (error) {
+        try {
+          await tx.rollback();
+        } catch {}
+        throw error;
+      }
     }
     const leaseUntil = new Date(Date.now() + 30_000).toISOString();
     const rows = await this.client.execute({
@@ -805,6 +848,62 @@ export class CaseStore {
         ? [state, error ? String(error) : null, now(), id, leaseToken]
         : [state, error ? String(error) : null, now(), id],
     });
+  }
+  /** Atomically project a fenced workflow failure to its dispatch and public
+   * case.  Callers must not write the case first: a lease can change between
+   * separate writes even when a heartbeat looked healthy moments earlier. */
+  async failDispatchAndCase(
+    id: string,
+    caseId: string,
+    error: unknown,
+    leaseToken?: string,
+  ) {
+    await this.ensured();
+    const tx = await this.client.transaction("write");
+    try {
+      const transitioned = await tx.execute({
+        sql: `UPDATE support_dispatch SET state = 'failed', lease_until = NULL, lease_token = NULL, last_error = ?, updated_at = ? WHERE id = ? AND state IN ('claimed', 'started')${leaseToken ? " AND lease_token = ?" : ""}`,
+        args: leaseToken
+          ? [String(error), now(), id, leaseToken]
+          : [String(error), now(), id],
+      });
+      if (Number(transitioned.rowsAffected) !== 1) {
+        await tx.rollback();
+        return false;
+      }
+      const caseRow = await tx.execute({
+        sql: "SELECT data, version FROM support_cases WHERE id = ?",
+        args: [caseId],
+      });
+      if (caseRow.rows[0]) {
+        const current = parse(caseRow.rows[0] as Record<string, unknown>);
+        const updated = this.withBindings({
+          ...current,
+          status: "failed" as const,
+          escalationReason: String(error),
+          metadata: { ...current.metadata, workflowStatus: "failed" },
+          updatedAt: now(),
+        });
+        const write = await tx.execute({
+          sql: "UPDATE support_cases SET data = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+          args: [
+            JSON.stringify(updated),
+            updated.updatedAt,
+            caseId,
+            Number(caseRow.rows[0].version ?? 1),
+          ],
+        });
+        if (Number(write.rowsAffected) !== 1)
+          throw new StaleCaseWriteError(caseId);
+      }
+      await tx.commit();
+      return true;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
   }
   async markDispatchStarted(caseId: string, leaseToken?: string) {
     await this.ensured();
@@ -874,7 +973,33 @@ export class CaseStore {
       } catch (error) {
         if (!String(error).includes("UNIQUE")) throw error;
       }
-      return this.claimDispatchForResume(caseId, runId);
+      // A raced worker may have created or advanced the row.  Do one bounded
+      // reread rather than recursively trying to insert forever.
+      const backfilled = await this.client.execute({
+        sql: "SELECT * FROM support_dispatch WHERE case_id = ? AND state = 'suspended'",
+        args: [caseId],
+      });
+      if (!backfilled.rows[0]) return undefined;
+      const update = await this.client.execute({
+        sql: "UPDATE support_dispatch SET state = 'claimed', lease_until = ?, lease_token = ?, updated_at = ? WHERE case_id = ? AND state = 'suspended'",
+        args: [
+          new Date(Date.now() + 30_000).toISOString(),
+          leaseToken,
+          claimedAt,
+          caseId,
+        ],
+      });
+      if (Number(update.rowsAffected) !== 1) return undefined;
+      const current = backfilled.rows[0] as Record<string, unknown>;
+      return {
+        id: String(current.id),
+        caseId,
+        runId: String(current.run_id),
+        state: "claimed",
+        attempts: Number(current.attempts),
+        wasStarted: true,
+        leaseToken,
+      };
     }
     const update = await this.client.execute({
       sql: "UPDATE support_dispatch SET state = 'claimed', lease_until = ?, lease_token = ?, updated_at = ? WHERE case_id = ? AND state = 'suspended'",
@@ -904,20 +1029,50 @@ export class CaseStore {
       sql: "SELECT case_id FROM support_outbox WHERE state = 'claimed' AND lease_until < ? AND attempts >= 3",
       args: [claimedAt],
     });
-    await this.client.execute({
-      sql: "UPDATE support_outbox SET state = 'failed', lease_until = NULL, lease_token = NULL, last_error = COALESCE(last_error, 'Delivery lease exhausted after three attempts.'), updated_at = ? WHERE state = 'claimed' AND lease_until < ? AND attempts >= 3",
-      args: [claimedAt, claimedAt],
-    });
     for (const row of exhausted.rows) {
-      const current = await this.get(String(row.case_id));
-      if (current)
-        await this.update(current.id, {
-          metadata: {
-            ...current.metadata,
-            deliveryStatus: "failed",
-            deliveryError: "Delivery lease exhausted after three attempts.",
-          },
+      const caseId = String(row.case_id);
+      const tx = await this.client.transaction("write");
+      try {
+        const changed = await tx.execute({
+          sql: "UPDATE support_outbox SET state = 'failed', lease_until = NULL, lease_token = NULL, last_error = COALESCE(last_error, 'Delivery lease exhausted after three attempts.'), updated_at = ? WHERE case_id = ? AND state = 'claimed' AND lease_until < ? AND attempts >= 3",
+          args: [claimedAt, caseId, claimedAt],
         });
+        if (Number(changed.rowsAffected) === 1) {
+          const caseRow = await tx.execute({
+            sql: "SELECT data, version FROM support_cases WHERE id = ?",
+            args: [caseId],
+          });
+          if (caseRow.rows[0]) {
+            const current = parse(caseRow.rows[0] as Record<string, unknown>);
+            const updated = this.withBindings({
+              ...current,
+              metadata: {
+                ...current.metadata,
+                deliveryStatus: "failed",
+                deliveryError: "Delivery lease exhausted after three attempts.",
+              },
+              updatedAt: now(),
+            });
+            const write = await tx.execute({
+              sql: "UPDATE support_cases SET data = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+              args: [
+                JSON.stringify(updated),
+                updated.updatedAt,
+                caseId,
+                Number(caseRow.rows[0].version ?? 1),
+              ],
+            });
+            if (Number(write.rowsAffected) !== 1)
+              throw new StaleCaseWriteError(caseId);
+          }
+        }
+        await tx.commit();
+      } catch (error) {
+        try {
+          await tx.rollback();
+        } catch {}
+        throw error;
+      }
     }
     const leaseUntil = new Date(Date.now() + 30_000).toISOString();
     const rows = await this.client.execute({
@@ -967,35 +1122,73 @@ export class CaseStore {
     terminal = false,
     leaseToken?: string,
   ) {
-    await this.client.execute({
-      sql: `UPDATE support_outbox SET state = ?, last_error = ?, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE id = ?${leaseToken ? " AND lease_token = ?" : ""}`,
-      args: leaseToken
-        ? [
-            terminal ? "failed" : "pending",
-            String(error),
-            now(),
-            id,
-            leaseToken,
-          ]
-        : [terminal ? "failed" : "pending", String(error), now(), id],
-    });
-    if (terminal) {
-      const outbox = await this.client.execute({
-        sql: "SELECT case_id FROM support_outbox WHERE id = ?",
-        args: [id],
+    await this.ensured();
+    const tx = await this.client.transaction("write");
+    try {
+      // The terminal case projection is part of the same fenced transition as
+      // the outbox row.  A stale worker therefore cannot overwrite the case
+      // after the current owner has delivered the item.
+      const changed = await tx.execute({
+        sql: `UPDATE support_outbox SET state = ?, last_error = ?, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE id = ?${leaseToken ? " AND lease_token = ?" : ""}`,
+        args: leaseToken
+          ? [
+              terminal ? "failed" : "pending",
+              String(error),
+              now(),
+              id,
+              leaseToken,
+            ]
+          : [terminal ? "failed" : "pending", String(error), now(), id],
       });
-      const caseId = outbox.rows[0]
-        ? String(outbox.rows[0].case_id)
-        : undefined;
-      const current = caseId ? await this.get(caseId) : undefined;
-      if (current)
-        await this.update(current.id, {
-          metadata: {
-            ...current.metadata,
-            deliveryStatus: "failed",
-            deliveryError: String(error),
-          },
+      if (Number(changed.rowsAffected) !== 1) {
+        await tx.rollback();
+        return false;
+      }
+      if (terminal) {
+        const outbox = await tx.execute({
+          sql: "SELECT case_id FROM support_outbox WHERE id = ?",
+          args: [id],
         });
+        const caseId = outbox.rows[0]
+          ? String(outbox.rows[0].case_id)
+          : undefined;
+        if (caseId) {
+          const row = await tx.execute({
+            sql: "SELECT data, version FROM support_cases WHERE id = ?",
+            args: [caseId],
+          });
+          if (row.rows[0]) {
+            const current = parse(row.rows[0] as Record<string, unknown>);
+            const updated = this.withBindings({
+              ...current,
+              metadata: {
+                ...current.metadata,
+                deliveryStatus: "failed",
+                deliveryError: String(error),
+              },
+              updatedAt: now(),
+            });
+            const caseWrite = await tx.execute({
+              sql: "UPDATE support_cases SET data = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+              args: [
+                JSON.stringify(updated),
+                updated.updatedAt,
+                caseId,
+                Number(row.rows[0].version ?? 1),
+              ],
+            });
+            if (Number(caseWrite.rowsAffected) !== 1)
+              throw new StaleCaseWriteError(caseId);
+          }
+        }
+      }
+      await tx.commit();
+      return true;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
     }
   }
   private outbox(

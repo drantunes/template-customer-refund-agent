@@ -128,19 +128,20 @@ const startResolutionStep = createStep({
             caseId: inputData.caseId,
             error: "Workflow start failed.",
           });
-          await caseStore.update(inputData.caseId, {
-            status: "failed",
-            escalationReason: "Workflow start failed.",
-          });
+          await caseStore.failDispatchAndCase(
+            dispatch.id,
+            inputData.caseId,
+            "Workflow start failed.",
+            dispatch.leaseToken,
+          );
+          return;
         }
         await caseStore.completeDispatch(
           dispatch.id,
-          result.status === "suspended"
+          result.status === "suspended" || result.status === "paused"
             ? "suspended"
-            : result.status === "success"
-              ? "completed"
-              : "failed",
-          result.status === "failed" ? "Workflow start failed." : undefined,
+            : "completed",
+          undefined,
           dispatch.leaseToken,
         );
       })
@@ -149,14 +150,9 @@ const startResolutionStep = createStep({
           error,
           caseId: inputData.caseId,
         });
-        await caseStore.update(inputData.caseId, {
-          status: "failed",
-          escalationReason:
-            error instanceof Error ? error.message : String(error),
-        });
-        await caseStore.completeDispatch(
+        await caseStore.failDispatchAndCase(
           dispatch.id,
-          "failed",
+          inputData.caseId,
           error,
           dispatch.leaseToken,
         );

@@ -11,6 +11,7 @@ import {
 } from "../../src/mastra/server/routes";
 
 const databaseFiles: string[] = [];
+const mastraRuntimes: Array<{ shutdown(): Promise<void> }> = [];
 
 function supportApp(mastra: unknown) {
   const app = new Hono();
@@ -49,21 +50,18 @@ async function loadDeterministicRuntime() {
     };
   });
 
-  const [
-    { mastra },
-    { issueRefundTool },
-    { responseAgent },
-    { searchSupportKnowledgeTool },
-    { triageAgent },
-    routes,
-  ] = await Promise.all([
-    import("../../src/mastra/index"),
-    import("../../src/mastra/tools/issue-refund"),
-    import("../../src/mastra/agents/response-agent"),
-    import("../../src/mastra/tools/search-support-knowledge"),
-    import("../../src/mastra/agents/triage-agent"),
-    import("../../src/mastra/server/routes"),
-  ]);
+  // index loads the provider registry through a circular workflow graph. Load
+  // it before leaves so vi.resetModules cannot expose a partially initialized
+  // local-runtime export to concurrent dynamic imports.
+  const { mastra } = await import("../../src/mastra/index");
+  const { issueRefundTool } =
+    await import("../../src/mastra/tools/issue-refund");
+  const { responseAgent } =
+    await import("../../src/mastra/agents/response-agent");
+  const { searchSupportKnowledgeTool } =
+    await import("../../src/mastra/tools/search-support-knowledge");
+  const { triageAgent } = await import("../../src/mastra/agents/triage-agent");
+  const routes = await import("../../src/mastra/server/routes");
 
   vi.spyOn(triageAgent, "generate").mockResolvedValue({
     object: {
@@ -103,6 +101,7 @@ async function loadDeterministicRuntime() {
     ],
   } as never);
   vi.spyOn(issueRefundTool, "execute");
+  mastraRuntimes.push(mastra);
 
   const app = supportApp(mastra);
   app.post("/support/inbound", routes.supportInboundRoute.handler);
@@ -124,6 +123,9 @@ async function loadDeterministicRuntime() {
 afterEach(async () => {
   vi.restoreAllMocks();
   vi.doUnmock("@mastra/core/llm");
+  await Promise.allSettled(
+    mastraRuntimes.splice(0).map((runtime) => runtime.shutdown()),
+  );
   await Promise.all(
     databaseFiles.splice(0).map((file) => rm(file, { force: true })),
   );
@@ -201,6 +203,188 @@ describe("support approval HTTP boundary", () => {
 });
 
 describe("support workflow HTTP context propagation", () => {
+  it("renews the persisted approval dispatch lease while a real API resume is slow", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      mastra,
+    } = await loadDeterministicRuntime();
+    const caseId = `slow-resume-${crypto.randomUUID()}`;
+    const runId = `slow-resume-run-${crypto.randomUUID()}`;
+    const createdAt = "2026-09-05T00:00:00.000Z";
+    await runtimeCaseStore.acceptInbound(
+      {
+        id: caseId,
+        externalId: `event-${caseId}`,
+        source: "mock-email",
+        status: "new",
+        customer: { email: "alex@example.com" },
+        subject: "Slow approval",
+        messages: [
+          {
+            id: `message-${caseId}`,
+            author: "customer",
+            body: "Please refund the duplicate charge.",
+            createdAt,
+          },
+        ],
+        createdAt,
+        updatedAt: createdAt,
+        metadata: {
+          providerBinding: {
+            tenantId: "local-demo",
+            providerKind: "local",
+            providerAccountId: "local-demo",
+            externalConversationId: `conversation-${caseId}`,
+          },
+        },
+      },
+      `event-${caseId}`,
+      runId,
+    );
+    await runtimeCaseStore.update(caseId, {
+      status: "waiting_approval",
+      workflowRunId: runId,
+    });
+    await runtimeCaseStore.getClientForTests().execute({
+      sql: "UPDATE support_dispatch SET state = 'suspended', lease_until = NULL, lease_token = NULL WHERE case_id = ?",
+      args: [caseId],
+    });
+
+    let resumeStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resumeStarted = resolve;
+    });
+    let release!: (result: { status: "success" }) => void;
+    const slowResult = new Promise<{ status: "success" }>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(mastra, "getWorkflow").mockReturnValue({
+      createRun: async () => ({
+        resume: async () => {
+          resumeStarted();
+          return slowResult;
+        },
+      }),
+    } as never);
+
+    vi.useFakeTimers();
+    try {
+      const request = app.request(
+        `http://support.test/support/cases/${caseId}/approve`,
+        { method: "POST" },
+      );
+      await started;
+      await vi.advanceTimersByTimeAsync(30_000);
+      const lease = await runtimeCaseStore.getClientForTests().execute({
+        sql: "SELECT state, lease_until FROM support_dispatch WHERE case_id = ?",
+        args: [caseId],
+      });
+      expect(lease.rows[0]).toMatchObject({ state: "claimed" });
+      expect(Date.parse(String(lease.rows[0].lease_until))).toBeGreaterThan(
+        Date.now(),
+      );
+      expect(await runtimeCaseStore.claimDispatch()).toEqual([]);
+      release({ status: "success" });
+      expect((await request).status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns a conflict without a stale failure projection when approval renewal loses ownership", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      mastra,
+    } = await loadDeterministicRuntime();
+    const caseId = `lost-resume-${crypto.randomUUID()}`;
+    const runId = `lost-resume-run-${crypto.randomUUID()}`;
+    const createdAt = "2026-09-05T00:00:00.000Z";
+    await runtimeCaseStore.acceptInbound(
+      {
+        id: caseId,
+        externalId: `event-${caseId}`,
+        source: "mock-email",
+        status: "new",
+        customer: { email: "alex@example.com" },
+        subject: "Lost approval lease",
+        messages: [
+          {
+            id: `message-${caseId}`,
+            author: "customer",
+            body: "Please refund the duplicate charge.",
+            createdAt,
+          },
+        ],
+        createdAt,
+        updatedAt: createdAt,
+        metadata: {
+          providerBinding: {
+            tenantId: "local-demo",
+            providerKind: "local",
+            providerAccountId: "local-demo",
+            externalConversationId: `conversation-${caseId}`,
+          },
+        },
+      },
+      `event-${caseId}`,
+      runId,
+    );
+    await runtimeCaseStore.update(caseId, {
+      status: "waiting_approval",
+      workflowRunId: runId,
+    });
+    await runtimeCaseStore.getClientForTests().execute({
+      sql: "UPDATE support_dispatch SET state = 'suspended', lease_until = NULL, lease_token = NULL WHERE case_id = ?",
+      args: [caseId],
+    });
+
+    let resumeStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resumeStarted = resolve;
+    });
+    let release!: (result: { status: "success" }) => void;
+    const slowResult = new Promise<{ status: "success" }>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(mastra, "getWorkflow").mockReturnValue({
+      createRun: async () => ({
+        resume: async () => {
+          resumeStarted();
+          return slowResult;
+        },
+      }),
+    } as never);
+
+    vi.useFakeTimers();
+    try {
+      const request = app.request(
+        `http://support.test/support/cases/${caseId}/approve`,
+        { method: "POST" },
+      );
+      await started;
+      await runtimeCaseStore.getClientForTests().execute({
+        sql: "UPDATE support_dispatch SET lease_token = ? WHERE case_id = ?",
+        args: ["current-owner", caseId],
+      });
+      await vi.advanceTimersByTimeAsync(10_000);
+      release({ status: "success" });
+      expect((await request).status).toBe(409);
+      expect(
+        (
+          await runtimeCaseStore.getClientForTests().execute({
+            sql: "SELECT state, lease_token FROM support_dispatch WHERE case_id = ?",
+            args: [caseId],
+          })
+        ).rows[0],
+      ).toMatchObject({ state: "claimed", lease_token: "current-owner" });
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("processing");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("recovers a persisted pre-start Mastra run and then approves it through the real API", async () => {
     const {
       app,

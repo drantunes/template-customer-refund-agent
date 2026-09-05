@@ -109,13 +109,50 @@
       "evidence": "codex/.ryo/runs/RUN-20260905-022531/cycle-limit-hitl-2.json",
       "from": "INTERNAL_REVIEW",
       "to": "PAUSED_HITL"
+    },
+    {
+      "approved_by": "Diego Antunes",
+      "at": "2026-09-05T08:13:42+00:00",
+      "evidence": "HITL-CYCLES-002-002 approved: user Sim authorizes max_fix_cycles4 to5",
+      "from": "PAUSED_HITL",
+      "to": "INTERNAL_REVIEW"
+    },
+    {
+      "at": "2026-09-05T08:13:42+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/decisions.json",
+      "from": "INTERNAL_REVIEW",
+      "to": "FIXING"
+    },
+    {
+      "at": "2026-09-05T08:31:43+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/fix-5.json",
+      "from": "FIXING",
+      "to": "VERIFYING"
+    },
+    {
+      "at": "2026-09-05T08:32:50+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/gates-20260905-083237.json",
+      "from": "VERIFYING",
+      "to": "INTERNAL_REVIEW"
+    },
+    {
+      "at": "2026-09-05T08:44:02+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/pr-readiness.json",
+      "from": "INTERNAL_REVIEW",
+      "to": "PR_READY"
+    },
+    {
+      "at": "2026-09-05T08:44:32+00:00",
+      "evidence": "codex/.ryo/runs/RUN-20260905-022531/publication-hitl.json",
+      "from": "PR_READY",
+      "to": "PAUSED_HITL"
     }
   ],
-  "fix_cycles": 4,
+  "fix_cycles": 5,
   "phase": "PHASE-002",
-  "resume_state": "INTERNAL_REVIEW",
+  "resume_state": "PR_READY",
   "run_id": "RUN-20260905-022531",
   "schema_version": 1,
   "state": "PAUSED_HITL",
-  "updated_at": "2026-09-05T05:43:43+00:00"
+  "updated_at": "2026-09-05T08:44:32+00:00"
 }

@@ -170,6 +170,21 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
     runId: supportCase.workflowRunId,
   });
 
+  let leaseLost = false;
+  const renewLease = async () => {
+    try {
+      if (
+        !(await caseStore.renewDispatchLease(dispatch.id, dispatch.leaseToken!))
+      )
+        leaseLost = true;
+    } catch {
+      // A renewal failure means the caller can no longer safely project the
+      // resume result onto the case.  Do not turn it into a detached rejection.
+      leaseLost = true;
+    }
+  };
+  const heartbeat = setInterval(() => void renewLease(), 10_000);
+  heartbeat.unref();
   try {
     await caseStore.update(caseId, { status: "processing" });
     const result = await run.resume({
@@ -181,18 +196,26 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
       },
       requestContext: c.get("requestContext"),
     });
+    if (leaseLost)
+      return c.json(
+        { error: "Approval resume lost its dispatch lease; reload the case." },
+        409,
+      );
 
     if (result.status === "failed") {
-      await caseStore.update(caseId, {
-        status: "failed",
-        escalationReason: "Resolution failed after approval resume.",
-      });
-      await caseStore.completeDispatch(
+      const failed = await caseStore.failDispatchAndCase(
         dispatch.id,
-        "failed",
+        caseId,
         "Resolution failed after approval resume.",
         dispatch.leaseToken,
       );
+      if (!failed)
+        return c.json(
+          {
+            error: "Approval resume lost its dispatch lease; reload the case.",
+          },
+          409,
+        );
       return c.json({ error: "Resolution failed after resume.", result }, 500);
     }
 
@@ -208,23 +231,24 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
     if (error?.id === "WORKFLOW_RESUME_ALREADY_CLAIMED") {
       return c.json({ error: "This approval was already submitted." }, 409);
     }
-    await caseStore
-      .update(caseId, {
-        status: "failed",
-        escalationReason:
-          error instanceof Error ? error.message : String(error),
-      })
-      .catch(() => undefined);
-    await caseStore.completeDispatch(
-      dispatch.id,
-      "failed",
-      error,
-      dispatch.leaseToken,
-    );
+    if (!leaseLost) {
+      const failed = await caseStore
+        .failDispatchAndCase(dispatch.id, caseId, error, dispatch.leaseToken)
+        .catch(() => false);
+      if (!failed)
+        return c.json(
+          {
+            error: "Approval resume lost its dispatch lease; reload the case.",
+          },
+          409,
+        );
+    }
     return c.json(
       { error: error instanceof Error ? error.message : String(error) },
       500,
     );
+  } finally {
+    clearInterval(heartbeat);
   }
 }
 

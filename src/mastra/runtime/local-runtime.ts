@@ -56,6 +56,7 @@ export class LocalRuntime
   private readonly client: Client;
   private ready?: Promise<void>;
   private readonly seeded = new Map<string, Promise<void>>();
+  private readonly fixtureQueues = new Map<string, Promise<void>>();
   constructor(client: Client = caseStore.getClientForTests()) {
     this.client = client;
   }
@@ -107,15 +108,38 @@ export class LocalRuntime
   async seed(binding: ProviderBinding = defaultLocalBinding()) {
     this.assertLocalBinding(binding);
     const key = `${binding.tenantId}\u0000${binding.providerAccountId}`;
-    let seed = this.seeded.get(key);
-    if (!seed) {
-      seed = this.seedOnce(binding).catch((error) => {
-        this.seeded.delete(key);
-        throw error;
-      });
-      this.seeded.set(key, seed);
+    await this.queueFixtureOperation(key, async () => {
+      let seed = this.seeded.get(key);
+      if (!seed) {
+        seed = this.seedOnce(binding).catch((error) => {
+          this.seeded.delete(key);
+          throw error;
+        });
+        this.seeded.set(key, seed);
+      }
+      await seed;
+    });
+  }
+  /** Seed/reset share an in-process binding queue.  This preserves the reset
+   * transaction boundary and makes a seed queued after reset restore fixtures
+   * instead of returning an obsolete successful memo. */
+  private async queueFixtureOperation<T>(
+    key: string,
+    operation: () => Promise<T>,
+  ) {
+    const prior = this.fixtureQueues.get(key) ?? Promise.resolve();
+    const next = prior.catch(() => undefined).then(operation);
+    const settled = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.fixtureQueues.set(key, settled);
+    try {
+      return await next;
+    } finally {
+      if (this.fixtureQueues.get(key) === settled)
+        this.fixtureQueues.delete(key);
     }
-    await seed;
   }
   private async seedOnce(binding: ProviderBinding) {
     const url = process.env.TURSO_DATABASE_URL || "file:./mastra.db";
@@ -166,47 +190,54 @@ export class LocalRuntime
       throw new Error(
         "Refusing local fixture reset: TURSO_DATABASE_URL must use a file: URL.",
       );
-    await this.ensured();
-    const args = [binding.tenantId, binding.providerAccountId];
-    const tx = await this.client.transaction("write");
-    try {
-      const effects = await tx.execute({
-        sql: "SELECT (SELECT COUNT(*) FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?) + (SELECT COUNT(*) FROM local_deliveries WHERE tenant_id = ? AND provider_account_id = ?) AS total",
-        args: [...args, ...args],
-      });
-      if (Number(effects.rows[0]?.total ?? 0) > 0)
-        throw new Error(
-          "Refusing fixture reset: durable refund/idempotency or delivery effects exist for this binding. Use a new local database rather than deleting history.",
-        );
-      await tx.batch([
-        {
-          sql: "DELETE FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?",
-          args,
-        },
-        {
-          sql: "DELETE FROM local_orders WHERE tenant_id = ? AND provider_account_id = ?",
-          args,
-        },
-        {
-          sql: "DELETE FROM local_subscriptions WHERE tenant_id = ? AND provider_account_id = ?",
-          args,
-        },
-        {
-          sql: "DELETE FROM local_knowledge WHERE tenant_id = ? AND provider_account_id = ?",
-          args,
-        },
-        {
-          sql: "DELETE FROM local_deliveries WHERE tenant_id = ? AND provider_account_id = ?",
-          args,
-        },
-      ]);
-      await tx.commit();
-    } catch (error) {
+    this.assertLocalBinding(binding);
+    const key = `${binding.tenantId}\u0000${binding.providerAccountId}`;
+    await this.queueFixtureOperation(key, async () => {
+      await this.ensured();
+      const args = [binding.tenantId, binding.providerAccountId];
+      const tx = await this.client.transaction("write");
       try {
-        await tx.rollback();
-      } catch {}
-      throw error;
-    }
+        const effects = await tx.execute({
+          sql: "SELECT (SELECT COUNT(*) FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?) + (SELECT COUNT(*) FROM local_deliveries WHERE tenant_id = ? AND provider_account_id = ?) AS total",
+          args: [...args, ...args],
+        });
+        if (Number(effects.rows[0]?.total ?? 0) > 0)
+          throw new Error(
+            "Refusing fixture reset: durable refund/idempotency or delivery effects exist for this binding. Use a new local database rather than deleting history.",
+          );
+        await tx.batch([
+          {
+            sql: "DELETE FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?",
+            args,
+          },
+          {
+            sql: "DELETE FROM local_orders WHERE tenant_id = ? AND provider_account_id = ?",
+            args,
+          },
+          {
+            sql: "DELETE FROM local_subscriptions WHERE tenant_id = ? AND provider_account_id = ?",
+            args,
+          },
+          {
+            sql: "DELETE FROM local_knowledge WHERE tenant_id = ? AND provider_account_id = ?",
+            args,
+          },
+          {
+            sql: "DELETE FROM local_deliveries WHERE tenant_id = ? AND provider_account_id = ?",
+            args,
+          },
+        ]);
+        await tx.commit();
+        // Only invalidate after a committed reset.  A refused reset preserves
+        // both durable history and the existing fixture memo.
+        this.seeded.delete(key);
+      } catch (error) {
+        try {
+          await tx.rollback();
+        } catch {}
+        throw error;
+      }
+    });
   }
   private order(row: Record<string, unknown>): CommerceOrder {
     return {
@@ -710,14 +741,10 @@ export async function recoverLocalWorkflows(
         existing?.status === "cancelled" ||
         existing?.status === "canceled"
       ) {
-        await store.update(dispatch.caseId, {
-          status: "failed",
-          escalationReason: `Workflow recovery failed: ${existing.status}`,
-        });
-        await store.completeDispatch(
+        await store.failDispatchAndCase(
           dispatch.id,
-          "failed",
-          existing.status,
+          dispatch.caseId,
+          `Workflow recovery failed: ${existing.status}`,
           dispatch.leaseToken,
         );
         continue;
@@ -739,34 +766,28 @@ export async function recoverLocalWorkflows(
           ? await run.restart()
           : await run.start({ inputData: { caseId: dispatch.caseId } });
       if (result.status === "failed")
-        await store.update(dispatch.caseId, {
-          status: "failed",
-          escalationReason: "Workflow recovery failed.",
-        });
-      await store.completeDispatch(
-        dispatch.id,
-        result.status === "suspended"
-          ? "suspended"
-          : result.status === "success"
-            ? "completed"
-            : "failed",
-        result.status === "failed" ? "Workflow restart failed." : undefined,
-        dispatch.leaseToken,
-      );
+        await store.failDispatchAndCase(
+          dispatch.id,
+          dispatch.caseId,
+          "Workflow restart failed.",
+          dispatch.leaseToken,
+        );
+      else
+        await store.completeDispatch(
+          dispatch.id,
+          result.status === "suspended" ? "suspended" : "completed",
+          undefined,
+          dispatch.leaseToken,
+        );
     } catch (error) {
       await store
-        .update(dispatch.caseId, {
-          status: "failed",
-          escalationReason:
-            error instanceof Error ? error.message : String(error),
-        })
+        .failDispatchAndCase(
+          dispatch.id,
+          dispatch.caseId,
+          error,
+          dispatch.leaseToken,
+        )
         .catch(() => undefined);
-      await store.completeDispatch(
-        dispatch.id,
-        "failed",
-        error,
-        dispatch.leaseToken,
-      );
     } finally {
       if (heartbeat) clearInterval(heartbeat);
     }

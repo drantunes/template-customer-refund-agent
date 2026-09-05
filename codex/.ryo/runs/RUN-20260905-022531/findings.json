@@ -16,19 +16,23 @@
     {
       "id": "R1-002",
       "severity": "P1",
-      "status": "open",
+      "status": "resolved",
       "file": "src/mastra/runtime/local-runtime.ts",
       "line": 737,
       "body": "Actual post-refund recovery restarts a running snapshot whose request-approval checkpoint is still suspended. Restart reexecutes approval without resumeData, producing waiting_approval despite approval.approved=true and refund already persisted. Expected automatic completion using approved decision and original effect; observed refunds=1,outbox=0,deliveries=0.",
-      "review_evidence": "internal-review-2.json",
-      "resolution_evidence": "Actual crash/restart and bounded second-resume reproduction.",
+      "review_evidence": [
+        "internal-review-3.json",
+        "security-review-3.json"
+      ],
+      "resolution_evidence": "Actual approved and rejected crash/restart preserve decisions/run/effect. Recovered branch returns before requote/saveAction/suspend and checks immutable command. Bounded backfill and concurrent claims have one winner.",
       "additional_locations": [
         {
           "file": "src/mastra/lib/case-store.ts",
           "line": 858,
           "body": "claimDispatchForResume recursively retries forever when an existing nonsuspended dispatch causes UNIQUE failure. Second claim never returned; child externally terminated after700ms."
         }
-      ]
+      ],
+      "resolved_by": "supervisor after fresh independent internal and security reviews"
     },
     {
       "id": "R1-003",
@@ -55,19 +59,23 @@
     {
       "id": "R1-005",
       "severity": "P1",
-      "status": "open",
+      "status": "resolved",
       "file": "src/mastra/server/routes.ts",
       "line": 174,
       "body": "resumeApproval acquires30s lease without heartbeat during run.resume. retryOutbox also mutates case metadata after its fenced UPDATE affects0 rows: stale terminal retry leaves outbox delivered but metadata.deliveryStatus=failed/deliveryError='stale failed'.",
-      "review_evidence": "internal-review-2.json",
-      "resolution_evidence": "Missing resume heartbeat and reproduced stale case mutation.",
+      "review_evidence": [
+        "internal-review-3.json",
+        "security-review-3.json"
+      ],
+      "resolution_evidence": "Real31s heartbeat; renewal failure409 without failure projection; stale dispatch/outbox probes pass. failDispatchAndCase, terminal retryOutbox and exhausted paths project only after winning fenced UPDATE within write transaction.",
       "additional_locations": [
         {
           "file": "src/mastra/lib/case-store.ts",
           "line": 982,
           "body": "Check ownership/rowsAffected before case mutation and preserve same ownership across side effects."
         }
-      ]
+      ],
+      "resolved_by": "supervisor after fresh independent internal and security reviews"
     },
     {
       "id": "R1-006",
@@ -94,12 +102,16 @@
     {
       "id": "R1-008",
       "severity": "P2",
-      "status": "open",
+      "status": "resolved",
       "file": "src/mastra/workflows/ingest-support-case.ts",
       "line": 61,
       "body": "Production event_${source}_${externalId} identity remains globally keyed without tenant/account. Second acceptance in a different binding fails UNIQUE support_events.id.",
-      "review_evidence": "internal-review-2.json",
-      "resolution_evidence": "Production identity cross-binding collision reproduced."
+      "review_evidence": [
+        "internal-review-3.json",
+        "security-review-3.json"
+      ],
+      "resolution_evidence": "Same input physical ID accepted across accounts; scoped hash and logical lookup/legacy fallback preserved.",
+      "resolved_by": "supervisor after fresh independent internal and security reviews"
     },
     {
       "id": "R1-009",
@@ -126,12 +138,16 @@
     {
       "id": "R1-011",
       "severity": "P2",
-      "status": "open",
+      "status": "resolved",
       "file": "src/mastra/providers/loopback-http.ts",
       "line": 169,
       "body": "Delivery facade coerces malformed body object/status17 with String and persists receipt HTTP200. normalizeInbound/listChanged adapter results also lack schemas. Reject malformed request before effect.",
-      "review_evidence": "internal-review-2.json",
-      "resolution_evidence": "Malformed delivery accepted with persisted receipt; schemas partial."
+      "review_evidence": [
+        "internal-review-3.json",
+        "security-review-3.json"
+      ],
+      "resolution_evidence": "Malformed inputs rejected before effect, malformed adapter normalize/list outputs rejected; all four-port schemas inspected.",
+      "resolved_by": "supervisor after fresh independent internal and security reviews"
     },
     {
       "id": "R1-012",
@@ -202,11 +218,16 @@
     {
       "id": "R2-001",
       "severity": "P2",
-      "status": "open",
+      "status": "resolved",
       "file": "src/mastra/runtime/local-runtime.ts",
       "line": 110,
       "body": "Fix4 seed memo is not invalidated by reset. seed/reset/seed in same instance returns success but ORD-1001 remains undefined; fixtures unavailable until process restart.",
-      "review_evidence": "internal-review-2.json"
+      "review_evidence": [
+        "internal-review-3.json",
+        "security-review-3.json"
+      ],
+      "resolved_by": "supervisor after fresh independent internal and security reviews",
+      "resolution_evidence": "Same-runtime seed/reset/seed and concurrent reset/seed restore order; queue per binding invalidates memo only after reset commit; refused reset keeps guard and rollback."
     }
   ]
 }

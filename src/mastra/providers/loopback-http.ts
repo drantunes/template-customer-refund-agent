@@ -100,6 +100,34 @@ const evidenceSchema = z
     version: z.string(),
   })
   .strict();
+const knowledgeDocumentRefSchema = z
+  .object({
+    source: z.string().min(1),
+    version: z.string().min(1),
+    changedAt: z.iso.datetime(),
+  })
+  .strict();
+const normalizedInboundSchema = z
+  .object({
+    binding: bindingSchema,
+    externalId: z.string().min(1),
+    source: z.enum(["mock-email", "chat"]),
+    customer: z
+      .object({ email: z.string().min(1), name: z.string().optional() })
+      .strict(),
+    subject: z.string(),
+    message: z
+      .object({
+        id: z.string().min(1),
+        author: z.literal("customer"),
+        authorName: z.string().optional(),
+        body: z.string(),
+        createdAt: z.iso.datetime(),
+      })
+      .strict(),
+    rawPayload: z.record(z.string(), z.unknown()),
+  })
+  .strict();
 const commandSchema = z
   .object({
     approvalCaseId: z.string().min(1),
@@ -128,55 +156,121 @@ export function createLocalLoopbackFacade(
         return Response.json({ error: "rate limited" }, { status: 429 });
       if (injected === "500")
         return Response.json({ error: "synthetic failure" }, { status: 500 });
-      const body = (await request.json()) as Record<string, unknown> & {
-        binding: ProviderBinding;
-        email?: string;
-        orderId?: string;
-      };
-      if (!bindingSchema.safeParse(body?.binding).success)
+      const parsedBody = z
+        .object({ binding: bindingSchema })
+        .passthrough()
+        .safeParse(await request.json());
+      if (!parsedBody.success)
         return Response.json(
           { error: "invalid provider binding" },
           { status: 400 },
         );
+      const body = parsedBody.data;
       if (request.url.endsWith("/commerce/orders")) {
+        const input = z
+          .object({
+            binding: bindingSchema,
+            email: z.string(),
+            orderId: z.string().optional(),
+          })
+          .strict()
+          .safeParse(body);
+        if (!input.success)
+          return Response.json(
+            { error: "invalid commerce order request" },
+            { status: 400 },
+          );
         const order = await provider
-          .commerce(body.binding)
-          .findOrder(body.binding, body.email ?? "", body.orderId);
+          .commerce(input.data.binding)
+          .findOrder(input.data.binding, input.data.email, input.data.orderId);
         if (injected === "drop-after-commit")
           return new Promise(() => undefined);
-        return Response.json(order ?? null);
+        return Response.json(
+          z.union([orderSchema, z.null()]).parse(order ?? null),
+        );
       }
       if (request.url.endsWith("/commerce/subscriptions")) {
+        const input = z
+          .object({ binding: bindingSchema, email: z.string() })
+          .strict()
+          .safeParse(body);
+        if (!input.success)
+          return Response.json(
+            { error: "invalid subscription request" },
+            { status: 400 },
+          );
         const subscription = await provider
-          .commerce(body.binding)
-          .findSubscription(body.binding, body.email ?? "");
+          .commerce(input.data.binding)
+          .findSubscription(input.data.binding, input.data.email);
         if (injected === "drop-after-commit")
           return new Promise(() => undefined);
-        return Response.json(subscription ?? null);
+        return Response.json(
+          z.union([subscriptionSchema, z.null()]).parse(subscription ?? null),
+        );
       }
       if (request.url.endsWith("/commerce/refunds")) {
+        const input = z
+          .object({ binding: bindingSchema, orderId: z.string().min(1) })
+          .strict()
+          .safeParse(body);
+        if (!input.success)
+          return Response.json(
+            { error: "invalid refunds request" },
+            { status: 400 },
+          );
         const refunds = await provider
-          .commerce(body.binding)
-          .refunds(body.binding, body.orderId ?? "");
+          .commerce(input.data.binding)
+          .refunds(input.data.binding, input.data.orderId);
         if (injected === "drop-after-commit")
           return new Promise(() => undefined);
-        return Response.json(refunds);
+        return Response.json(z.array(refundSchema).parse(refunds));
       }
-      if (request.url.endsWith("/support/normalize"))
+      if (request.url.endsWith("/support/normalize")) {
+        const input = z
+          .object({ binding: bindingSchema, payload: z.unknown() })
+          .strict()
+          .safeParse(body);
+        if (!input.success)
+          return Response.json(
+            { error: "invalid normalize request" },
+            { status: 400 },
+          );
         return Response.json(
-          await provider.support(body.binding).normalizeInbound(body.payload),
+          normalizedInboundSchema.parse(
+            await provider
+              .support(input.data.binding)
+              .normalizeInbound(input.data.payload),
+          ),
         );
-      if (request.url.endsWith("/support/deliver"))
+      }
+      if (request.url.endsWith("/support/deliver")) {
+        const input = z
+          .object({
+            binding: bindingSchema,
+            body: z.string(),
+            status: z.string().min(1),
+            idempotencyKey: z.string().min(1).optional(),
+          })
+          .strict()
+          .safeParse(body);
+        if (!input.success)
+          return Response.json(
+            { error: "invalid delivery request" },
+            { status: 400 },
+          );
         return Response.json(
-          await provider
-            .support(body.binding)
-            .deliver(
-              body.binding,
-              String(body.body ?? ""),
-              String(body.status ?? ""),
-              body.idempotencyKey as string | undefined,
-            ),
+          receiptSchema.parse(
+            await provider
+              .support(input.data.binding)
+              .deliver(
+                input.data.binding,
+                input.data.body,
+                input.data.status,
+                input.data.idempotencyKey,
+              ),
+          ),
         );
+      }
       if (request.url.endsWith("/transactions/quote-refund")) {
         const checked = commandSchema.safeParse(body.command);
         if (!checked.success)
@@ -194,7 +288,9 @@ export function createLocalLoopbackFacade(
             { status: 400 },
           );
         return Response.json(
-          await provider.transactions(body.binding).quoteRefund(command),
+          quoteSchema.parse(
+            await provider.transactions(body.binding).quoteRefund(command),
+          ),
         );
       }
       if (request.url.endsWith("/transactions/issue-refund")) {
@@ -218,30 +314,72 @@ export function createLocalLoopbackFacade(
           .issueRefund(command);
         if (injected === "drop-after-commit")
           return new Promise(() => undefined);
-        return Response.json(effect);
+        return Response.json(effectSchema.parse(effect));
       }
-      if (request.url.endsWith("/knowledge/search"))
+      if (request.url.endsWith("/knowledge/search")) {
+        const input = z
+          .object({
+            binding: bindingSchema,
+            query: z.string(),
+            topK: z.number().int().positive(),
+          })
+          .strict()
+          .safeParse(body);
+        if (!input.success)
+          return Response.json(
+            { error: "invalid knowledge search request" },
+            { status: 400 },
+          );
         return Response.json(
-          await provider
-            .knowledge(body.binding)
-            .search(
-              body.binding,
-              String(body.query ?? ""),
-              Number(body.topK ?? 5),
+          z
+            .array(evidenceSchema)
+            .parse(
+              await provider
+                .knowledge(input.data.binding)
+                .search(input.data.binding, input.data.query, input.data.topK),
             ),
         );
-      if (request.url.endsWith("/knowledge/list-changed"))
+      }
+      if (request.url.endsWith("/knowledge/list-changed")) {
+        const input = z
+          .object({ binding: bindingSchema, since: z.string().optional() })
+          .strict()
+          .safeParse(body);
+        if (!input.success)
+          return Response.json(
+            { error: "invalid knowledge list request" },
+            { status: 400 },
+          );
         return Response.json(
-          await provider
-            .knowledge(body.binding)
-            .listChanged(body.binding, body.since as string | undefined),
+          z
+            .array(knowledgeDocumentRefSchema)
+            .parse(
+              await provider
+                .knowledge(input.data.binding)
+                .listChanged(input.data.binding, input.data.since),
+            ),
         );
-      if (request.url.endsWith("/knowledge/fetch-document"))
+      }
+      if (request.url.endsWith("/knowledge/fetch-document")) {
+        const input = z
+          .object({ binding: bindingSchema, source: z.string().min(1) })
+          .strict()
+          .safeParse(body);
+        if (!input.success)
+          return Response.json(
+            { error: "invalid document request" },
+            { status: 400 },
+          );
         return Response.json(
-          (await provider
-            .knowledge(body.binding)
-            .fetchDocument(body.binding, String(body.source ?? ""))) ?? null,
+          z
+            .union([evidenceSchema, z.null()])
+            .parse(
+              (await provider
+                .knowledge(input.data.binding)
+                .fetchDocument(input.data.binding, input.data.source)) ?? null,
+            ),
         );
+      }
       return Response.json({ error: "not found" }, { status: 404 });
     } catch (error) {
       return Response.json(
@@ -363,7 +501,7 @@ class LoopbackHttpSupportProvider implements SupportChannelProvider {
     };
     return this.http.call<
       Awaited<ReturnType<SupportChannelProvider["normalizeInbound"]>>
-    >("/support/normalize", { binding, payload });
+    >("/support/normalize", { binding, payload }, normalizedInboundSchema);
   }
   deliver(
     binding: ProviderBinding,
@@ -446,7 +584,11 @@ class LoopbackHttpKnowledgeProvider implements KnowledgeProvider {
   listChanged(binding: ProviderBinding, since?: string) {
     return this.http.call<
       Awaited<ReturnType<KnowledgeProvider["listChanged"]>>
-    >("/knowledge/list-changed", { binding, since });
+    >(
+      "/knowledge/list-changed",
+      { binding, since },
+      z.array(knowledgeDocumentRefSchema),
+    );
   }
   fetchDocument(binding: ProviderBinding, source: string) {
     return this.http.call<KnowledgeEvidence | undefined>(

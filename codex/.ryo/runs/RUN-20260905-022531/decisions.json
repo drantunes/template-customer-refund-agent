@@ -15,7 +15,7 @@
     },
     {
       "id": "HITL-CYCLES-002-002",
-      "status": "pending",
+      "status": "approved",
       "requested_action": "Authorize one additional PHASE-002 correction cycle (max_fix_cycles from4 to5), preserving all deterministic gates and fresh independent reviews.",
       "reason": "Cycle4/max4 completed. All20 deterministic gates pass, but fresh internal review reproduced twoP1 and threeP2 blockers; security review resolved allfour previous S1 findings. check-findings blocks PR readiness.",
       "evidence": [
@@ -30,7 +30,26 @@
         "R1-008",
         "R1-011",
         "R2-001"
-      ]
+      ],
+      "approved_by": "Diego Antunes",
+      "approved_at": "2026-09-05T08:13:42.069844+00:00",
+      "authorization": "User replied Sim to explicit request to increase max_fix_cycles4 to5 and correct five blockers; all gates and fresh reviews remain mandatory."
+    },
+    {
+      "id": "HITL-PUBLISH-002-001",
+      "type": "publication-authorization",
+      "status": "pending",
+      "requested_action": "Push reviewed branch ryo/phase-002-local-runtime to origin https://github.com/drantunes/template-customer-refund-agent and open PHASE-002 PR targeting main with title feat: add persistent local provider runtime and body pr-body.md.",
+      "reason": "All gates/reviews and18findings complete. Project instructions reserve authorization of every mutable remote operation to human; phase001 publication authorization covered only phase001 branch/PR.",
+      "evidence": [
+        "pr-readiness.json",
+        "pr-body.md",
+        "gates-20260905-083237.json",
+        "internal-review-3.json",
+        "security-review-3.json",
+        "findings-gate-after-fix5.json"
+      ],
+      "scope": "PHASE-002 publication only; final merge remains separate mandatory authorization."
     }
   ]
 }

@@ -11,6 +11,7 @@ import {
   threadIdForCase,
   triageResultSchema,
   type PolicyMatch,
+  type SupportCase,
 } from "../domain/support-case";
 import { MAX_AUTO_APPROVABLE_REFUND } from "../tools/issue-refund";
 import { caseStore as persistentCaseStore } from "../lib/case-store";
@@ -278,6 +279,70 @@ const approvalOutputSchema = z.object({
   note: z.string().optional(),
 });
 
+const persistedRefundCommandSchema = z.object({
+  approvalCaseId: z.string().min(1),
+  orderId: z.string().min(1),
+  amount: z.number().positive(),
+  currency: z.string().min(1),
+  reason: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+  fingerprint: z.string().min(1),
+});
+
+/** A running snapshot can be restarted after the API accepted a decision but
+ * before Mastra persisted the downstream step.  The restarted checkpoint has
+ * no resumeData, so recover only an already durable decision.  Approval is
+ * tied to the immutable action row, never just mutable case metadata. */
+async function recoveredApprovalDecision(supportCase: SupportCase) {
+  const decision = supportCase.approval;
+  if (!decision) return undefined;
+  if (!decision.approverId)
+    throw new Error("The persisted approval decision is missing its approver.");
+  if (decision.approved) {
+    const stored = persistedRefundCommandSchema.safeParse(
+      (supportCase.metadata as Record<string, unknown>).refundCommand,
+    );
+    if (!stored.success)
+      throw new Error("The persisted refund command is missing.");
+    const command = stored.data;
+    const binding = resolveConfiguredBinding(
+      bindingsForPersistedCase(supportCase).transactions,
+    );
+    const immutable = {
+      binding,
+      approvalCaseId: supportCase.id,
+      orderId: command.orderId,
+      amount: legacyAmountToMoney(command.amount, command.currency),
+      reason: command.reason,
+      idempotencyKey: command.idempotencyKey,
+    };
+    const fingerprint = refundFingerprint(immutable);
+    if (
+      command.approvalCaseId !== supportCase.id ||
+      command.fingerprint !== fingerprint
+    )
+      throw new Error("The persisted refund command fingerprint is invalid.");
+    const action = await persistentCaseStore.getAction(
+      supportCase.id,
+      "refund-command",
+      fingerprint,
+    );
+    if (
+      !action ||
+      JSON.stringify(action) !== JSON.stringify({ ...immutable, fingerprint })
+    )
+      throw new Error(
+        "The persisted approved refund command does not match its immutable action.",
+      );
+  }
+  return {
+    caseId: supportCase.id,
+    approved: decision.approved,
+    approverId: decision.approverId,
+    note: decision.note,
+  };
+}
+
 const requestApprovalStep = createStep({
   id: "request-approval",
   description:
@@ -307,6 +372,8 @@ const requestApprovalStep = createStep({
     }
 
     if (!resumeData) {
+      const recovered = await recoveredApprovalDecision(supportCase);
+      if (recovered) return recovered;
       const amount = draft.refundAmount ?? 0;
       const currency = draft.refundCurrency ?? "USD";
       const command = {

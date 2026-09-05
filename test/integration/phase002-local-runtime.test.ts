@@ -2,6 +2,8 @@ import { rm } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { createClient } from "@libsql/client";
 import {
@@ -89,7 +91,7 @@ async function approvedCommand(store: CaseStore, key: string, minor: number) {
   return command;
 }
 async function runtime() {
-  const path = `/private/tmp/phase002-${crypto.randomUUID()}.db`;
+  const path = join(tmpdir(), `phase002-${crypto.randomUUID()}.db`);
   files.push(path, `${path}-shm`, `${path}-wal`);
   const store = new CaseStore({ url: `file:${path}` });
   await store.list();
@@ -169,13 +171,13 @@ describe("Phase 002 persistent local runtime", () => {
     };
     await store.acceptInbound(
       supportCase("tenant-a", "shared-event"),
-      "event-a",
+      "same-provider-event-id",
       "run-a",
     );
     const caseB = supportCase("tenant-b", "shared-event");
     caseB.metadata.providerBinding = secondBinding;
     await expect(
-      store.acceptInbound(caseB, "event-b", "run-b"),
+      store.acceptInbound(caseB, "same-provider-event-id", "run-b"),
     ).resolves.toEqual({
       caseId: "tenant-b",
       isNew: true,
@@ -420,8 +422,22 @@ describe("Phase 002 persistent local runtime", () => {
     await store.close();
   });
 
+  it("invalidates a committed fixture memo so seed-reset-seed restores the same binding", async () => {
+    const { store, local } = await runtime();
+    await local.seed(binding);
+    await local.reset(binding);
+    expect(
+      await local.findOrder(binding, "alex@example.com", "ORD-1001"),
+    ).toBeUndefined();
+    await local.seed(binding);
+    expect(
+      await local.findOrder(binding, "alex@example.com", "ORD-1001"),
+    ).toMatchObject({ orderId: "ORD-1001" });
+    await store.close();
+  });
+
   it("keeps CLI fixtures and delivery receipts intact when reset sees a durable effect", async () => {
-    const path = `/private/tmp/phase002-cli-${crypto.randomUUID()}.db`;
+    const path = join(tmpdir(), `phase002-cli-${crypto.randomUUID()}.db`);
     files.push(path, `${path}-shm`, `${path}-wal`);
     const environment = {
       ...process.env,
@@ -550,6 +566,46 @@ describe("Phase 002 persistent local runtime", () => {
     await store.close();
   });
 
+  it("rejects malformed loopback delivery requests before invoking the provider", async () => {
+    const { store, local } = await runtime();
+    await local.seed(binding);
+    let deliveriesAttempted = 0;
+    const support = local.support(binding);
+    const facade = createLocalLoopbackFacade({
+      support: () => ({
+        kind: "local",
+        normalizeInbound: support.normalizeInbound.bind(support),
+        deliver: async (...args) => {
+          deliveriesAttempted += 1;
+          return support.deliver(...args);
+        },
+        addInternalNote: support.addInternalNote.bind(support),
+        updateStatus: support.updateStatus.bind(support),
+      }),
+      commerce: () => local,
+      transactions: () => local,
+      knowledge: () => local,
+    });
+    const response = await facade(
+      new Request("http://loopback/support/deliver", {
+        body: JSON.stringify({
+          binding,
+          body: { not: "a string" },
+          status: 17,
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect(deliveriesAttempted).toBe(0);
+    const deliveries = await store
+      .getClientForTests()
+      .execute("SELECT COUNT(*) AS total FROM local_deliveries");
+    expect(deliveries.rows[0]).toMatchObject({ total: 0 });
+    await store.close();
+  });
+
   it("restarts claimable work but leaves suspended approvals untouched", async () => {
     const { store } = await runtime();
     const active = supportCase(`recovery-active-${crypto.randomUUID()}`);
@@ -670,6 +726,21 @@ describe("Phase 002 persistent local runtime", () => {
       runId: "legacy-run",
       state: "claimed",
     });
+    await store.close();
+  });
+
+  it("returns a bounded conflict when a resume dispatch was already advanced", async () => {
+    const { store } = await runtime();
+    const support = supportCase("resume-conflict");
+    support.status = "waiting_approval";
+    await store.acceptInbound(support, "resume-conflict-event", "resume-run");
+    await store.getClientForTests().execute({
+      sql: "UPDATE support_dispatch SET state = 'claimed' WHERE case_id = ?",
+      args: [support.id],
+    });
+    await expect(
+      store.claimDispatchForResume(support.id, "resume-run"),
+    ).resolves.toBeUndefined();
     await store.close();
   });
 
@@ -865,6 +936,71 @@ describe("Phase 002 persistent local runtime", () => {
     await store.close();
   });
 
+  it("does not let a stale terminal outbox retry overwrite a delivered case projection", async () => {
+    const { store } = await runtime();
+    await store.create(supportCase("stale-delivery-case"));
+    await store.enqueueDelivery({
+      id: "stale-delivery",
+      caseId: "stale-delivery-case",
+      binding,
+      body: "reply",
+      status: "resolved",
+    });
+    const [claim] = await store.claimOutbox();
+    await store.completeOutbox(
+      claim.id,
+      { receipt: "current" },
+      claim.leaseToken,
+    );
+    await expect(
+      store.retryOutbox(claim.id, "stale failed", true, claim.leaseToken),
+    ).resolves.toBe(false);
+    expect(
+      (
+        await store.getClientForTests().execute({
+          sql: "SELECT state FROM support_outbox WHERE id = ?",
+          args: [claim.id],
+        })
+      ).rows[0],
+    ).toMatchObject({ state: "delivered" });
+    expect(
+      (await store.get("stale-delivery-case"))?.metadata,
+    ).not.toMatchObject({
+      deliveryStatus: "failed",
+    });
+    await store.close();
+  });
+
+  it("does not let a stale dispatch failure overwrite the current lease owner case", async () => {
+    const { store } = await runtime();
+    const support = supportCase("stale-dispatch-case");
+    await store.acceptInbound(support, "stale-dispatch-event", "stale-run");
+    const [first] = await store.claimDispatch();
+    await store.getClientForTests().execute({
+      sql: "UPDATE support_dispatch SET lease_until = ? WHERE id = ?",
+      args: ["2000-01-01T00:00:00.000Z", first.id],
+    });
+    const [second] = await store.claimDispatch();
+    await expect(
+      store.failDispatchAndCase(
+        first.id,
+        support.id,
+        "stale worker failed",
+        first.leaseToken,
+      ),
+    ).resolves.toBe(false);
+    expect((await store.get(support.id))?.status).toBe("new");
+    expect(
+      (
+        await store.getClientForTests().execute({
+          sql: "SELECT state, lease_token FROM support_dispatch WHERE id = ?",
+          args: [first.id],
+        })
+      ).rows[0],
+    ).toMatchObject({ state: "claimed", lease_token: second.leaseToken });
+    await store.close();
+  });
+
   it("uses currency-specific decimal exponents at the legacy boundary", () => {
     expect(legacyAmountToMoney(100, "JPY")).toEqual({
       currency: "JPY",
@@ -893,5 +1029,25 @@ describe("Phase 002 persistent local runtime", () => {
       }),
     );
     await expect(malformed.findOrder(binding, "", "ORD")).rejects.toThrow();
+  });
+
+  it("rejects malformed support normalization and knowledge-list HTTP responses", async () => {
+    const malformed = new LoopbackHttpProviderRegistry(async (request) => {
+      if (request.url.endsWith("/support/normalize"))
+        return Response.json({
+          binding,
+          externalId: "event",
+          source: "mock-email",
+          customer: { email: "alex@example.com" },
+          subject: "missing message and raw payload",
+        });
+      return Response.json([{ source: "policy", version: "v1" }]);
+    });
+    await expect(
+      malformed.support(binding).normalizeInbound({ externalId: "event" }),
+    ).rejects.toThrow();
+    await expect(
+      malformed.knowledge(binding).listChanged(binding),
+    ).rejects.toThrow();
   });
 });
