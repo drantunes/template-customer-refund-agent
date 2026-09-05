@@ -160,7 +160,7 @@ export function Portal() {
 
   function applySample(mock: MockEmailPayload) {
     setName(mock.fromName ?? "");
-    setSubject(mock.subject);
+    setSubject(mock.subject ?? "Support request");
     setBody(mock.body);
   }
 

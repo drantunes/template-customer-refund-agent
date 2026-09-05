@@ -1,10 +1,10 @@
-import type { PolicyDocument } from './types';
-import { refundPolicy } from './docs/refund-policy';
-import { duplicateChargePolicy } from './docs/duplicate-charge-policy';
-import { damagedItemPolicy } from './docs/damaged-item-policy';
-import { shippingPolicy } from './docs/shipping-policy';
-import { subscriptionCancellationPolicy } from './docs/subscription-cancellation-policy';
-import { escalationPolicy } from './docs/escalation-policy';
+import type { PolicyDocument } from "./types";
+import { refundPolicy } from "./docs/refund-policy";
+import { duplicateChargePolicy } from "./docs/duplicate-charge-policy";
+import { damagedItemPolicy } from "./docs/damaged-item-policy";
+import { shippingPolicy } from "./docs/shipping-policy";
+import { subscriptionCancellationPolicy } from "./docs/subscription-cancellation-policy";
+import { escalationPolicy } from "./docs/escalation-policy";
 
 export type { PolicyDocument };
 

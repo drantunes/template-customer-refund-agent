@@ -1,8 +1,8 @@
-import type { PolicyDocument } from '../types';
+import type { PolicyDocument } from "../types";
 
 export const shippingPolicy: PolicyDocument = {
-  title: 'Shipping & Order Status Policy',
-  source: 'shipping-policy',
+  title: "Shipping & Order Status Policy",
+  source: "shipping-policy",
   text: `# Shipping & Order Status Policy
 
 - Standard shipping takes 5-7 business days from the order placement date. Expedited shipping takes 2-3 business days.

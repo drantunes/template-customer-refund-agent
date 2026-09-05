@@ -14,15 +14,13 @@ A Vite + React + [shadcn/ui](https://ui.shadcn.com) app that shows the `mastra-c
 From the project root, in one terminal:
 
 ```bash
-bun run dev # starts the Mastra API on :4111
+npm run dev # starts the Mastra API on :4111
 ```
 
 In another terminal:
 
 ```bash
-cd web
-bun install
-bun run dev # starts the UI on :5173, proxying /support/* to :4111
+npm run --workspace support-refund-agent-web dev # starts the UI on :5173, proxying /support/* to :4111
 ```
 
 Open [http://localhost:5173](http://localhost:5173).

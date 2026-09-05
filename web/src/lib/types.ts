@@ -1,150 +1,23 @@
-// Mirrors src/mastra/domain/support-case.ts on the API side. Kept as plain
-// TS types (not shared/imported) since the web app is a separate deployable
-// package from the Mastra app.
+import type {
+  InboundSupportResponse,
+  MockEmailPayload,
+  SupportCaseDto,
+} from "../../../src/mastra/server/contracts";
 
-export type CaseStatus =
-  | "new"
-  | "processing"
-  | "waiting_approval"
-  | "resolved"
-  | "escalated"
-  | "failed";
-
-export interface CaseMessage {
-  id: string;
-  author: "customer" | "agent" | "internal";
-  authorName?: string;
-  body: string;
-  createdAt: string;
-}
-
-export interface TriageResult {
-  intent:
-    | "refund_request"
-    | "duplicate_charge"
-    | "order_status"
-    | "cancellation"
-    | "damaged_item"
-    | "account_issue"
-    | "other";
-  urgency: "low" | "normal" | "high" | "critical";
-  sentiment: "positive" | "neutral" | "negative" | "angry";
-  requiresHumanReview: boolean;
-  confidence: number;
-  rationale: string;
-}
-
-export interface PolicyMatch {
-  title: string;
-  text: string;
-  source: string;
-  score: number;
-}
-
-export interface OrderLookup {
-  found: boolean;
-  order?: {
-    orderId: string;
-    customerEmail: string;
-    product: string;
-    amount: number;
-    currency: string;
-    status: "fulfilled" | "shipped" | "processing" | "cancelled" | "refunded";
-    chargeCount: number;
-    placedAt: string;
-  };
-}
-
-export interface SubscriptionLookup {
-  found: boolean;
-  subscription?: {
-    subscriptionId: string;
-    customerEmail: string;
-    plan: string;
-    amount: number;
-    currency: string;
-    status: "active" | "cancelled" | "past_due";
-    renewsAt: string;
-  };
-}
-
-export interface RefundHistory {
-  refunds: Array<{
-    refundId: string;
-    orderId: string;
-    amount: number;
-    currency: string;
-    reason: string;
-    issuedAt: string;
-  }>;
-}
-
-export interface DraftResolution {
-  draftResponse: string;
-  citedSources: string[];
-  recommendRefund: boolean;
-  refundAmount?: number;
-  refundCurrency?: string;
-  refundReason?: string;
-  requiresEscalation: boolean;
-  escalationReason?: string;
-}
-
-export interface ApprovalDecision {
-  approved: boolean;
-  approverId: string;
-  note?: string;
-}
-
-export interface RefundResult {
-  refundId: string;
-  orderId: string;
-  amount: number;
-  currency: string;
-  status: "executed" | "skipped";
-  idempotencyKey: string;
-  executedAt: string;
-}
-
-export interface CaseFeedback {
-  rating: "up" | "down";
-  comment?: string;
-  submittedAt: string;
-}
-
-export interface SupportCase {
-  id: string;
-  externalId: string;
-  source: "mock-email" | "zendesk" | "chat";
-  customer: { email: string; name?: string };
-  subject: string;
-  messages: CaseMessage[];
-  status: CaseStatus;
-  createdAt: string;
-  updatedAt: string;
-  triage?: TriageResult;
-  policyMatches?: PolicyMatch[];
-  orderLookup?: OrderLookup;
-  subscriptionLookup?: SubscriptionLookup;
-  refundHistory?: RefundHistory;
-  draft?: DraftResolution;
-  approval?: ApprovalDecision;
-  refundResult?: RefundResult;
-  finalResponse?: string;
-  escalationReason?: string;
-  workflowRunId?: string;
-  traceId?: string;
-  feedback?: CaseFeedback;
-}
-
-export interface MockEmailPayload {
-  externalId: string;
-  from: string;
-  fromName?: string;
-  subject: string;
-  body: string;
-  receivedAt?: string;
-}
+/** These DTOs are inferred from the API's Zod boundary, not manually duplicated. */
+export type { InboundSupportResponse, MockEmailPayload };
+export type SupportCase = SupportCaseDto;
+export type CaseStatus = SupportCase["status"];
+export type CaseMessage = SupportCase["messages"][number];
+export type TriageResult = NonNullable<SupportCase["triage"]>;
+export type PolicyMatch = NonNullable<SupportCase["policyMatches"]>[number];
+export type OrderLookup = NonNullable<SupportCase["orderLookup"]>;
+export type SubscriptionLookup = NonNullable<SupportCase["subscriptionLookup"]>;
+export type RefundHistory = NonNullable<SupportCase["refundHistory"]>;
+export type DraftResolution = NonNullable<SupportCase["draft"]>;
+export type ApprovalDecision = NonNullable<SupportCase["approval"]>;
+export type RefundResult = NonNullable<SupportCase["refundResult"]>;
+export type CaseFeedback = NonNullable<SupportCase["feedback"]>;
 
 // Mirrors src/mastra/lib/monitoring.ts on the API side.
 

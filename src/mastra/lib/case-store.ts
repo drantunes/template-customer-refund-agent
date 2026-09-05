@@ -1,5 +1,5 @@
-import { createClient, type Client } from '@libsql/client';
-import type { SupportCase } from '../domain/support-case';
+import { createClient, type Client } from "@libsql/client";
+import type { SupportCase } from "../domain/support-case";
 
 /**
  * Case store backed by libSQL - the same database as the rest of this app's
@@ -13,7 +13,7 @@ import type { SupportCase } from '../domain/support-case';
  */
 function resolveLibsqlConfig() {
   return {
-    url: process.env.TURSO_DATABASE_URL || 'file:./mastra.db',
+    url: process.env.TURSO_DATABASE_URL || "file:./mastra.db",
     authToken: process.env.TURSO_AUTH_TOKEN || undefined,
   };
 }
@@ -48,10 +48,13 @@ class CaseStore {
     return JSON.parse(data as string) as SupportCase;
   }
 
-  async findByExternalId(source: string, externalId: string): Promise<SupportCase | undefined> {
+  async findByExternalId(
+    source: string,
+    externalId: string,
+  ): Promise<SupportCase | undefined> {
     await this.ready;
     const result = await this.client.execute({
-      sql: 'SELECT data FROM support_cases WHERE source = ? AND external_id = ?',
+      sql: "SELECT data FROM support_cases WHERE source = ? AND external_id = ?",
       args: [source, externalId],
     });
     const row = result.rows[0];
@@ -78,7 +81,7 @@ class CaseStore {
   async get(id: string): Promise<SupportCase | undefined> {
     await this.ready;
     const result = await this.client.execute({
-      sql: 'SELECT data FROM support_cases WHERE id = ?',
+      sql: "SELECT data FROM support_cases WHERE id = ?",
       args: [id],
     });
     const row = result.rows[0];
@@ -96,13 +99,16 @@ class CaseStore {
       updatedAt: new Date().toISOString(),
     };
     await this.client.execute({
-      sql: 'UPDATE support_cases SET data = ?, updated_at = ? WHERE id = ?',
+      sql: "UPDATE support_cases SET data = ?, updated_at = ? WHERE id = ?",
       args: [JSON.stringify(updated), updated.updatedAt, id],
     });
     return updated;
   }
 
-  async appendMessage(id: string, message: SupportCase['messages'][number]): Promise<SupportCase> {
+  async appendMessage(
+    id: string,
+    message: SupportCase["messages"][number],
+  ): Promise<SupportCase> {
     const existing = await this.get(id);
     if (!existing) {
       throw new Error(`Support case not found: ${id}`);
@@ -112,8 +118,10 @@ class CaseStore {
 
   async list(): Promise<SupportCase[]> {
     await this.ready;
-    const result = await this.client.execute('SELECT data FROM support_cases ORDER BY created_at DESC');
-    return result.rows.map(row => this.rowToCase(row.data));
+    const result = await this.client.execute(
+      "SELECT data FROM support_cases ORDER BY created_at DESC",
+    );
+    return result.rows.map((row) => this.rowToCase(row.data));
   }
 }
 

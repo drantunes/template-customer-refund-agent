@@ -1,149 +1,188 @@
-import { registerApiRoute } from '@mastra/core/server';
-import { caseStore } from '../lib/case-store';
-import { REQUEST_APPROVAL_STEP_ID } from '../workflows/resolve-support-case';
-import { computeMonitoringSummary } from '../lib/monitoring';
-import type { CaseFeedback } from '../domain/support-case';
-import { zendeskSupportAdapter, verifyZendeskWebhookSignature } from '../integrations/zendesk-support';
+import { registerApiRoute } from "@mastra/core/server";
+import { caseStore } from "../lib/case-store";
+import { REQUEST_APPROVAL_STEP_ID } from "../workflows/resolve-support-case";
+import { computeMonitoringSummary } from "../lib/monitoring";
+import type { CaseFeedback } from "../domain/support-case";
+import {
+  approvalRequestSchema,
+  caseListResponseSchema,
+  errorResponseSchema,
+  feedbackRequestSchema,
+  inboundSupportResponseSchema,
+  mockEmailPayloadSchema,
+  reindexResponseSchema,
+  supportOpenApiDocument,
+} from "./contracts";
 
 /**
  * POST /support/inbound
  *
- * The single ingestion endpoint for this template. Point your Zendesk trigger webhook here and
- * set `SUPPORT_SOURCE` accordingly (see `src/mastra/integrations/`); by default
- * (`SUPPORT_SOURCE=mock`) it accepts a mock inbound email payload shaped like `MockEmailPayload`.
- *
- * When `SUPPORT_SOURCE=zendesk`, every request must carry a valid `X-Zendesk-Webhook-Signature` /
- * `X-Zendesk-Webhook-Signature-Timestamp` pair (see `verifyZendeskWebhookSignature` in
- * `src/mastra/integrations/zendesk-support.ts`), verified against the raw body read below - this
- * is why the body is read with `c.req.text()` first instead of `c.req.json()`.
+ * The single inbound endpoint accepts the built-in mock email payload. External support adapters
+ * are deliberately absent from this Phase 001 baseline; a configured unsupported source returns
+ * a clear diagnostic from the workflow rather than falling back to mock.
  */
-export const supportInboundRoute = registerApiRoute('/support/inbound', {
-  method: 'POST',
-  handler: async c => {
+export const supportInboundRoute = registerApiRoute("/support/inbound", {
+  method: "POST",
+  handler: async (c) => {
     const rawBody = await c.req.text();
 
-    if ((process.env.SUPPORT_SOURCE?.trim().toLowerCase() || 'mock') === 'zendesk') {
-      let secret: string;
-      try {
-        secret = zendeskSupportAdapter.webhookSecret;
-      } catch (error) {
-        return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
-      }
-
-      const signature = c.req.header('x-zendesk-webhook-signature');
-      const timestamp = c.req.header('x-zendesk-webhook-signature-timestamp');
-      const valid = verifyZendeskWebhookSignature({ signature, timestamp, rawBody, secret });
-      if (!valid) {
-        return c.json({ error: 'Invalid or missing Zendesk webhook signature.' }, 401);
-      }
-    }
-
-    let payload: unknown;
+    let rawPayload: unknown;
     try {
-      payload = JSON.parse(rawBody);
+      rawPayload = JSON.parse(rawBody);
     } catch {
-      return c.json({ error: 'Invalid JSON body.' }, 400);
+      return c.json(
+        errorResponseSchema.parse({ error: "Invalid JSON body." }),
+        400,
+      );
+    }
+    const payloadResult = mockEmailPayloadSchema.safeParse(rawPayload);
+    if (!payloadResult.success) {
+      return c.json(
+        errorResponseSchema.parse({ error: "Invalid mock inbound payload." }),
+        400,
+      );
     }
 
-    const mastra = c.get('mastra');
-    const ingestWorkflow = mastra.getWorkflow('ingestSupportCaseWorkflow');
+    const mastra = c.get("mastra");
+    const ingestWorkflow = mastra.getWorkflow("ingestSupportCaseWorkflow");
     const run = await ingestWorkflow.createRun();
 
     let result;
     try {
-      result = await run.start({ inputData: { payload } });
+      result = await run.start({ inputData: { payload: payloadResult.data } });
     } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+      return c.json(
+        errorResponseSchema.parse({
+          error: error instanceof Error ? error.message : String(error),
+        }),
+        400,
+      );
     }
 
-    if (result.status !== 'success') {
-      return c.json({ error: 'Ingestion failed.', result }, 500);
+    if (result.status !== "success") {
+      return c.json(
+        errorResponseSchema.parse({ error: "Ingestion failed." }),
+        500,
+      );
     }
 
-    return c.json({
-      caseId: result.result.caseId,
-      workflowRunId: result.result.workflowRunId,
-      status: 'processing',
-    });
+    return c.json(
+      inboundSupportResponseSchema.parse({
+        caseId: result.result.caseId,
+        workflowRunId: result.result.workflowRunId,
+        status: "processing",
+      }),
+    );
   },
 });
 
 /** GET /support/cases - case inbox for the demo UI, newest first. Optionally filtered by `?email=` for the customer portal. */
-export const supportCasesListRoute = registerApiRoute('/support/cases', {
-  method: 'GET',
-  handler: async c => {
-    const email = c.req.query('email');
+export const supportCasesListRoute = registerApiRoute("/support/cases", {
+  method: "GET",
+  handler: async (c) => {
+    const email = c.req.query("email");
     const allCases = await caseStore.list();
     const cases = email
-      ? allCases.filter(supportCase => supportCase.customer.email.toLowerCase() === email.toLowerCase())
+      ? allCases.filter(
+          (supportCase) =>
+            supportCase.customer.email.toLowerCase() === email.toLowerCase(),
+        )
       : allCases;
-    return c.json({ cases });
+    return c.json(caseListResponseSchema.parse({ cases }));
   },
 });
 
-export const supportCaseDetailRoute = registerApiRoute('/support/cases/:caseId', {
-  method: 'GET',
-  handler: async c => {
-    const supportCase = await caseStore.get(c.req.param('caseId'));
-    if (!supportCase) return c.json({ error: 'Case not found.' }, 404);
-    return c.json(supportCase);
+export const supportCaseDetailRoute = registerApiRoute(
+  "/support/cases/:caseId",
+  {
+    method: "GET",
+    handler: async (c) => {
+      const supportCase = await caseStore.get(c.req.param("caseId"));
+      if (!supportCase) return c.json({ error: "Case not found." }, 404);
+      return c.json(supportCase);
+    },
   },
-});
+);
 
 async function resumeApproval(c: any, approved: boolean) {
-  const caseId = c.req.param('caseId');
+  const caseId = c.req.param("caseId");
   const supportCase = await caseStore.get(caseId);
-  if (!supportCase) return c.json({ error: 'Case not found.' }, 404);
+  if (!supportCase) return c.json({ error: "Case not found." }, 404);
   if (!supportCase.workflowRunId) {
-    return c.json({ error: 'This case has no in-flight resolution workflow run.' }, 409);
+    return c.json(
+      { error: "This case has no in-flight resolution workflow run." },
+      409,
+    );
   }
-  if (supportCase.status !== 'waiting_approval') {
-    return c.json({ error: `Case is not waiting for approval (status: ${supportCase.status}).` }, 409);
+  if (supportCase.status !== "waiting_approval") {
+    return c.json(
+      {
+        error: `Case is not waiting for approval (status: ${supportCase.status}).`,
+      },
+      409,
+    );
   }
 
   let body: { approverId?: string; note?: string } = {};
   try {
-    body = await c.req.json();
+    const parsed = approvalRequestSchema.safeParse(await c.req.json());
+    if (!parsed.success)
+      return c.json(
+        errorResponseSchema.parse({ error: "Invalid approval payload." }),
+        400,
+      );
+    body = parsed.data;
   } catch {
     // no-op
   }
 
-  const mastra = c.get('mastra');
-  const resolveWorkflow = mastra.getWorkflow('resolveSupportCaseWorkflow');
-  const run = await resolveWorkflow.createRun({ runId: supportCase.workflowRunId });
+  const mastra = c.get("mastra");
+  const resolveWorkflow = mastra.getWorkflow("resolveSupportCaseWorkflow");
+  const run = await resolveWorkflow.createRun({
+    runId: supportCase.workflowRunId,
+  });
 
   try {
     const result = await run.resume({
       step: REQUEST_APPROVAL_STEP_ID,
       resumeData: {
         approved,
-        approverId: body.approverId ?? 'demo-support-lead',
+        approverId: body.approverId ?? "demo-support-lead",
         note: body.note,
       },
     });
 
-    if (result.status === 'failed') {
-      return c.json({ error: 'Resolution failed after resume.', result }, 500);
+    if (result.status === "failed") {
+      return c.json({ error: "Resolution failed after resume.", result }, 500);
     }
 
     return c.json(await caseStore.get(caseId));
   } catch (error: any) {
-    if (error?.id === 'WORKFLOW_RESUME_ALREADY_CLAIMED') {
-      return c.json({ error: 'This approval was already submitted.' }, 409);
+    if (error?.id === "WORKFLOW_RESUME_ALREADY_CLAIMED") {
+      return c.json({ error: "This approval was already submitted." }, 409);
     }
-    return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    return c.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      500,
+    );
   }
 }
 
-export const supportCaseApproveRoute = registerApiRoute('/support/cases/:caseId/approve', {
-  method: 'POST',
-  handler: async c => resumeApproval(c, true),
-});
+export const supportCaseApproveRoute = registerApiRoute(
+  "/support/cases/:caseId/approve",
+  {
+    method: "POST",
+    handler: async (c) => resumeApproval(c, true),
+  },
+);
 
-export const supportCaseRejectRoute = registerApiRoute('/support/cases/:caseId/reject', {
-  method: 'POST',
-  handler: async c => resumeApproval(c, false),
-});
+export const supportCaseRejectRoute = registerApiRoute(
+  "/support/cases/:caseId/reject",
+  {
+    method: "POST",
+    handler: async (c) => resumeApproval(c, false),
+  },
+);
 
 /**
  * POST /support/cases/:caseId/feedback
@@ -153,50 +192,72 @@ export const supportCaseRejectRoute = registerApiRoute('/support/cases/:caseId/r
  * API (`mastra.observability.addFeedback`) best-effort so it shows up alongside the case's
  * trace when the configured storage provider supports the observability feedback domain.
  */
-export const supportCaseFeedbackRoute = registerApiRoute('/support/cases/:caseId/feedback', {
-  method: 'POST',
-  handler: async c => {
-    const caseId = c.req.param('caseId');
-    const supportCase = await caseStore.get(caseId);
-    if (!supportCase) return c.json({ error: 'Case not found.' }, 404);
+export const supportCaseFeedbackRoute = registerApiRoute(
+  "/support/cases/:caseId/feedback",
+  {
+    method: "POST",
+    handler: async (c) => {
+      const caseId = c.req.param("caseId");
+      const supportCase = await caseStore.get(caseId);
+      if (!supportCase) return c.json({ error: "Case not found." }, 404);
 
-    let body: { rating?: string; comment?: string } = {};
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ error: 'Invalid JSON body.' }, 400);
-    }
-
-    if (body.rating !== 'up' && body.rating !== 'down') {
-      return c.json({ error: "rating must be 'up' or 'down'." }, 400);
-    }
-
-    const feedback: CaseFeedback = {
-      rating: body.rating,
-      comment: body.comment,
-      submittedAt: new Date().toISOString(),
-    };
-    const updated = await caseStore.update(caseId, { feedback });
-
-    const mastra = c.get('mastra');
-    if (supportCase.traceId && mastra.observability.addFeedback) {
+      let body: { rating?: string; comment?: string } = {};
       try {
-        await mastra.observability.addFeedback({
-          traceId: supportCase.traceId,
-          feedback: {
-            feedbackSource: 'user',
-            feedbackType: 'thumbs',
-            value: feedback.rating === 'up' ? 1 : -1,
-            comment: feedback.comment,
-          },
-        });
-      } catch (error) {
-        mastra.getLogger()?.warn('Failed to forward case feedback to observability storage', { error, caseId });
+        body = await c.req.json();
+      } catch {
+        return c.json(
+          errorResponseSchema.parse({ error: "Invalid JSON body." }),
+          400,
+        );
       }
-    }
 
-    return c.json(updated);
+      const parsed = feedbackRequestSchema.safeParse(body);
+      if (!parsed.success) {
+        return c.json(
+          errorResponseSchema.parse({
+            error: "rating must be 'up' or 'down'.",
+          }),
+          400,
+        );
+      }
+
+      const feedback: CaseFeedback = {
+        rating: parsed.data.rating,
+        comment: parsed.data.comment,
+        submittedAt: new Date().toISOString(),
+      };
+      const updated = await caseStore.update(caseId, { feedback });
+
+      const mastra = c.get("mastra");
+      if (supportCase.traceId && mastra.observability.addFeedback) {
+        try {
+          await mastra.observability.addFeedback({
+            traceId: supportCase.traceId,
+            feedback: {
+              feedbackSource: "user",
+              feedbackType: "thumbs",
+              value: feedback.rating === "up" ? 1 : -1,
+              comment: feedback.comment,
+            },
+          });
+        } catch (error) {
+          mastra
+            .getLogger()
+            ?.warn("Failed to forward case feedback to observability storage", {
+              error,
+              caseId,
+            });
+        }
+      }
+
+      return c.json(updated);
+    },
   },
+);
+
+export const supportOpenApiRoute = registerApiRoute("/support/openapi.json", {
+  method: "GET",
+  handler: async (c) => c.json(supportOpenApiDocument),
 });
 
 /**
@@ -208,28 +269,37 @@ export const supportCaseFeedbackRoute = registerApiRoute('/support/cases/:caseId
  * latency/reliability are derived from the spans Mastra already records for every agent and
  * tool call, read via the observability storage domain (see `src/mastra/lib/monitoring.ts`).
  */
-export const supportMonitoringSummaryRoute = registerApiRoute('/support/monitoring/summary', {
-  method: 'GET',
-  handler: async c => {
-    const mastra = c.get('mastra');
-    const summary = await computeMonitoringSummary(mastra);
-    return c.json(summary);
+export const supportMonitoringSummaryRoute = registerApiRoute(
+  "/support/monitoring/summary",
+  {
+    method: "GET",
+    handler: async (c) => {
+      const mastra = c.get("mastra");
+      const summary = await computeMonitoringSummary(mastra);
+      return c.json(summary);
+    },
   },
-});
+);
 
-export const supportKnowledgeReindexRoute = registerApiRoute('/support/knowledge/reindex', {
-  method: 'POST',
-  handler: async c => {
-    const mastra = c.get('mastra');
-    const workflow = mastra.getWorkflow('indexSupportKnowledgeWorkflow');
-    const run = await workflow.createRun();
-    const result = await run.start({ inputData: {} });
-    if (result.status !== 'success') {
-      return c.json({ error: 'Indexing failed.', result }, 500);
-    }
-    return c.json(result.result);
+export const supportKnowledgeReindexRoute = registerApiRoute(
+  "/support/knowledge/reindex",
+  {
+    method: "POST",
+    handler: async (c) => {
+      const mastra = c.get("mastra");
+      const workflow = mastra.getWorkflow("indexSupportKnowledgeWorkflow");
+      const run = await workflow.createRun();
+      const result = await run.start({ inputData: {} });
+      if (result.status !== "success") {
+        return c.json(
+          errorResponseSchema.parse({ error: "Indexing failed." }),
+          500,
+        );
+      }
+      return c.json(reindexResponseSchema.parse(result.result));
+    },
   },
-});
+);
 
 export const supportRoutes = [
   supportInboundRoute,
@@ -240,4 +310,5 @@ export const supportRoutes = [
   supportCaseFeedbackRoute,
   supportMonitoringSummaryRoute,
   supportKnowledgeReindexRoute,
+  supportOpenApiRoute,
 ];
