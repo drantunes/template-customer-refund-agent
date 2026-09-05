@@ -50,7 +50,10 @@ export const supportInboundRoute = registerApiRoute("/support/inbound", {
 
     let result;
     try {
-      result = await run.start({ inputData: { payload: payloadResult.data } });
+      result = await run.start({
+        inputData: { payload: payloadResult.data },
+        requestContext: c.get("requestContext"),
+      });
     } catch (error) {
       return c.json(
         errorResponseSchema.parse({
@@ -132,7 +135,10 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
 
   let body: { approverId?: string; note?: string } = {};
   try {
-    const parsed = approvalRequestSchema.safeParse(await c.req.json());
+    const rawBody = await c.req.text();
+    const parsed = approvalRequestSchema.safeParse(
+      rawBody.trim() === "" ? {} : JSON.parse(rawBody),
+    );
     if (!parsed.success)
       return c.json(
         errorResponseSchema.parse({ error: "Invalid approval payload." }),
@@ -160,6 +166,7 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
         approverId: body.approverId ?? "demo-support-lead",
         note: body.note,
       },
+      requestContext: c.get("requestContext"),
     });
 
     if (result.status === "failed") {
@@ -299,7 +306,10 @@ export const supportKnowledgeReindexRoute = registerApiRoute(
       const mastra = c.get("mastra");
       const workflow = mastra.getWorkflow("indexSupportKnowledgeWorkflow");
       const run = await workflow.createRun();
-      const result = await run.start({ inputData: {} });
+      const result = await run.start({
+        inputData: {},
+        requestContext: c.get("requestContext"),
+      });
       if (result.status !== "success") {
         return c.json(
           errorResponseSchema.parse({ error: "Indexing failed." }),

@@ -43,7 +43,7 @@ const startResolutionStep = createStep({
     caseId: z.string(),
     workflowRunId: z.string().optional(),
   }),
-  execute: async ({ inputData, mastra }) => {
+  execute: async ({ inputData, mastra, requestContext, tracingContext }) => {
     if (!inputData.isNew) {
       return { caseId: inputData.caseId };
     }
@@ -53,7 +53,11 @@ const startResolutionStep = createStep({
     await caseStore.update(inputData.caseId, { workflowRunId: run.runId });
 
     void run
-      .start({ inputData: { caseId: inputData.caseId } })
+      .start({
+        inputData: { caseId: inputData.caseId },
+        requestContext,
+        tracingContext,
+      })
       .catch(async (error) => {
         mastra!.getLogger()?.error("resolve-support-case run failed", {
           error,

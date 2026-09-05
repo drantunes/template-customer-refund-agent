@@ -4,6 +4,7 @@ import {
   mockEmailPayloadSchema,
   supportOpenApiDocument,
 } from "../../src/mastra/server/contracts";
+import { supportRoutes } from "../../src/mastra/server/routes";
 
 const originalSource = process.env.SUPPORT_SOURCE;
 
@@ -39,30 +40,28 @@ describe("support API contract", () => {
     }
   });
 
-  it("keeps every public support endpoint and its success response in OpenAPI", () => {
-    const expectedPaths = [
-      "/support/inbound",
-      "/support/cases",
-      "/support/cases/{caseId}",
-      "/support/cases/{caseId}/approve",
-      "/support/cases/{caseId}/reject",
-      "/support/cases/{caseId}/feedback",
-      "/support/monitoring/summary",
-      "/support/knowledge/reindex",
-      "/support/openapi.json",
-    ];
+  it("keeps registered route methods and documented success response schemas in OpenAPI", () => {
+    const registeredRoutes = supportRoutes.map((route) => ({
+      method: route.method.toLowerCase(),
+      path: route.path.replace(/:([^/]+)/g, "{$1}"),
+    }));
 
     expect(Object.keys(supportOpenApiDocument.paths).sort()).toEqual(
-      expectedPaths.sort(),
+      registeredRoutes.map((route) => route.path).sort(),
     );
-    for (const path of expectedPaths) {
+    for (const { method, path } of registeredRoutes) {
       const operation =
         supportOpenApiDocument.paths[
           path as keyof typeof supportOpenApiDocument.paths
         ];
-      const method = "get" in operation ? operation.get : operation.post;
+      const operationForMethod = operation[
+        method as keyof typeof operation
+      ] as { responses: Record<string, { content?: unknown }> };
       expect(
-        Object.keys(method.responses).some((status) => status.startsWith("2")),
+        Object.entries(operationForMethod.responses).some(
+          ([status, response]) =>
+            status.startsWith("2") && response.content !== undefined,
+        ),
       ).toBe(true);
     }
   });
