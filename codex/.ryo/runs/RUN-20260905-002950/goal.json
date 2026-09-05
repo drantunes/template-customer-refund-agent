@@ -1,0 +1,20 @@
+{
+  "stage":"GOAL",
+  "status":"success",
+  "model":"gpt-6-astra",
+  "effort":"medium",
+  "summary":"Goal Contract accepted for PHASE-001; no current HITL blocker.",
+  "scope_checked":["PHASE-001","REQ-P0-010","REQ-P0-012","REV-001","REV-002","REV-003","REV-004","REV-015"],
+  "evidence":["planning.json","startup.json","Approved canonical baseline and decisions DEC-011 through DEC-018"],
+  "findings":[],
+  "decisions_required":[],
+  "next_recommendation":"IMPLEMENTING",
+  "goal_contract":{
+    "objective":"Establish reproducible checks and characterize useful WIP behavior, then remove Zendesk and fabricated execution contexts while preserving local mock journeys.",
+    "deliverables":["D1: one npm workspace/lock, exact Node 24.20.0/npm 11.19.0 and validated Mastra pins, no functional Bun", "D2: installed-version API and registry audit for all primitives and three candidate model IDs", "D3: pre-removal synthetic deterministic characterization of schemas, ingest/dedup, workflow resolution/approval/rejection/escalation/failure, RAG/API", "D4: all tools registered, specialists from registry, real runtime request/correlation/tracing/hooks preserved", "D5: Zod boundaries, shared frontend contracts, verifiable OpenAPI/contract drift", "D6: complete functional Zendesk removal with generic support abstraction preserved", "D7: accurate npm quickstart/capability docs and separable commits", "D8: complete check-only npm gates replacing every DEC-018 exception before independent review/PR"],
+    "acceptance":["Actual npm ci and frozen-install dry-run succeed", "Installed APIs and current OpenAI IDs verified before behavioral refactor without substitution", "Both scopes pass format/lint/strict typecheck/unit/integration, plus contracts, Playwright E2E, phase-scoped deterministic eval and both builds", "Golden useful mock journeys preserved; legacy safety/durability deficiencies documented rather than accepted as finished", "Registry identity and applicable context/correlation/tracing/hooks demonstrated", "Invalid API payloads rejected; frontend/OpenAPI mismatch check fails on drift", "No functional Zendesk/Bun or fabricated execution context", "All full supervisor gates pass with no capability exceptions", "Independent scope/diff/security review and findings policy pass"],
+    "exclusions":["PHASE-002 persistence, provider ports redesign, outbox/idempotency, money representation", "PHASE-003 native financial agent approval, immutable commands, auth/RBAC/tenant/memory migration", "PHASE-004 complete quality evals/supervisor/monitoring/knowledge lifecycle", "Intercom/Stripe, sandbox mutations, live actions", "PHASE-007 release/deployment/remote CI"],
+    "failure_conditions":["Version drift, failed install or unverifiable model ID", "Missing/failed/skipped/empty/autofixing required checks", "Mock regression, invalid boundary acceptance, contract drift", "Unregistered primitives or missing real runtime propagation", "Functional Bun/Zendesk leftovers", "Bootstrap exceptions at review/PR", "P0/P1 unresolved or P2 without human deferral", "Unrelated scope or unproved capabilities"],
+    "hitl_triggers":["Unavailable model without configured fallback", "Accepted requirements/material technology change or new production dependency", "Security/auth/PII changes beyond approved boundaries/removal", "Destructive data change, unauthorized external mutation, cost increase", "Material spec drift beyond DEC-018 gate replacement", "P2 deferral or fix-cycle exhaustion", "Final merge authorization"]
+  }
+}

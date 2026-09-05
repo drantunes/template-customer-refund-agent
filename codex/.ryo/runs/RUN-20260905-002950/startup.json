@@ -1,0 +1,20 @@
+{
+  "stage": "STARTUP",
+  "status": "success",
+  "phase": "PHASE-001",
+  "baseline_commit": "df2cb0df7dc0e9b0e1774306da268c570fa933a7",
+  "drift": [],
+  "gate_validation_errors": [],
+  "skill_version": "0.3.1+codex.20260905002701",
+  "initial_git_status": "main...origin/main; untracked codex/; no tracked modifications",
+  "runtime": {
+    "bin": "/private/tmp/ryo-phase001-runtime/bin",
+    "node": "24.20.0",
+    "npm": "11.19.0",
+    "integrity": "Node SHA256 matched official SHASUMS256.txt; npm SHA512 matched registry dist.integrity"
+  },
+  "policy": {
+    "sequence": "planning, goal, implementation, tests, gates, fresh internal/security review, PR, fresh published-SHA review, human merge approval",
+    "scope": "PHASE-001 only"
+  }
+}

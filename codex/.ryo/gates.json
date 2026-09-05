@@ -4,66 +4,299 @@
     "approved_by": "Diego Antunes"
   },
   "approved": true,
-  "capability_exceptions": [
-    {
-      "approved_by": "Diego Antunes",
-      "capability": "format",
-      "decision_id": "DEC-018",
-      "rationale": "Bootstrap only: PHASE-001 must add the approved npm format check before PR_READY.",
-      "scope": "backend"
-    },
-    {
-      "approved_by": "Diego Antunes",
-      "capability": "style",
-      "decision_id": "DEC-018",
-      "rationale": "Bootstrap only: PHASE-001 must add the approved npm lint/typecheck checks before PR_READY.",
-      "scope": "backend"
-    },
-    {
-      "approved_by": "Diego Antunes",
-      "capability": "unit-test",
-      "decision_id": "DEC-018",
-      "rationale": "Bootstrap only: PHASE-001 must add npm unit tests before PR_READY.",
-      "scope": "backend"
-    },
-    {
-      "approved_by": "Diego Antunes",
-      "capability": "integration-test",
-      "decision_id": "DEC-018",
-      "rationale": "Bootstrap only: PHASE-001 must add npm integration tests before PR_READY.",
-      "scope": "backend"
-    },
-    {
-      "approved_by": "Diego Antunes",
-      "capability": "format",
-      "decision_id": "DEC-018",
-      "rationale": "Bootstrap only: PHASE-001 must add the approved npm format check before PR_READY.",
-      "scope": "frontend"
-    },
-    {
-      "approved_by": "Diego Antunes",
-      "capability": "style",
-      "decision_id": "DEC-018",
-      "rationale": "Bootstrap only: PHASE-001 must add the approved npm lint/typecheck checks before PR_READY.",
-      "scope": "frontend"
-    },
-    {
-      "approved_by": "Diego Antunes",
-      "capability": "unit-test",
-      "decision_id": "DEC-018",
-      "rationale": "Bootstrap only: PHASE-001 must add npm unit tests before PR_READY.",
-      "scope": "frontend"
-    },
-    {
-      "approved_by": "Diego Antunes",
-      "capability": "integration-test",
-      "decision_id": "DEC-018",
-      "rationale": "Bootstrap only: PHASE-001 must add npm integration tests before PR_READY.",
-      "scope": "frontend"
-    }
-  ],
+  "capability_exceptions": [],
   "gates": [
     {
+      "id": "backend-format",
+      "scope": "backend",
+      "capability": "format",
+      "command": [
+        "npm",
+        "run",
+        "format:check"
+      ],
+      "cwd": ".",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "backend-style",
+      "scope": "backend",
+      "capability": "style",
+      "command": [
+        "npm",
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "backend-typecheck",
+      "scope": "backend",
+      "capability": "typecheck",
+      "command": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "cwd": ".",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "backend-unit-test",
+      "scope": "backend",
+      "capability": "unit-test",
+      "command": [
+        "npm",
+        "run",
+        "test:unit"
+      ],
+      "cwd": ".",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "backend-integration-test",
+      "scope": "backend",
+      "capability": "integration-test",
+      "command": [
+        "npm",
+        "run",
+        "test:integration"
+      ],
+      "cwd": ".",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 900
+    },
+    {
+      "id": "backend-contract-test",
+      "scope": "backend",
+      "capability": "contract-test",
+      "command": [
+        "npm",
+        "run",
+        "test:contract"
+      ],
+      "cwd": ".",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "backend-eval",
+      "scope": "backend",
+      "capability": "eval",
+      "command": [
+        "npm",
+        "run",
+        "test:eval"
+      ],
+      "cwd": ".",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "backend-build",
+      "scope": "backend",
+      "capability": "build",
+      "command": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 900
+    },
+    {
+      "id": "frontend-format",
+      "scope": "frontend",
+      "capability": "format",
+      "command": [
+        "npm",
+        "run",
+        "format:check"
+      ],
+      "cwd": "web",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "frontend-style",
+      "scope": "frontend",
+      "capability": "style",
+      "command": [
+        "npm",
+        "run",
+        "lint"
+      ],
+      "cwd": "web",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "frontend-typecheck",
+      "scope": "frontend",
+      "capability": "typecheck",
+      "command": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "cwd": "web",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "frontend-unit-test",
+      "scope": "frontend",
+      "capability": "unit-test",
+      "command": [
+        "npm",
+        "run",
+        "test:unit"
+      ],
+      "cwd": "web",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "frontend-integration-test",
+      "scope": "frontend",
+      "capability": "integration-test",
+      "command": [
+        "npm",
+        "run",
+        "test:integration"
+      ],
+      "cwd": "web",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 900
+    },
+    {
+      "id": "frontend-contract-test",
+      "scope": "frontend",
+      "capability": "contract-test",
+      "command": [
+        "npm",
+        "run",
+        "test:contract"
+      ],
+      "cwd": "web",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "frontend-eval",
+      "scope": "frontend",
+      "capability": "eval",
+      "command": [
+        "npm",
+        "run",
+        "test:eval"
+      ],
+      "cwd": "web",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "frontend-build",
+      "scope": "frontend",
+      "capability": "build",
+      "command": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "cwd": "web",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace; codex/decisions.md DEC-012 DEC-013 DEC-018",
+      "timeout_seconds": 900
+    },
+    {
+      "id": "runtime",
+      "scope": "backend",
+      "capability": "runtime",
+      "command": [
+        "npm",
+        "run",
+        "check:runtime"
+      ],
+      "cwd": ".",
+      "required": true,
+      "mode": "check",
+      "source": "codex/decisions.md DEC-012",
+      "timeout_seconds": 60
+    },
+    {
+      "id": "frozen-install",
+      "scope": "backend",
+      "capability": "install-integrity",
+      "command": [
+        "npm",
+        "ci",
+        "--dry-run",
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "cwd": ".",
+      "required": true,
+      "mode": "check",
+      "source": "codex/tech-spec.md#toolchain-e-workspace",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "end-to-end",
+      "scope": "frontend",
+      "capability": "e2e",
+      "command": [
+        "npm",
+        "run",
+        "test:e2e"
+      ],
+      "cwd": ".",
+      "required": true,
+      "mode": "check",
+      "source": "codex/development-plan.md PHASE-001; codex/decisions.md DEC-013",
+      "timeout_seconds": 900
+    },
+    {
+      "id": "diff-integrity",
+      "scope": "backend",
       "capability": "diff-integrity",
       "command": [
         "git",
@@ -71,13 +304,10 @@
         "--check"
       ],
       "cwd": ".",
-      "id": "bootstrap-diff-integrity",
-      "mode": "check",
       "required": true,
-      "scope": "backend",
-      "source": "codex/decisions.md#dec-018-excecao-temporaria-de-gates-para-bootstrap-da-phase-001",
-      "timeout_seconds": 60,
-      "title": "Bootstrap diff whitespace integrity"
+      "mode": "check",
+      "source": "codex/decisions.md DEC-018",
+      "timeout_seconds": 60
     }
   ],
   "generated_from": {
@@ -121,5 +351,12 @@
       ]
     }
   ],
-  "version": 1
+  "version": 1,
+  "bootstrap_replacement": {
+    "decision_id": "DEC-018",
+    "authorization": "Existing accepted DEC-018 requires complete npm scripts/gates and removal of all bootstrap exceptions before review/PR. No scope or toolchain change.",
+    "run_id": "RUN-20260905-002950",
+    "implementation_commit": "3b436b5",
+    "previous_sha256": "ad506c87cc2ef50d2b95ea278990f37271f82a4539d62bae7405ccc466980c38"
+  }
 }

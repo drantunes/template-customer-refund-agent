@@ -7,7 +7,7 @@
   "files": {
     "codex/.ryo/codebase-inventory.md": "55eeaeaee6f9b7d4bbb773f5d93836ca875c428802dea8b944d1c0d157c94801",
     "codex/.ryo/discovery-approval.json": "ed08de927e029f6813099e9b884d4db60f400316b90071f94204764770a4e22d",
-    "codex/.ryo/gates.json": "32f45e4ff431e7150f782900ee902f1c7770cebbef1462b5b35ba9c1f10bc0af",
+    "codex/.ryo/gates.json": "ad506c87cc2ef50d2b95ea278990f37271f82a4539d62bae7405ccc466980c38",
     "codex/.ryo/project.json": "b2a822b73120cfc6f96bd46c8f5aaae752aa617c54f7bef788fe04e25e0255e4",
     "codex/decision-matrix.md": "d8551accdca85ca4f4256dbcc209a6555b111652358b5d832cba28893e5a2827",
     "codex/decisions.md": "b6c1d48e18381a47ae63acaaacf11d3c3e7f3e8859b4cf5d92e2ec0e0d92953a",
@@ -18,15 +18,5 @@
   },
   "human_approved": true,
   "schema_version": 1,
-  "status": "APPROVED",
-  "authorized_updates": [
-    {
-      "path": "codex/.ryo/gates.json",
-      "decision_id": "DEC-018",
-      "previous_sha256": "ad506c87cc2ef50d2b95ea278990f37271f82a4539d62bae7405ccc466980c38",
-      "sha256": "32f45e4ff431e7150f782900ee902f1c7770cebbef1462b5b35ba9c1f10bc0af",
-      "reason": "Execute explicitly approved temporary-gate replacement; accepted canonical requirements and original human approval unchanged.",
-      "run_id": "RUN-20260905-002950"
-    }
-  ]
+  "status": "APPROVED"
 }
