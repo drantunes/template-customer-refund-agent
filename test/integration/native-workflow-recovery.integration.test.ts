@@ -191,14 +191,15 @@ async function setup(
     executionCaseId = id;
   };
   const executionModel = async () => {
-    const activeTurnId = String(
-      (
-        (await caseStore.get(executionCaseId))?.metadata as Record<
-          string,
-          unknown
-        >
-      ).activeTurnId ?? "",
-    );
+    const executionCase = await caseStore.get(executionCaseId);
+    if (!executionCase)
+      throw new Error(`Execution case ${executionCaseId} is missing.`);
+    const activeTurnId = (executionCase.metadata as Record<string, unknown>)
+      .activeTurnId;
+    if (typeof activeTurnId !== "string" || !activeTurnId)
+      throw new Error(
+        `Execution case ${executionCaseId} has no active workflow turn.`,
+      );
     const action = await caseStore.getClientForTests().execute({
       sql: "SELECT action.data FROM support_actions AS action JOIN support_turns AS turn ON turn.case_id = action.case_id AND turn.command_fingerprint = action.fingerprint WHERE action.case_id = ? AND action.kind = 'refund-command' AND turn.id = ? LIMIT 1",
       args: [executionCaseId, activeTurnId],
