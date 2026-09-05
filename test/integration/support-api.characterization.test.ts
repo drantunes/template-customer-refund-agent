@@ -14,12 +14,18 @@ import {
   supportInboundRoute,
 } from "../../src/mastra/server/routes";
 import { caseStore } from "../../src/mastra/lib/case-store";
+import { issueLocalSession } from "../../src/mastra/server/auth";
 
 afterEach(() => vi.restoreAllMocks());
 
-function responseContext(rawBody: string) {
+function responseContext(rawBody: string, principalId = "customer-alex") {
   return {
     req: {
+      raw: new Request("http://support.test", {
+        headers: {
+          authorization: `Bearer ${issueLocalSession({ id: principalId })}`,
+        },
+      }),
       text: async () => rawBody,
     },
     get: () => undefined,
@@ -41,7 +47,14 @@ describe("support API WIP characterization", () => {
 
   it("returns the list envelope used by the demo UI", async () => {
     const response = await supportCasesListRoute.handler({
-      req: { query: () => undefined },
+      req: {
+        raw: new Request("http://support.test", {
+          headers: {
+            authorization: `Bearer ${issueLocalSession({ id: "customer-alex" })}`,
+          },
+        }),
+        query: () => undefined,
+      },
       json: (body: unknown, status = 200) => ({ body, status }),
     } as never);
 
@@ -54,18 +67,23 @@ describe("support API WIP characterization", () => {
   it("rejects malformed approval JSON before it resumes or mutates a case", async () => {
     const get = vi.spyOn(caseStore, "get").mockResolvedValue({
       id: "case-waiting",
+      customer: { email: "alex@example.com" },
       status: "waiting_approval",
       workflowRunId: "run-waiting",
+      metadata: { providerBinding: { tenantId: "local-demo" } },
     } as never);
     const update = vi.spyOn(caseStore, "update");
     const getMastra = vi.fn();
 
     const response = await supportCaseApproveRoute.handler({
       req: {
+        raw: new Request("http://support.test", {
+          headers: {
+            authorization: `Bearer ${issueLocalSession({ id: "approver-demo" })}`,
+          },
+        }),
         param: () => "case-waiting",
-        json: async () => {
-          throw new SyntaxError("Unexpected end of JSON input");
-        },
+        text: async () => "{not-json",
       },
       get: getMastra,
       json: (body: unknown, status = 200) => ({ body, status }),

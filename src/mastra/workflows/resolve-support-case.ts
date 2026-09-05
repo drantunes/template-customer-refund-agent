@@ -5,7 +5,6 @@ import {
   draftResolutionSchema,
   orderLookupSchema,
   refundHistorySchema,
-  refundResultSchema,
   resourceIdForCase,
   subscriptionLookupSchema,
   threadIdForCase,
@@ -13,7 +12,10 @@ import {
   type PolicyMatch,
   type SupportCase,
 } from "../domain/support-case";
-import { MAX_AUTO_APPROVABLE_REFUND } from "../tools/issue-refund";
+import {
+  MAX_AUTO_APPROVABLE_REFUND,
+  refundExecutionInputSchema,
+} from "../tools/issue-refund";
 import { caseStore as persistentCaseStore } from "../lib/case-store";
 import { legacyAmountToMoney, refundFingerprint } from "../lib/money";
 import {
@@ -64,8 +66,14 @@ const classifyStep = createStep({
       {
         structuredOutput: { schema: triageResultSchema },
         memory: {
-          thread: threadIdForCase(supportCase.id),
-          resource: resourceIdForCase(supportCase.id),
+          thread: threadIdForCase(
+            supportCase.id,
+            bindingsForPersistedCase(supportCase).support.tenantId,
+          ),
+          resource: resourceIdForCase(
+            supportCase.id,
+            bindingsForPersistedCase(supportCase).support.tenantId,
+          ),
         },
         requestContext,
         tracingContext,
@@ -244,8 +252,14 @@ const draftResponseStep = createStep({
       {
         structuredOutput: { schema: draftResolutionSchema },
         memory: {
-          thread: threadIdForCase(supportCase.id),
-          resource: resourceIdForCase(supportCase.id),
+          thread: threadIdForCase(
+            supportCase.id,
+            bindingsForPersistedCase(supportCase).support.tenantId,
+          ),
+          resource: resourceIdForCase(
+            supportCase.id,
+            bindingsForPersistedCase(supportCase).support.tenantId,
+          ),
         },
         requestContext,
         tracingContext,
@@ -362,7 +376,14 @@ const requestApprovalStep = createStep({
     draftResponse: z.string(),
   }),
   outputSchema: approvalOutputSchema,
-  execute: async ({ inputData, resumeData, suspend }) => {
+  execute: async ({
+    inputData,
+    resumeData,
+    suspend,
+    mastra,
+    requestContext,
+    tracingContext,
+  }) => {
     const supportCase = await getCaseOrThrow(inputData.caseId);
     const bindings = bindingsForPersistedCase(supportCase);
     const draft = supportCase.draft;
@@ -376,13 +397,18 @@ const requestApprovalStep = createStep({
       if (recovered) return recovered;
       const amount = draft.refundAmount ?? 0;
       const currency = draft.refundCurrency ?? "USD";
+      const turnId =
+        ((supportCase.metadata as Record<string, unknown>).activeTurnId as
+          string | undefined) ?? `legacy:${supportCase.id}`;
       const command = {
         approvalCaseId: supportCase.id,
         orderId: supportCase.orderLookup?.order?.orderId ?? "",
         amount,
         currency,
         reason: draft.refundReason ?? "Approved support refund",
-        idempotencyKey: supportCase.id,
+        // A conversation may legitimately issue a later, distinct command.
+        // The effect key is therefore stable for this immutable turn only.
+        idempotencyKey: `${supportCase.id}:${turnId}`,
         fingerprint: "",
       };
       if (!command.orderId)
@@ -414,9 +440,83 @@ const requestApprovalStep = createStep({
         command.fingerprint,
         approvedCommand,
       );
+      await persistentCaseStore.bindTurnCommand(
+        supportCase.id,
+        turnId,
+        command.fingerprint,
+      );
+      if (!mastra)
+        throw new Error(
+          "Native refund approval requires the registered Mastra instance.",
+        );
+      const executionAgent = mastra.getAgent("refundExecutionAgent");
+      // This is a real Agent lifecycle. requireApproval is set on issue_refund;
+      // generate must therefore persist a native snapshot before the workflow
+      // presents its one shared decision.
+      const native = await executionAgent.generate(
+        `Call issue_refund once with exactly this immutable command JSON: ${JSON.stringify(
+          {
+            caseId: supportCase.id,
+            orderId: command.orderId,
+            amount: command.amount,
+            currency: command.currency,
+            reason: command.reason,
+            idempotencyKey: command.idempotencyKey,
+            fingerprint: command.fingerprint,
+          },
+        )}`,
+        { requestContext, tracingContext },
+      );
+      const suspended = native as {
+        finishReason?: string;
+        runId?: string;
+        suspendPayload?: {
+          toolCallId?: string;
+          toolName?: string;
+          args?: unknown;
+        };
+      };
+      const expectedNativeArgs = {
+        caseId: supportCase.id,
+        orderId: command.orderId,
+        amount: command.amount,
+        currency: command.currency,
+        reason: command.reason,
+        idempotencyKey: command.idempotencyKey,
+        fingerprint: command.fingerprint,
+      };
+      const nativeArgs = refundExecutionInputSchema.safeParse(
+        suspended.suspendPayload?.args,
+      );
+      if (
+        suspended.finishReason !== "suspended" ||
+        !suspended.runId ||
+        suspended.suspendPayload?.toolName !== "issue_refund" ||
+        !suspended.suspendPayload.toolCallId ||
+        !nativeArgs.success ||
+        nativeArgs.data.caseId !== expectedNativeArgs.caseId ||
+        nativeArgs.data.orderId !== expectedNativeArgs.orderId ||
+        nativeArgs.data.amount !== expectedNativeArgs.amount ||
+        nativeArgs.data.currency !== expectedNativeArgs.currency ||
+        nativeArgs.data.reason !== expectedNativeArgs.reason ||
+        nativeArgs.data.idempotencyKey !== expectedNativeArgs.idempotencyKey ||
+        nativeArgs.data.fingerprint !== expectedNativeArgs.fingerprint
+      )
+        throw new Error(
+          "Native refund agent did not suspend on the immutable tool call.",
+        );
       await caseStore.update(supportCase.id, {
         status: "waiting_approval",
-        metadata: { ...supportCase.metadata, refundCommand: command },
+        metadata: {
+          ...supportCase.metadata,
+          refundCommand: command,
+          nativeApproval: {
+            runId: suspended.runId,
+            toolCallId: suspended.suspendPayload.toolCallId,
+            fingerprint: command.fingerprint,
+            turnId,
+          },
+        },
       });
       return await suspend({
         caseId: supportCase.id,
@@ -430,19 +530,27 @@ const requestApprovalStep = createStep({
 
     if (!(supportCase.metadata as Record<string, unknown>).refundCommand)
       throw new Error("The persisted refund command is missing.");
-    await caseStore.update(supportCase.id, {
-      approval: {
-        approved: resumeData.approved,
-        approverId: resumeData.approverId,
-        note: resumeData.note,
-      },
-    });
+    // HTTP records the authenticated decision atomically before it resumes the
+    // workflow.  This step must only consume that record, never manufacture a
+    // second decision from resume data (which is network-controlled input).
+    const persisted = supportCase.approval;
+    if (!persisted)
+      throw new Error(
+        "Legacy approval has no authenticated Phase 003 decision and cannot execute.",
+      );
+    if (
+      persisted.approved !== resumeData.approved ||
+      persisted.approverId !== resumeData.approverId
+    )
+      throw new Error(
+        "The workflow resume does not match the durable approval decision.",
+      );
 
     return {
       caseId: supportCase.id,
-      approved: resumeData.approved,
-      approverId: resumeData.approverId,
-      note: resumeData.note,
+      approved: persisted.approved,
+      approverId: persisted.approverId,
+      note: persisted.note,
     };
   },
 });
@@ -456,7 +564,7 @@ const resolveCaseStep = createStep({
     caseId: z.string(),
     status: z.enum(["resolved", "escalated"]),
   }),
-  execute: async ({ inputData, mastra, requestContext, tracingContext }) => {
+  execute: async ({ inputData, mastra }) => {
     const supportCase = await getCaseOrThrow(inputData.caseId);
     const draft = supportCase.draft!;
     let finalResponse = draft.draftResponse;
@@ -484,34 +592,15 @@ const resolveCaseStep = createStep({
             throw new Error(
               "The resolve workflow must run through a registered Mastra instance.",
             );
-          const refundTool = mastra.getTool("issueRefundTool");
-          if (!refundTool.execute)
+          // Phase 003 executes through the native Agent approval lifecycle.
+          // The tool writes its durable result before this workflow resumes;
+          // never call a requireApproval tool directly from a workflow step.
+          if (supportCase.refundResult) {
+            status = "resolved";
+          } else
             throw new Error(
-              "Registered issue_refund tool has no execute function.",
+              "Native approval resumed without a durable refund effect; recovery must reconcile the native run.",
             );
-          const refundResult = refundResultSchema.parse(
-            await refundTool.execute(
-              {
-                caseId: supportCase.id,
-                orderId,
-                amount: draft.refundAmount ?? 0,
-                currency: draft.refundCurrency ?? "USD",
-                reason: draft.refundReason ?? "Approved support refund",
-                idempotencyKey: supportCase.id,
-                fingerprint: String(
-                  (supportCase.metadata as Record<string, unknown>)
-                    .refundCommand &&
-                    (
-                      (supportCase.metadata as Record<string, unknown>)
-                        .refundCommand as { fingerprint?: string }
-                    ).fingerprint,
-                ),
-              },
-              { mastra, requestContext, tracingContext },
-            ),
-          );
-          await caseStore.update(supportCase.id, { refundResult });
-          status = "resolved";
         }
       }
     }

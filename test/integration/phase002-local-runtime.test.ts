@@ -38,7 +38,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const files: string[] = [];
 const execFileAsync = promisify(execFile);
 const binding: ProviderBinding = {
-  tenantId: "tenant-a",
+  // Direct financial effects now validate the active approver identity against
+  // the command's tenant.  Use the seeded local-demo tenant in this fixture.
+  tenantId: "local-demo",
   providerKind: "local",
   providerAccountId: "account-a",
   externalConversationId: "conversation-a",
@@ -76,11 +78,23 @@ async function approvedCommand(store: CaseStore, key: string, minor: number) {
     idempotencyKey: key,
   };
   const command = { ...base, fingerprint: refundFingerprint(base) };
+  const turnId = `native-turn-${key}`;
+  const nativeRunId = `native-run-${key}`;
+  const nativeToolCallId = `native-call-${key}`;
   await store.create({
     ...supportCase(base.approvalCaseId),
     status: "waiting_approval",
-    approval: { approved: true, approverId: "local-approver" },
-    metadata: { providerBinding: binding, refundCommand: command },
+    metadata: {
+      providerBinding: binding,
+      refundCommand: command,
+      activeTurnId: turnId,
+      nativeApproval: {
+        runId: nativeRunId,
+        toolCallId: nativeToolCallId,
+        fingerprint: command.fingerprint,
+        turnId,
+      },
+    },
   });
   await store.saveAction(
     base.approvalCaseId,
@@ -88,6 +102,15 @@ async function approvedCommand(store: CaseStore, key: string, minor: number) {
     command.fingerprint,
     command,
   );
+  await store.recordApprovalDecision({
+    caseId: base.approvalCaseId,
+    turnId,
+    commandFingerprint: command.fingerprint,
+    principalId: "approver-demo",
+    approved: true,
+    nativeRunId,
+    nativeToolCallId,
+  });
   return command;
 }
 async function runtime() {
@@ -342,32 +365,33 @@ describe("Phase 002 persistent local runtime", () => {
     expect(executes).toBe(2);
   });
 
-  it("uses minor units and durable command fingerprints to prevent over-refund and conflicting replay", async () => {
+  it("does not let a legacy durable decision invoke a financial provider directly", async () => {
     const { store, local } = await runtime();
     await local.seed(binding);
     const commandA = await approvedCommand(store, "case-a", 2400);
-    const first = await local.issueRefund(commandA);
-    const replay = await local.issueRefund(commandA);
-    expect(replay).toMatchObject({ refundId: first.refundId, replayed: true });
+    await expect(local.issueRefund(commandA)).rejects.toThrow(
+      "approved native refund tool context",
+    );
     const conflictingBase = { ...commandA, amount: money("USD", 2300) };
     const conflicting = {
       ...conflictingBase,
       fingerprint: refundFingerprint(conflictingBase),
     };
+    const caseA = await store.get(commandA.approvalCaseId);
     await store.update(commandA.approvalCaseId, {
-      metadata: { providerBinding: binding, refundCommand: conflicting },
+      metadata: { ...caseA!.metadata, refundCommand: conflicting },
     });
     await expect(local.issueRefund(conflicting)).rejects.toThrow(
-      "matching persisted approved command",
+      "approved native refund tool context",
     );
-    await local.issueRefund(await approvedCommand(store, "case-b", 2500));
     await expect(
       local.issueRefund(await approvedCommand(store, "case-c", 1)),
-    ).rejects.toThrow("remaining balance");
+    ).rejects.toThrow("approved native refund tool context");
+    expect(await local.refunds(binding, "ORD-1001")).toEqual([]);
     await store.close();
   });
 
-  it("rejects malformed and concurrent over-refunds against one persisted balance", async () => {
+  it("rejects malformed direct commands and concurrent direct financial bypasses", async () => {
     const { path, store, local } = await runtime();
     await local.seed(binding);
     await expect(
@@ -381,10 +405,8 @@ describe("Phase 002 persistent local runtime", () => {
       local.issueRefund(concurrentA),
       secondRuntime.issueRefund(concurrentB),
     ]);
-    expect(
-      results.filter((result) => result.status === "fulfilled"),
-    ).toHaveLength(1);
-    expect(await local.refunds(binding, "ORD-1001")).toHaveLength(1);
+    expect(results.every((result) => result.status === "rejected")).toBe(true);
+    expect(await local.refunds(binding, "ORD-1001")).toEqual([]);
     secondClient.close();
     await store.close();
   });
@@ -515,7 +537,7 @@ describe("Phase 002 persistent local runtime", () => {
     await store.close();
   });
 
-  it("conforms through loopback HTTP for support, transaction, and knowledge ports, including a dropped refund response", async () => {
+  it("conforms through loopback HTTP for non-financial ports and refuses direct refund effects", async () => {
     const { store, local } = await runtime();
     await local.seed(binding);
     const server = await realLoopback(createLocalLoopbackFacade(local));
@@ -554,14 +576,10 @@ describe("Phase 002 persistent local runtime", () => {
     expect(await http.transactions(binding).quoteRefund(command)).toEqual(
       await local.quoteRefund(command),
     );
-    const dropped = new LoopbackHttpProviderRegistry(
-      createLocalLoopbackFacade(local, () => "drop-after-commit"),
-      5,
-    );
     await expect(
-      dropped.transactions(binding).issueRefund(command),
-    ).rejects.toThrow("timeout");
-    expect(await local.issueRefund(command)).toMatchObject({ replayed: true });
+      http.transactions(binding).issueRefund(command),
+    ).rejects.toThrow("missing or invalid native refund authorization");
+    expect(await local.refunds(binding, "ORD-1001")).toEqual([]);
     await server.close();
     await store.close();
   });
@@ -1054,6 +1072,16 @@ describe("Phase 002 persistent local runtime", () => {
       "recovery-second-event",
       "recovery-second-run",
     );
+    // The two inserts can share a millisecond.  Make the capacity assertion
+    // independent of UUID ordering when the recovery queue breaks that tie.
+    await store.getClientForTests().execute({
+      sql: "UPDATE support_dispatch SET created_at = ? WHERE case_id = ?",
+      args: ["2026-09-05T00:00:00.000Z", first.id],
+    });
+    await store.getClientForTests().execute({
+      sql: "UPDATE support_dispatch SET created_at = ? WHERE case_id = ?",
+      args: ["2026-09-05T00:00:01.000Z", second.id],
+    });
     let releaseFirst!: () => void;
     const firstReleased = new Promise<void>((resolve) => {
       releaseFirst = resolve;

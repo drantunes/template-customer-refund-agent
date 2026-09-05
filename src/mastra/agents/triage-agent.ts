@@ -24,7 +24,7 @@ Given a customer's subject and message body, decide:
 
 Never invent details that aren't in the message. If the message is empty or nonsensical, classify intent as 'other' with low confidence and requiresHumanReview true.`,
   model: "openai/gpt-5.6-luna",
-  scorers: triageAgentScorers,
+  scorers: process.env.PHASE003_DISABLE_EVALS ? {} : triageAgentScorers,
   memory: new Memory({
     options: {
       lastMessages: 20,

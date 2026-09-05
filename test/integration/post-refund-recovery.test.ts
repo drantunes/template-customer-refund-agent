@@ -20,6 +20,9 @@ describe("post-refund workflow recovery", () => {
     const env = {
       ...process.env,
       MASTRA_TELEMETRY_DISABLED: "1",
+      PHASE003_DISABLE_EVALS: "1",
+      LOCAL_AUTH_SIGNING_KEY:
+        "phase003-test-signing-key-must-be-at-least-32-chars",
       TURSO_DATABASE_URL: `file:${databasePath}`,
     };
     try {
@@ -49,7 +52,7 @@ describe("post-refund workflow recovery", () => {
         line!.slice("POST_REFUND_RECOVERY_RESULT ".length),
       );
       expect(result).toMatchObject({
-        case: { status: "resolved", refundResult: { status: "skipped" } },
+        case: { status: "resolved", refundResult: { status: "executed" } },
         counts: { refunds: 1, outbox: 1, deliveries: 1 },
       });
     } finally {

@@ -77,7 +77,10 @@ export interface CommerceProvider {
 export interface TransactionalActionProvider {
   readonly kind: "local";
   quoteRefund(command: RefundCommand): Promise<RefundQuote>;
-  issueRefund(command: RefundCommand): Promise<RefundEffect>;
+  issueRefund(
+    command: RefundCommand,
+    authorization?: import("./native-execution").NativeRefundExecutionAuthorization,
+  ): Promise<RefundEffect>;
 }
 
 export interface KnowledgeProvider {

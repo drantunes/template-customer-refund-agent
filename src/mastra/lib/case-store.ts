@@ -30,12 +30,71 @@ export interface OutboxRecord {
 export interface DispatchRecord {
   id: string;
   caseId: string;
+  /** Immutable inbound turn this workflow run owns. */
+  turnId: string;
   runId: string;
   state: DispatchState;
   attempts: number;
   /** Whether this dispatch had already crossed the durable start boundary. */
   wasStarted: boolean;
   leaseToken?: string;
+}
+export const retentionDefaults = {
+  rawPayloadDays: 7,
+  caseDays: 90,
+  traceDays: 30,
+  financialAuditDays: 365,
+} as const;
+export interface RetentionPolicy {
+  rawPayloadDays: number;
+  caseDays: number;
+  traceDays: number;
+  financialAuditDays: number;
+}
+export function retentionPolicyFromEnvironment(): RetentionPolicy {
+  const bounded = (name: string, fallback: number, maximum: number) => {
+    const raw = process.env[name];
+    if (!raw) return fallback;
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < 1 || value > maximum)
+      throw new Error(`${name} must be an integer from 1 through ${maximum}.`);
+    return value;
+  };
+  return {
+    rawPayloadDays: bounded(
+      "SUPPORT_RETENTION_RAW_PAYLOAD_DAYS",
+      retentionDefaults.rawPayloadDays,
+      retentionDefaults.rawPayloadDays,
+    ),
+    caseDays: bounded(
+      "SUPPORT_RETENTION_CASE_DAYS",
+      retentionDefaults.caseDays,
+      retentionDefaults.caseDays,
+    ),
+    traceDays: bounded(
+      "SUPPORT_RETENTION_TRACE_DAYS",
+      retentionDefaults.traceDays,
+      retentionDefaults.traceDays,
+    ),
+    financialAuditDays: bounded(
+      "SUPPORT_RETENTION_FINANCIAL_AUDIT_DAYS",
+      retentionDefaults.financialAuditDays,
+      retentionDefaults.financialAuditDays,
+    ),
+  };
+}
+export interface RetentionResult {
+  rawPayloadsRedacted: number;
+  casesRedacted: number;
+  tracesRedacted: number;
+  auditsDeleted: number;
+  messagesDeleted: number;
+  mastraMessagesDeleted: number;
+  mastraSpansDeleted: number;
+  /** Pending cases older than the case window are closed without an effect. */
+  pendingCasesExpired: number;
+  /** Mastra workflow runs whose snapshots can be removed after case redaction. */
+  expiredWorkflowRunIds: string[];
 }
 export class StaleCaseWriteError extends Error {
   constructor(id: string) {
@@ -90,7 +149,7 @@ export class CaseStore {
   async close() {
     if (this.ownsClient) this.client.close();
   }
-  async migrate(target = 5): Promise<void> {
+  async migrate(target = 7): Promise<void> {
     await this.client.execute(
       "CREATE TABLE IF NOT EXISTS support_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
     );
@@ -152,6 +211,8 @@ export class CaseStore {
     if (version === 3) await this.up3();
     if (version === 4) await this.up4();
     if (version === 5) await this.up5();
+    if (version === 6) await this.up6();
+    if (version === 7) await this.up7();
     await this.client.execute({
       sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (?, ?)",
       args: [version, now()],
@@ -275,6 +336,104 @@ export class CaseStore {
       } catch (error) {
         if (!String(error).includes("duplicate column")) throw error;
       }
+    }
+  }
+  /** Phase 003 audit records are append-only.  The current case projection is
+   * useful for UI, but it is never the authority for a second decision. */
+  private async up6() {
+    await this.client.executeMultiple(`
+      CREATE TABLE IF NOT EXISTS support_turns (
+        id TEXT PRIMARY KEY,
+        case_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(case_id, event_id),
+        UNIQUE(case_id, sequence)
+      );
+      CREATE TABLE IF NOT EXISTS support_decisions (
+        id TEXT PRIMARY KEY,
+        case_id TEXT NOT NULL UNIQUE,
+        command_fingerprint TEXT NOT NULL,
+        native_run_id TEXT,
+        native_tool_call_id TEXT,
+        principal_id TEXT NOT NULL,
+        approved INTEGER NOT NULL,
+        note TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS support_audit (
+        id TEXT PRIMARY KEY,
+        case_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        actor_id TEXT,
+        data TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+  }
+  /** A case is a conversation, not a work item. Each inbound turn owns a
+   * separate dispatch and may create its own immutable approval command. */
+  private async up7() {
+    const tx = await this.client.transaction("write");
+    try {
+      await tx
+        .executeMultiple(
+          `
+        ALTER TABLE support_turns ADD COLUMN run_id TEXT;
+        ALTER TABLE support_turns ADD COLUMN command_fingerprint TEXT;
+      `,
+        )
+        .catch?.(() => undefined);
+      // SQLite cannot drop the old case_id UNIQUE constraint in place.
+      await tx.executeMultiple(`
+        CREATE TABLE support_dispatch_v7 (
+          id TEXT PRIMARY KEY,
+          case_id TEXT NOT NULL,
+          turn_id TEXT NOT NULL UNIQUE,
+          run_id TEXT NOT NULL UNIQUE,
+          state TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          lease_until TEXT,
+          last_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          lease_token TEXT
+        );
+        INSERT INTO support_dispatch_v7(id, case_id, turn_id, run_id, state, attempts, lease_until, last_error, created_at, updated_at, lease_token)
+        SELECT id, case_id, 'legacy:' || case_id, run_id, state, attempts, lease_until, last_error, created_at, updated_at, lease_token FROM support_dispatch;
+        DROP TABLE support_dispatch;
+        ALTER TABLE support_dispatch_v7 RENAME TO support_dispatch;
+        CREATE INDEX support_dispatch_claimable ON support_dispatch(state, created_at);
+        CREATE INDEX support_dispatch_case_state ON support_dispatch(case_id, state, created_at);
+
+        CREATE TABLE support_decisions_v7 (
+          id TEXT PRIMARY KEY,
+          case_id TEXT NOT NULL,
+          turn_id TEXT NOT NULL,
+          command_fingerprint TEXT NOT NULL,
+          native_run_id TEXT,
+          native_tool_call_id TEXT,
+          principal_id TEXT NOT NULL,
+          approved INTEGER NOT NULL,
+          note TEXT,
+          created_at TEXT NOT NULL,
+          UNIQUE(case_id, turn_id, command_fingerprint)
+        );
+        INSERT INTO support_decisions_v7(id, case_id, turn_id, command_fingerprint, native_run_id, native_tool_call_id, principal_id, approved, note, created_at)
+        SELECT id, case_id, 'legacy:' || case_id, command_fingerprint, native_run_id, native_tool_call_id, principal_id, approved, note, created_at FROM support_decisions;
+        DROP TABLE support_decisions;
+        ALTER TABLE support_decisions_v7 RENAME TO support_decisions;
+        CREATE INDEX support_decisions_command ON support_decisions(case_id, command_fingerprint);
+      `);
+      await tx.commit();
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
     }
   }
   private async down(version: number) {
@@ -524,6 +683,147 @@ export class CaseStore {
     }
     throw new StaleCaseWriteError(id);
   }
+  /** Append a follow-up to the canonical conversation.  A unique inbound
+   * event gets one ordered turn; a duplicate returns false without changing
+   * messages, approvals or dispatch state. */
+  async appendFollowUp(input: {
+    caseId: string;
+    eventId: string;
+    message: CaseMessage;
+    runId: string;
+  }): Promise<{
+    appended: boolean;
+    supportCase: SupportCase;
+    turnId?: string;
+  }> {
+    await this.ensured();
+    const tx = await this.client.transaction("write");
+    try {
+      const read = await tx.execute({
+        sql: "SELECT data, version FROM support_cases WHERE id = ?",
+        args: [input.caseId],
+      });
+      const row = read.rows[0];
+      if (!row) throw new Error(`Support case not found: ${input.caseId}`);
+      const current = parse(row as Record<string, unknown>);
+      const seen = await tx.execute({
+        sql: "SELECT id FROM support_turns WHERE case_id = ? AND event_id = ?",
+        args: [input.caseId, input.eventId],
+      });
+      if (seen.rows[0]) {
+        await tx.rollback();
+        return { appended: false, supportCase: current };
+      }
+      const next = await tx.execute({
+        sql: "SELECT COALESCE(MAX(sequence), 0) + 1 AS value FROM support_turns WHERE case_id = ?",
+        args: [input.caseId],
+      });
+      const sequence = Number(next.rows[0]?.value ?? 1);
+      const turnId = `turn_${crypto.randomUUID()}`;
+      const invalidatesApproval = current.status === "waiting_approval";
+      const terminal =
+        current.status === "resolved" || current.status === "escalated";
+      const updated: SupportCase = {
+        ...current,
+        messages: current.messages.some(
+          (message) => message.id === input.message.id,
+        )
+          ? current.messages
+          : [...current.messages, input.message],
+        // A pending turn never takes ownership away from a running dispatch.
+        // The scheduler activates it only after the prior turn is terminal.
+        status: invalidatesApproval || terminal ? "new" : current.status,
+        approval: invalidatesApproval ? undefined : current.approval,
+        workflowRunId: current.workflowRunId,
+        updatedAt: now(),
+        metadata: {
+          ...current.metadata,
+          pendingApprovalInvalidatedAt: invalidatesApproval
+            ? now()
+            : current.metadata.pendingApprovalInvalidatedAt,
+          pendingTurnId: turnId,
+        },
+      };
+      await tx.execute({
+        sql: "INSERT INTO support_turns(id, case_id, event_id, sequence, state, created_at, updated_at, run_id) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
+        args: [
+          turnId,
+          input.caseId,
+          input.eventId,
+          sequence,
+          now(),
+          now(),
+          input.runId,
+        ],
+      });
+      const binding = this.binding(current);
+      await tx.execute({
+        sql: "INSERT INTO support_events(id, tenant_id, provider_account_id, source, external_id, case_id, accepted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        args: [
+          scopedEventId(binding, input.eventId),
+          binding.tenantId,
+          binding.providerAccountId,
+          current.source,
+          input.eventId,
+          input.caseId,
+          now(),
+        ],
+      });
+      await tx.execute({
+        sql: "INSERT OR IGNORE INTO support_messages(id, case_id, data, created_at) VALUES (?, ?, ?, ?)",
+        args: [
+          input.message.id,
+          input.caseId,
+          JSON.stringify(input.message),
+          input.message.createdAt,
+        ],
+      });
+      const write = await tx.execute({
+        sql: "UPDATE support_cases SET data = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+        args: [
+          JSON.stringify(updated),
+          updated.updatedAt,
+          input.caseId,
+          Number(row.version ?? 1),
+        ],
+      });
+      if (Number(write.rowsAffected) !== 1)
+        throw new StaleCaseWriteError(input.caseId);
+      if (invalidatesApproval)
+        await tx.execute({
+          sql: "INSERT INTO support_audit(id, case_id, kind, data, created_at) VALUES (?, ?, 'approval-invalidated-follow-up', ?, ?)",
+          args: [
+            `audit_${crypto.randomUUID()}`,
+            input.caseId,
+            JSON.stringify({ eventId: input.eventId }),
+            now(),
+          ],
+        });
+      if (invalidatesApproval)
+        await tx.execute({
+          sql: "UPDATE support_dispatch SET state = 'completed', lease_until = NULL, lease_token = NULL, updated_at = ? WHERE case_id = ? AND state = 'suspended'",
+          args: [now(), input.caseId],
+        });
+      await tx.execute({
+        sql: "INSERT INTO support_dispatch(id, case_id, turn_id, run_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+        args: [
+          `dispatch_${turnId}`,
+          input.caseId,
+          turnId,
+          input.runId,
+          now(),
+          now(),
+        ],
+      });
+      await tx.commit();
+      return { appended: true, supportCase: updated, turnId };
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
   private async appendMessageRow(caseId: string, message: CaseMessage) {
     await this.client.execute({
       sql: "INSERT OR IGNORE INTO support_messages(id, case_id, data, created_at) VALUES (?, ?, ?, ?)",
@@ -533,7 +833,11 @@ export class CaseStore {
   /** Atomic deduplication: event, case, messages and durable dispatch are committed together. */
   async acceptInbound(case_: SupportCase, eventId: string, runId: string) {
     await this.ensured();
-    const persisted = this.withBindings(case_);
+    const initialTurnId = `turn_${crypto.randomUUID()}`;
+    const persisted = this.withBindings({
+      ...case_,
+      metadata: { ...case_.metadata, activeTurnId: initialTurnId },
+    });
     const binding = this.binding(persisted);
     const storageEventId = scopedEventId(binding, eventId);
     const tx = await this.client.transaction("write");
@@ -617,8 +921,19 @@ export class CaseStore {
         ],
       });
       await tx.execute({
-        sql: "INSERT INTO support_dispatch(id, case_id, run_id, state, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?)",
-        args: [`dispatch_${storageEventId}`, persisted.id, runId, now(), now()],
+        sql: "INSERT INTO support_turns(id, case_id, event_id, sequence, state, created_at, updated_at, run_id) VALUES (?, ?, ?, 1, 'pending', ?, ?, ?)",
+        args: [initialTurnId, persisted.id, eventId, now(), now(), runId],
+      });
+      await tx.execute({
+        sql: "INSERT INTO support_dispatch(id, case_id, turn_id, run_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+        args: [
+          `dispatch_${storageEventId}`,
+          persisted.id,
+          initialTurnId,
+          runId,
+          now(),
+          now(),
+        ],
       });
       await tx.commit();
       return { caseId: persisted.id, isNew: true };
@@ -799,7 +1114,7 @@ export class CaseStore {
     }
     const leaseUntil = new Date(Date.now() + 30_000).toISOString();
     const rows = await this.client.execute({
-      sql: "SELECT * FROM support_dispatch WHERE (state = 'pending' OR (state IN ('claimed', 'started') AND lease_until < ?)) AND attempts < 3 ORDER BY created_at LIMIT ?",
+      sql: "SELECT * FROM support_dispatch AS candidate WHERE (state = 'pending' OR (state IN ('claimed', 'started') AND lease_until < ?)) AND attempts < 3 AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS earlier WHERE earlier.case_id = candidate.case_id AND earlier.state = 'pending' AND (earlier.created_at < candidate.created_at OR (earlier.created_at = candidate.created_at AND earlier.id < candidate.id))) ORDER BY created_at, id LIMIT ?",
       args: [claimedAt, limit],
     });
     const claimed: DispatchRecord[] = [];
@@ -813,6 +1128,7 @@ export class CaseStore {
         claimed.push({
           id: String(row.id),
           caseId: String(row.case_id),
+          turnId: String(row.turn_id),
           runId: String(row.run_id),
           state: "claimed",
           attempts: Number(row.attempts) + 1,
@@ -847,6 +1163,10 @@ export class CaseStore {
       args: leaseToken
         ? [state, error ? String(error) : null, now(), id, leaseToken]
         : [state, error ? String(error) : null, now(), id],
+    });
+    await this.client.execute({
+      sql: "UPDATE support_turns SET state = ?, updated_at = ? WHERE id = (SELECT turn_id FROM support_dispatch WHERE id = ?)",
+      args: [state, now(), id],
     });
   }
   /** Atomically project a fenced workflow failure to its dispatch and public
@@ -905,35 +1225,67 @@ export class CaseStore {
       throw error;
     }
   }
-  async markDispatchStarted(caseId: string, leaseToken?: string) {
+  async markDispatchStarted(dispatchId: string, leaseToken?: string) {
     await this.ensured();
     await this.client.execute({
-      sql: `UPDATE support_dispatch SET state = 'started', updated_at = ? WHERE case_id = ? AND state = 'claimed'${leaseToken ? " AND lease_token = ?" : ""}`,
-      args: leaseToken ? [now(), caseId, leaseToken] : [now(), caseId],
+      sql: `UPDATE support_dispatch SET state = 'started', updated_at = ? WHERE id = ? AND state = 'claimed'${leaseToken ? " AND lease_token = ?" : ""}`,
+      args: leaseToken ? [now(), dispatchId, leaseToken] : [now(), dispatchId],
     });
+    await this.client.execute({
+      sql: "UPDATE support_turns SET state = 'processing', updated_at = ? WHERE id = (SELECT turn_id FROM support_dispatch WHERE id = ?)",
+      args: [now(), dispatchId],
+    });
+  }
+  async turns(caseId: string) {
+    await this.ensured();
+    const rows = await this.client.execute({
+      sql: "SELECT id, event_id, sequence, state, run_id, command_fingerprint FROM support_turns WHERE case_id = ? ORDER BY sequence",
+      args: [caseId],
+    });
+    return rows.rows.map((row) => ({
+      id: String(row.id),
+      eventId: String(row.event_id),
+      sequence: Number(row.sequence),
+      state: String(row.state),
+      runId: row.run_id ? String(row.run_id) : undefined,
+      commandFingerprint: row.command_fingerprint
+        ? String(row.command_fingerprint)
+        : undefined,
+    }));
+  }
+  async bindTurnCommand(caseId: string, turnId: string, fingerprint: string) {
+    await this.ensured();
+    const changed = await this.client.execute({
+      sql: "UPDATE support_turns SET command_fingerprint = ?, updated_at = ? WHERE id = ? AND case_id = ? AND command_fingerprint IS NULL",
+      args: [fingerprint, now(), turnId, caseId],
+    });
+    if (Number(changed.rowsAffected) !== 1)
+      throw new Error("Turn command is missing, already bound, or changed.");
   }
   /** Acquire the same durable lease used by recovery before a normal ingest starts. */
   async claimDispatchForStart(
     caseId: string,
+    runId?: string,
   ): Promise<DispatchRecord | undefined> {
     await this.ensured();
     const claimedAt = now();
     const leaseUntil = new Date(Date.now() + 30_000).toISOString();
     const row = await this.client.execute({
-      sql: "SELECT * FROM support_dispatch WHERE case_id = ? AND state = 'pending'",
-      args: [caseId],
+      sql: "SELECT * FROM support_dispatch AS candidate WHERE case_id = ? AND state = 'pending' AND (? IS NULL OR run_id = ?) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) ORDER BY created_at LIMIT 1",
+      args: [caseId, runId ?? null, runId ?? null],
     });
     if (!row.rows[0]) return undefined;
     const leaseToken = crypto.randomUUID();
     const update = await this.client.execute({
-      sql: "UPDATE support_dispatch SET state = 'claimed', attempts = attempts + 1, lease_until = ?, lease_token = ?, updated_at = ? WHERE case_id = ? AND state = 'pending'",
-      args: [leaseUntil, leaseToken, claimedAt, caseId],
+      sql: "UPDATE support_dispatch SET state = 'claimed', attempts = attempts + 1, lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND state = 'pending'",
+      args: [leaseUntil, leaseToken, claimedAt, String(row.rows[0].id)],
     });
     if (Number(update.rowsAffected) !== 1) return undefined;
     const current = row.rows[0] as Record<string, unknown>;
     return {
       id: String(current.id),
       caseId,
+      turnId: String(current.turn_id),
       runId: String(current.run_id),
       state: "claimed",
       attempts: Number(current.attempts) + 1,
@@ -946,13 +1298,14 @@ export class CaseStore {
   async claimDispatchForResume(
     caseId: string,
     runId?: string,
+    turnId?: string,
   ): Promise<DispatchRecord | undefined> {
     await this.ensured();
     const claimedAt = now();
     const leaseToken = crypto.randomUUID();
     const row = await this.client.execute({
-      sql: "SELECT * FROM support_dispatch WHERE case_id = ? AND state = 'suspended'",
-      args: [caseId],
+      sql: "SELECT * FROM support_dispatch WHERE case_id = ? AND (state = 'suspended' OR (state = 'claimed' AND lease_until < ?)) AND (? IS NULL OR turn_id = ?) ORDER BY created_at LIMIT 1",
+      args: [caseId, claimedAt, turnId ?? null, turnId ?? null],
     });
     if (!row.rows[0]) {
       // Phase 001 and direct Studio workflow runs may have a durable case/run
@@ -961,10 +1314,11 @@ export class CaseStore {
       if (!runId) return undefined;
       try {
         await this.client.execute({
-          sql: "INSERT INTO support_dispatch(id, case_id, run_id, state, attempts, created_at, updated_at) VALUES (?, ?, ?, 'suspended', 0, ?, ?)",
+          sql: "INSERT INTO support_dispatch(id, case_id, turn_id, run_id, state, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, 'suspended', 0, ?, ?)",
           args: [
             `dispatch_resume_${caseId}`,
             caseId,
+            turnId ?? `legacy:${caseId}`,
             runId,
             claimedAt,
             claimedAt,
@@ -976,17 +1330,20 @@ export class CaseStore {
       // A raced worker may have created or advanced the row.  Do one bounded
       // reread rather than recursively trying to insert forever.
       const backfilled = await this.client.execute({
-        sql: "SELECT * FROM support_dispatch WHERE case_id = ? AND state = 'suspended'",
-        args: [caseId],
+        sql: "SELECT * FROM support_dispatch WHERE case_id = ? AND state = 'suspended' AND (? IS NULL OR turn_id = ?) ORDER BY created_at LIMIT 1",
+        args: [caseId, turnId ?? null, turnId ?? null],
       });
       if (!backfilled.rows[0]) return undefined;
       const update = await this.client.execute({
-        sql: "UPDATE support_dispatch SET state = 'claimed', lease_until = ?, lease_token = ?, updated_at = ? WHERE case_id = ? AND state = 'suspended'",
+        sql: "UPDATE support_dispatch SET state = 'claimed', lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND case_id = ? AND turn_id = ? AND (state = 'suspended' OR (state = 'claimed' AND lease_until < ?))",
         args: [
           new Date(Date.now() + 30_000).toISOString(),
           leaseToken,
           claimedAt,
+          String(backfilled.rows[0].id),
           caseId,
+          turnId ?? `legacy:${caseId}`,
+          claimedAt,
         ],
       });
       if (Number(update.rowsAffected) !== 1) return undefined;
@@ -994,6 +1351,7 @@ export class CaseStore {
       return {
         id: String(current.id),
         caseId,
+        turnId: String(current.turn_id),
         runId: String(current.run_id),
         state: "claimed",
         attempts: Number(current.attempts),
@@ -1002,12 +1360,15 @@ export class CaseStore {
       };
     }
     const update = await this.client.execute({
-      sql: "UPDATE support_dispatch SET state = 'claimed', lease_until = ?, lease_token = ?, updated_at = ? WHERE case_id = ? AND state = 'suspended'",
+      sql: "UPDATE support_dispatch SET state = 'claimed', lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND case_id = ? AND turn_id = ? AND (state = 'suspended' OR (state = 'claimed' AND lease_until < ?))",
       args: [
         new Date(Date.now() + 30_000).toISOString(),
         leaseToken,
         claimedAt,
+        String(row.rows[0].id),
         caseId,
+        turnId ?? String(row.rows[0].turn_id),
+        claimedAt,
       ],
     });
     if (Number(update.rowsAffected) !== 1) return undefined;
@@ -1015,6 +1376,7 @@ export class CaseStore {
     return {
       id: String(current.id),
       caseId,
+      turnId: String(current.turn_id),
       runId: String(current.run_id),
       state: "claimed",
       attempts: Number(current.attempts),
@@ -1230,6 +1592,158 @@ export class CaseStore {
       ],
     });
   }
+  /** Atomically records the sole authorized decision for a command. The
+   * caller must invoke this before native approval/resume; a losing concurrent
+   * request cannot mutate the case projection or execute the effect. */
+  async recordApprovalDecision(input: {
+    caseId: string;
+    turnId?: string;
+    commandFingerprint: string;
+    principalId: string;
+    approved: boolean;
+    note?: string;
+    nativeRunId?: string;
+    nativeToolCallId?: string;
+  }): Promise<{ won: boolean; decisionId?: string }> {
+    await this.ensured();
+    const tx = await this.client.transaction("write");
+    try {
+      const command = await tx.execute({
+        sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = 'refund-command' AND fingerprint = ?",
+        args: [input.caseId, input.commandFingerprint],
+      });
+      if (!command.rows[0])
+        throw new Error("Approval command is missing or has changed.");
+      const currentResult = await tx.execute({
+        sql: "SELECT data, version FROM support_cases WHERE id = ?",
+        args: [input.caseId],
+      });
+      const row = currentResult.rows[0];
+      if (!row) throw new Error(`Support case not found: ${input.caseId}`);
+      const current = parse(row as Record<string, unknown>);
+      if (current.status !== "waiting_approval")
+        throw new Error("Case is not waiting for approval.");
+      const turnId =
+        input.turnId ??
+        ((current.metadata as Record<string, unknown>).activeTurnId as
+          string | undefined) ??
+        `legacy:${input.caseId}`;
+      const existing = await tx.execute({
+        sql: "SELECT id FROM support_decisions WHERE case_id = ? AND turn_id = ? AND command_fingerprint = ?",
+        args: [input.caseId, turnId, input.commandFingerprint],
+      });
+      if (existing.rows[0]) {
+        await tx.rollback();
+        return { won: false };
+      }
+      const decisionId = `decision_${crypto.randomUUID()}`;
+      const updated: SupportCase = {
+        ...current,
+        approval: {
+          approved: input.approved,
+          approverId: input.principalId,
+          note: input.note,
+        },
+        status: "processing",
+        updatedAt: now(),
+      };
+      await tx.execute({
+        sql: "INSERT INTO support_decisions(id, case_id, turn_id, command_fingerprint, native_run_id, native_tool_call_id, principal_id, approved, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        args: [
+          decisionId,
+          input.caseId,
+          turnId,
+          input.commandFingerprint,
+          input.nativeRunId ?? null,
+          input.nativeToolCallId ?? null,
+          input.principalId,
+          input.approved ? 1 : 0,
+          input.note ?? null,
+          now(),
+        ],
+      });
+      const write = await tx.execute({
+        sql: "UPDATE support_cases SET data = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+        args: [
+          JSON.stringify(updated),
+          updated.updatedAt,
+          input.caseId,
+          Number(row.version ?? 1),
+        ],
+      });
+      if (Number(write.rowsAffected) !== 1)
+        throw new StaleCaseWriteError(input.caseId);
+      await tx.execute({
+        sql: "INSERT INTO support_audit(id, case_id, kind, actor_id, data, created_at) VALUES (?, ?, 'approval-decision', ?, ?, ?)",
+        args: [
+          `audit_${crypto.randomUUID()}`,
+          input.caseId,
+          input.principalId,
+          JSON.stringify({
+            decisionId,
+            commandFingerprint: input.commandFingerprint,
+            approved: input.approved,
+          }),
+          now(),
+        ],
+      });
+      await tx.commit();
+      return { won: true, decisionId };
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
+  async approvalDecision(caseId: string, turnId?: string) {
+    await this.ensured();
+    const result = await this.client.execute({
+      sql: "SELECT command_fingerprint, native_run_id, native_tool_call_id, principal_id, approved, turn_id FROM support_decisions WHERE case_id = ? AND (? IS NULL OR turn_id = ?) ORDER BY created_at DESC LIMIT 1",
+      args: [caseId, turnId ?? null, turnId ?? null],
+    });
+    const row = result.rows[0];
+    return row
+      ? {
+          commandFingerprint: String(row.command_fingerprint),
+          nativeRunId: row.native_run_id
+            ? String(row.native_run_id)
+            : undefined,
+          nativeToolCallId: row.native_tool_call_id
+            ? String(row.native_tool_call_id)
+            : undefined,
+          principalId: String(row.principal_id),
+          approved: Number(row.approved) === 1,
+          turnId: String(row.turn_id),
+        }
+      : undefined;
+  }
+  /** Decisions are durable authority. A worker uses this queue after an HTTP
+   * process dies between recording the one decision and resuming Mastra. */
+  /** Native resume is driven by the one durable decision, whether it approved
+   * or declined the command.  The dispatch lease is the fence: a worker only
+   * reads rows that have not already been claimed for resume. */
+  async nativeDecisionsNeedingRecovery(limit = 10) {
+    await this.ensured();
+    const rows = await this.client.execute({
+      sql: "SELECT d.case_id, d.turn_id, d.command_fingerprint, d.native_run_id, d.native_tool_call_id, d.principal_id, d.approved, d.note, c.data, p.id AS dispatch_id, p.run_id AS workflow_run_id, p.state AS dispatch_state FROM support_decisions d JOIN support_cases c ON c.id = d.case_id LEFT JOIN support_dispatch p ON p.case_id = d.case_id AND p.turn_id = d.turn_id WHERE d.native_run_id IS NOT NULL AND d.native_tool_call_id IS NOT NULL AND (p.state = 'suspended' OR p.state IS NULL OR (p.state = 'claimed' AND p.lease_until < ?)) ORDER BY d.created_at LIMIT ?",
+      args: [now(), limit],
+    });
+    return rows.rows.map((row) => ({
+      caseId: String(row.case_id),
+      turnId: String(row.turn_id),
+      fingerprint: String(row.command_fingerprint),
+      nativeRunId: String(row.native_run_id),
+      nativeToolCallId: String(row.native_tool_call_id),
+      principalId: String(row.principal_id),
+      approved: Number(row.approved) === 1,
+      note: row.note ? String(row.note) : undefined,
+      workflowRunId: row.workflow_run_id
+        ? String(row.workflow_run_id)
+        : undefined,
+      supportCase: JSON.parse(String(row.data)) as SupportCase,
+    }));
+  }
   async getAction(caseId: string, kind: string, fingerprint: string) {
     await this.ensured();
     const result = await this.client.execute({
@@ -1250,6 +1764,167 @@ export class CaseStore {
           effect: JSON.parse(String(result.rows[0].effect)),
         }
       : undefined;
+  }
+  /** Enforce DEC-015 without deleting the durable replay keys or the financial
+   * audit window.  Expired case rows become minimal tombstones so pending
+   * references remain valid while customer content and trace references do not. */
+  async enforceRetention(
+    clock: () => Date = () => new Date(),
+    policy: RetentionPolicy = retentionPolicyFromEnvironment(),
+  ): Promise<RetentionResult> {
+    await this.ensured();
+    const current = clock();
+    const cutoff = (days: number) =>
+      new Date(current.getTime() - days * 24 * 60 * 60 * 1_000).toISOString();
+    const rawCutoff = cutoff(policy.rawPayloadDays);
+    const traceCutoff = cutoff(policy.traceDays);
+    const caseCutoff = cutoff(policy.caseDays);
+    const auditCutoff = cutoff(policy.financialAuditDays);
+    const rows = await this.client.execute(
+      "SELECT id, data, version, created_at FROM support_cases WHERE created_at < ? OR updated_at < ?",
+      [rawCutoff, traceCutoff],
+    );
+    let rawPayloadsRedacted = 0;
+    let casesRedacted = 0;
+    let tracesRedacted = 0;
+    let messagesDeleted = 0;
+    let pendingCasesExpired = 0;
+    const expiredWorkflowRunIds = new Set<string>();
+    for (const row of rows.rows) {
+      const id = String(row.id);
+      const supportCase = parse(row as Record<string, unknown>);
+      const createdAt = String(row.created_at);
+      const metadata = { ...supportCase.metadata };
+      let changed = false;
+      let deleteMessages = false;
+      if (createdAt < rawCutoff && "rawPayload" in metadata) {
+        delete metadata.rawPayload;
+        rawPayloadsRedacted += 1;
+        changed = true;
+      }
+      let updated: SupportCase = { ...supportCase, metadata };
+      if (createdAt < traceCutoff && updated.traceId) {
+        updated = { ...updated, traceId: undefined };
+        tracesRedacted += 1;
+        changed = true;
+      }
+      if (
+        createdAt < caseCutoff &&
+        metadata.retentionRedactedAt === undefined
+      ) {
+        const binding = this.binding(supportCase);
+        const wasPending = ["new", "processing", "waiting_approval"].includes(
+          supportCase.status,
+        );
+        const command = metadata.refundCommand as
+          { fingerprint?: unknown; idempotencyKey?: unknown } | undefined;
+        updated = {
+          ...updated,
+          customer: { email: "redacted@invalid.local" },
+          subject: "Redacted support case",
+          messages: [],
+          ...(wasPending
+            ? {
+                // Closing a stale in-flight case fails closed. Keep only a
+                // non-executable fingerprint/replay reference for audit and
+                // reconciliation; the decision route rejects this status.
+                status: "failed" as const,
+                approval: undefined,
+              }
+            : {}),
+          triage: undefined,
+          policyMatches: undefined,
+          orderLookup: undefined,
+          subscriptionLookup: undefined,
+          refundHistory: undefined,
+          draft: undefined,
+          finalResponse: undefined,
+          escalationReason: wasPending
+            ? "Pending case expired under DEC-015 before a financial decision."
+            : undefined,
+          feedback: undefined,
+          agentUsage: undefined,
+          traceId: undefined,
+          metadata: {
+            providerBinding: binding,
+            retentionRedactedAt: current.toISOString(),
+            ...(wasPending
+              ? {
+                  pendingRetentionExpiredAt: current.toISOString(),
+                  ...(command?.fingerprint
+                    ? {
+                        refundCommand: {
+                          fingerprint: command.fingerprint,
+                          ...(command.idempotencyKey
+                            ? { idempotencyKey: command.idempotencyKey }
+                            : {}),
+                        },
+                      }
+                    : {}),
+                }
+              : {}),
+          },
+        };
+        if (wasPending) pendingCasesExpired += 1;
+        casesRedacted += 1;
+        if (supportCase.workflowRunId)
+          expiredWorkflowRunIds.add(supportCase.workflowRunId);
+        const dispatchedRuns = await this.client.execute({
+          sql: "SELECT run_id FROM support_dispatch WHERE case_id = ?",
+          args: [id],
+        });
+        for (const run of dispatchedRuns.rows)
+          expiredWorkflowRunIds.add(String(run.run_id));
+        deleteMessages = true;
+        changed = true;
+      }
+      if (changed) {
+        const tx = await this.client.transaction("write");
+        try {
+          const write = await tx.execute({
+            sql: "UPDATE support_cases SET data = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+            args: [
+              JSON.stringify(updated),
+              current.toISOString(),
+              id,
+              Number(row.version ?? 1),
+            ],
+          });
+          if (Number(write.rowsAffected ?? 0) !== 1)
+            throw new StaleCaseWriteError(id);
+          if (deleteMessages) {
+            const deleted = await tx.execute({
+              sql: "DELETE FROM support_messages WHERE case_id = ?",
+              args: [id],
+            });
+            messagesDeleted += Number(deleted.rowsAffected ?? 0);
+          }
+          await tx.commit();
+        } catch (error) {
+          try {
+            await tx.rollback();
+          } catch {}
+          throw error;
+        }
+      }
+    }
+    const audits = await this.client.execute({
+      sql: "DELETE FROM support_audit WHERE created_at < ?",
+      args: [auditCutoff],
+    });
+    return {
+      rawPayloadsRedacted,
+      casesRedacted,
+      tracesRedacted,
+      auditsDeleted: Number(audits.rowsAffected ?? 0),
+      messagesDeleted,
+      // Mastra owns its tables. The configured LibSQLStore retention policy
+      // removes its messages, resources, threads, and spans via storage.prune.
+      mastraMessagesDeleted: 0,
+      mastraSpansDeleted: 0,
+      pendingCasesExpired,
+      expiredWorkflowRunIds: [...expiredWorkflowRunIds],
+    };
   }
   async recordEffect(key: string, fingerprint: string, effect: unknown) {
     await this.ensured();

@@ -9,9 +9,48 @@ import {
   supportCaseApproveRoute,
   supportCaseRejectRoute,
 } from "../../src/mastra/server/routes";
+import { issueLocalSession } from "../../src/mastra/server/auth";
+import {
+  deterministicRefundModel,
+  type DeterministicRefundModel,
+} from "../fixtures/deterministic-language-model";
 
 const databaseFiles: string[] = [];
 const mastraRuntimes: Array<{ shutdown(): Promise<void> }> = [];
+const closeSharedClients: Array<() => Promise<void>> = [];
+const approverHeaders = {
+  authorization: `Bearer ${issueLocalSession({ id: "approver-demo" })}`,
+};
+const customerHeaders = {
+  authorization: `Bearer ${issueLocalSession({ id: "customer-alex" })}`,
+};
+
+async function bindApprovalFixture(store: typeof caseStore, caseId: string) {
+  const fingerprint = `fingerprint-${caseId}`;
+  const current = await store.get(caseId);
+  const turnId = (current!.metadata as Record<string, unknown>).activeTurnId;
+  if (typeof turnId !== "string")
+    throw new Error("Expected the durable dispatch turn for approval binding.");
+  await store.update(caseId, {
+    metadata: {
+      ...current!.metadata,
+      refundCommand: { fingerprint },
+      nativeApproval: {
+        runId: `native-${caseId}`,
+        toolCallId: `tool-${caseId}`,
+        fingerprint,
+        // The native approval must bind to the same durable dispatch turn.
+        // A made-up legacy turn makes the route correctly fence the request
+        // before the mocked resume can begin.
+        turnId,
+      },
+    },
+  });
+  await store.saveAction(caseId, "refund-command", fingerprint, {
+    fingerprint,
+  });
+  return fingerprint;
+}
 
 function supportApp(mastra: unknown) {
   const app = new Hono();
@@ -42,6 +81,14 @@ async function loadDeterministicRuntime() {
   process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
   process.env.SUPPORT_SOURCE = "mock";
   vi.resetModules();
+  // The HTTP boundary exercises registered agents and workflows, but not the
+  // evaluator product. Prevent the composition root from registering a judge
+  // model that could make an unrelated provider request in the background.
+  vi.doMock("../../src/mastra/evals", () => ({
+    responseAgentScorers: {},
+    triageAgentScorers: {},
+    supportEvalScorerRegistry: {},
+  }));
   vi.doMock("@mastra/core/llm", async (importOriginal) => {
     const actual = await importOriginal<typeof import("@mastra/core/llm")>();
     return {
@@ -54,6 +101,8 @@ async function loadDeterministicRuntime() {
   // it before leaves so vi.resetModules cannot expose a partially initialized
   // local-runtime export to concurrent dynamic imports.
   const { mastra } = await import("../../src/mastra/index");
+  const { closeSharedLocalSqliteClient } =
+    await import("../../src/mastra/lib/sqlite-client");
   const { issueRefundTool } =
     await import("../../src/mastra/tools/issue-refund");
   const { responseAgent } =
@@ -61,6 +110,8 @@ async function loadDeterministicRuntime() {
   const { searchSupportKnowledgeTool } =
     await import("../../src/mastra/tools/search-support-knowledge");
   const { triageAgent } = await import("../../src/mastra/agents/triage-agent");
+  const { refundExecutionAgent } =
+    await import("../../src/mastra/agents/refund-execution-agent");
   const routes = await import("../../src/mastra/server/routes");
 
   vi.spyOn(triageAgent, "generate").mockResolvedValue({
@@ -101,7 +152,41 @@ async function loadDeterministicRuntime() {
     ],
   } as never);
   vi.spyOn(issueRefundTool, "execute");
+  let refundModel: DeterministicRefundModel | undefined;
+  const executionModel = async () => {
+    if (refundModel) return refundModel;
+    const action = await (
+      await import("../../src/mastra/lib/case-store")
+    ).caseStore
+      .getClientForTests()
+      .execute(
+        "SELECT data FROM support_actions WHERE kind = 'refund-command' ORDER BY created_at DESC LIMIT 1",
+      );
+    const command = JSON.parse(String(action.rows[0]?.data ?? "{}")) as {
+      approvalCaseId: string;
+      orderId: string;
+      amount: { minor: number; currency: string };
+      reason: string;
+      idempotencyKey: string;
+      fingerprint: string;
+    };
+    refundModel = deterministicRefundModel({
+      caseId: command.approvalCaseId,
+      orderId: command.orderId,
+      amount: command.amount.minor / 100,
+      currency: command.amount.currency,
+      reason: command.reason,
+      idempotencyKey: command.idempotencyKey,
+      fingerprint: command.fingerprint,
+    });
+    return refundModel;
+  };
+  refundExecutionAgent.__updateModel({ model: executionModel });
+  mastra
+    .getAgent("refundExecutionAgent")
+    .__updateModel({ model: executionModel });
   mastraRuntimes.push(mastra);
+  closeSharedClients.push(closeSharedLocalSqliteClient);
 
   const app = supportApp(mastra);
   app.post("/support/inbound", routes.supportInboundRoute.handler);
@@ -121,11 +206,15 @@ async function loadDeterministicRuntime() {
 }
 
 afterEach(async () => {
-  vi.restoreAllMocks();
-  vi.doUnmock("@mastra/core/llm");
   await Promise.allSettled(
     mastraRuntimes.splice(0).map((runtime) => runtime.shutdown()),
   );
+  await Promise.allSettled(
+    closeSharedClients.splice(0).map((close) => close()),
+  );
+  vi.restoreAllMocks();
+  vi.doUnmock("../../src/mastra/evals");
+  vi.doUnmock("@mastra/core/llm");
   await Promise.all(
     databaseFiles.splice(0).map((file) => rm(file, { force: true })),
   );
@@ -133,28 +222,46 @@ afterEach(async () => {
 
 describe("support approval HTTP boundary", () => {
   it.each([
-    ["approve", undefined, true],
-    ["approve", '{"approverId":"alex","note":"ok"}', true],
-    ["approve", "  \n", true],
+    ["approve", undefined, false],
+    ["approve", '{"commandFingerprint":"fingerprint","note":"ok"}', true],
+    ["approve", "  \n", false],
     ["approve", "{not-json", false],
-    ["reject", undefined, true],
-    ["reject", '{"approverId":"alex","note":"ok"}', true],
-    ["reject", "  \n", true],
+    ["reject", undefined, false],
+    ["reject", '{"commandFingerprint":"fingerprint","note":"ok"}', true],
+    ["reject", "  \n", false],
     ["reject", "{not-json", false],
   ])(
     "%s honors optional and malformed request bodies through Hono",
     async (action, body, shouldResume) => {
       const resume = vi.fn().mockResolvedValue({ status: "success" });
       const mastra = {
+        getAgent: () => ({
+          approveToolCallGenerate: vi.fn(),
+          declineToolCallGenerate: vi.fn(),
+        }),
         getWorkflow: () => ({
           createRun: async () => ({ resume }),
         }),
       };
       vi.spyOn(caseStore, "get").mockResolvedValue({
         id: "case-waiting",
+        customer: { email: "alex@example.com" },
         status: "waiting_approval",
         workflowRunId: "run-waiting",
+        metadata: {
+          providerBinding: { tenantId: "local-demo" },
+          refundCommand: { fingerprint: "fingerprint" },
+          nativeApproval: {
+            runId: "native-run",
+            toolCallId: "native-call",
+            fingerprint: "fingerprint",
+            turnId: "turn-waiting",
+          },
+        },
       } as never);
+      vi.spyOn(caseStore, "recordApprovalDecision").mockResolvedValue({
+        won: true,
+      });
       vi.spyOn(caseStore, "claimDispatchForResume").mockResolvedValue({
         id: "dispatch-waiting",
         caseId: "case-waiting",
@@ -174,6 +281,7 @@ describe("support approval HTTP boundary", () => {
         `http://support.test/support/cases/case-waiting/${action}`,
         {
           method: "POST",
+          headers: approverHeaders,
           ...(body === undefined ? {} : { body }),
         },
       );
@@ -186,10 +294,7 @@ describe("support approval HTTP boundary", () => {
             requestContext: expect.any(RequestContext),
             resumeData: expect.objectContaining({
               approved: action === "approve",
-              approverId:
-                body === undefined || body.trim() === ""
-                  ? "demo-support-lead"
-                  : "alex",
+              approverId: "approver-demo",
             }),
           }),
         );
@@ -250,6 +355,7 @@ describe("support workflow HTTP context propagation", () => {
       sql: "UPDATE support_dispatch SET state = 'suspended', lease_until = NULL, lease_token = NULL WHERE case_id = ?",
       args: [caseId],
     });
+    const fingerprint = await bindApprovalFixture(runtimeCaseStore, caseId);
 
     let resumeStarted!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -267,12 +373,22 @@ describe("support workflow HTTP context propagation", () => {
         },
       }),
     } as never);
+    vi.spyOn(mastra, "getAgent").mockReturnValue({
+      approveToolCallGenerate: async () => undefined,
+      declineToolCallGenerate: async () => undefined,
+    } as never);
 
-    vi.useFakeTimers();
+    // Keep SQLite's retry backoff on real timers while driving only the
+    // approval heartbeat interval deterministically.
+    vi.useFakeTimers({ doNotFake: ["setTimeout", "nextTick", "setImmediate"] });
     try {
       const request = app.request(
         `http://support.test/support/cases/${caseId}/approve`,
-        { method: "POST" },
+        {
+          method: "POST",
+          headers: approverHeaders,
+          body: JSON.stringify({ commandFingerprint: fingerprint }),
+        },
       );
       await started;
       await vi.advanceTimersByTimeAsync(30_000);
@@ -339,6 +455,7 @@ describe("support workflow HTTP context propagation", () => {
       sql: "UPDATE support_dispatch SET state = 'suspended', lease_until = NULL, lease_token = NULL WHERE case_id = ?",
       args: [caseId],
     });
+    const fingerprint = await bindApprovalFixture(runtimeCaseStore, caseId);
 
     let resumeStarted!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -356,12 +473,20 @@ describe("support workflow HTTP context propagation", () => {
         },
       }),
     } as never);
+    vi.spyOn(mastra, "getAgent").mockReturnValue({
+      approveToolCallGenerate: async () => undefined,
+      declineToolCallGenerate: async () => undefined,
+    } as never);
 
-    vi.useFakeTimers();
+    vi.useFakeTimers({ doNotFake: ["setTimeout", "nextTick", "setImmediate"] });
     try {
       const request = app.request(
         `http://support.test/support/cases/${caseId}/approve`,
-        { method: "POST" },
+        {
+          method: "POST",
+          headers: approverHeaders,
+          body: JSON.stringify({ commandFingerprint: fingerprint }),
+        },
       );
       await started;
       await runtimeCaseStore.getClientForTests().execute({
@@ -434,7 +559,27 @@ describe("support workflow HTTP context propagation", () => {
     });
     const approved = await app.request(
       `http://support.test/support/cases/${id}/approve`,
-      { method: "POST" },
+      {
+        method: "POST",
+        headers: approverHeaders,
+        body: JSON.stringify({
+          commandFingerprint:
+            (
+              (await runtimeCaseStore.get(id))!.metadata as Record<
+                string,
+                unknown
+              >
+            ).refundCommand &&
+            (
+              (
+                (await runtimeCaseStore.get(id))!.metadata as Record<
+                  string,
+                  unknown
+                >
+              ).refundCommand as { fingerprint: string }
+            ).fingerprint,
+        }),
+      },
     );
     expect(approved.status).toBe(200);
     await vi.waitFor(async () =>
@@ -447,6 +592,7 @@ describe("support workflow HTTP context propagation", () => {
       app,
       caseStore: runtimeCaseStore,
       issueRefundTool,
+      mastra,
       responseAgent,
       searchSupportKnowledgeTool,
       triageAgent,
@@ -462,6 +608,7 @@ describe("support workflow HTTP context propagation", () => {
       headers: {
         "content-type": "application/json",
         "x-correlation-id": "inbound-correlation",
+        ...customerHeaders,
       },
       method: "POST",
     });
@@ -489,11 +636,29 @@ describe("support workflow HTTP context propagation", () => {
         ?.tracingContext,
     ).toBeDefined();
 
+    const approveNative = vi.spyOn(
+      mastra.getAgent("refundExecutionAgent"),
+      "approveToolCallGenerate",
+    );
+
     const approved = await app.request(
       `http://support.test/support/cases/${caseId}/approve`,
       {
-        headers: { "x-correlation-id": "approval-correlation" },
+        headers: {
+          "x-correlation-id": "approval-correlation",
+          ...approverHeaders,
+        },
         method: "POST",
+        body: JSON.stringify({
+          commandFingerprint: (
+            (
+              (await runtimeCaseStore.get(caseId))!.metadata as Record<
+                string,
+                unknown
+              >
+            ).refundCommand as { fingerprint: string }
+          ).fingerprint,
+        }),
       },
     );
     expect(approved.status).toBe(200);
@@ -510,6 +675,12 @@ describe("support workflow HTTP context propagation", () => {
       vi
         .mocked(issueRefundTool.execute)
         .mock.calls[0]?.[1]?.requestContext?.getRaw("correlationId"),
+    ).toBe("inbound-correlation");
+    // Native Agent snapshots retain the context from the tool-call run. The
+    // approval boundary still supplies the new Hono context to the official
+    // resume API, where its authenticated decision is durably recorded.
+    expect(
+      approveNative.mock.calls[0]?.[0]?.requestContext?.getRaw("correlationId"),
     ).toBe("approval-correlation");
   });
 });

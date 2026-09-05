@@ -182,9 +182,9 @@ export const supportCaseSchema = z.object({
 });
 export type SupportCase = z.infer<typeof supportCaseSchema>;
 
-export function threadIdForCase(caseId: string): string {
-  return `case_${caseId}`;
+export function threadIdForCase(caseId: string, tenantId: string): string {
+  return `tenant_${tenantId}_conversation_${caseId}`;
 }
-export function resourceIdForCase(caseId: string): string {
-  return `case_${caseId}`;
+export function resourceIdForCase(caseId: string, tenantId: string): string {
+  return `tenant_${tenantId}_case_${caseId}`;
 }

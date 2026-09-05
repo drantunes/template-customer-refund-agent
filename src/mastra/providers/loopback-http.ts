@@ -14,6 +14,7 @@ import type {
   SupportChannelProvider,
   TransactionalActionProvider,
 } from "./contracts";
+import type { NativeRefundExecutionAuthorization } from "./native-execution";
 import { sameBinding } from "./contracts";
 import { z } from "zod";
 
@@ -137,6 +138,15 @@ const commandSchema = z
     reason: z.string().min(1),
     idempotencyKey: z.string().min(1),
     fingerprint: z.string().min(1),
+  })
+  .strict();
+const nativeAuthorizationSchema = z
+  .object({
+    issuedAt: z.number().int(),
+    nativeRunId: z.string().min(1),
+    nativeToolCallId: z.string().min(1),
+    commandFingerprint: z.string().min(1),
+    signature: z.string().min(1),
   })
   .strict();
 
@@ -309,9 +319,17 @@ export function createLocalLoopbackFacade(
             },
             { status: 400 },
           );
+        const authorization = nativeAuthorizationSchema.safeParse(
+          body.authorization,
+        );
+        if (!authorization.success)
+          return Response.json(
+            { error: "missing or invalid native refund authorization" },
+            { status: 403 },
+          );
         const effect = await provider
           .transactions(body.binding)
-          .issueRefund(command);
+          .issueRefund(command, authorization.data);
         if (injected === "drop-after-commit")
           return new Promise(() => undefined);
         return Response.json(effectSchema.parse(effect));
@@ -552,12 +570,16 @@ class LoopbackHttpTransactionalProvider implements TransactionalActionProvider {
       quoteSchema,
     );
   }
-  issueRefund(command: RefundCommand) {
+  issueRefund(
+    command: RefundCommand,
+    authorization?: NativeRefundExecutionAuthorization,
+  ) {
     return this.http.call<RefundEffect>(
       "/transactions/issue-refund",
       {
         binding: command.binding,
         command,
+        authorization,
       },
       effectSchema,
     );

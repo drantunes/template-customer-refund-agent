@@ -3,11 +3,15 @@ import { z } from "zod";
 import { caseStore } from "../lib/case-store";
 import { generateCaseId } from "../integrations/support-source";
 import type { SupportCase } from "../domain/support-case";
-import { defaultLocalBinding } from "../runtime/local-runtime";
+import {
+  bindingsForPersistedCase,
+  defaultLocalBinding,
+} from "../runtime/local-runtime";
 import {
   providerRegistry,
   resolveConfiguredBinding,
 } from "../providers/registry";
+import { ownerIdForCustomer } from "../server/auth";
 
 const normalizeAndPersistStep = createStep({
   id: "normalize-inbound-message",
@@ -35,6 +39,27 @@ const normalizeAndPersistStep = createStep({
     const resolveRun = await mastra
       .getWorkflow("resolveSupportCaseWorkflow")
       .createRun();
+    const existingConversation = (await caseStore.list()).find((entry) => {
+      const binding = bindingsForPersistedCase(entry).support;
+      return (
+        binding.tenantId === support.tenantId &&
+        binding.providerAccountId === support.providerAccountId &&
+        binding.externalConversationId === support.externalConversationId
+      );
+    });
+    if (existingConversation) {
+      const followUp = await caseStore.appendFollowUp({
+        caseId: existingConversation.id,
+        eventId: `event_${normalized.source}_${normalized.externalId}`,
+        message: normalized.message,
+        runId: resolveRun.runId,
+      });
+      return {
+        caseId: existingConversation.id,
+        isNew: followUp.appended,
+        workflowRunId: followUp.appended ? resolveRun.runId : undefined,
+      };
+    }
     const supportCase: SupportCase = {
       id: generateCaseId(),
       status: "new",
@@ -47,6 +72,12 @@ const normalizeAndPersistStep = createStep({
       updatedAt: normalized.message.createdAt,
       metadata: {
         rawPayload: normalized.rawPayload,
+        // The adapter-normalized customer is mapped once at ingress to a
+        // stable local owner. Later client email/query fields never alter it.
+        ownerId: ownerIdForCustomer(
+          support.tenantId,
+          normalized.customer.email,
+        ),
         providerBinding: portBinding,
         providerBindings: {
           support: { ...portBinding },
@@ -92,7 +123,10 @@ const startResolutionStep = createStep({
       throw new Error(
         "Accepted inbound case is missing its durable workflow run id.",
       );
-    const dispatch = await caseStore.claimDispatchForStart(inputData.caseId);
+    const dispatch = await caseStore.claimDispatchForStart(
+      inputData.caseId,
+      inputData.workflowRunId,
+    );
     if (!dispatch) {
       // Recovery owns the lease, or this is the idempotent duplicate path.
       return {
@@ -105,8 +139,12 @@ const startResolutionStep = createStep({
     });
     await caseStore.update(inputData.caseId, {
       workflowRunId: inputData.workflowRunId,
+      metadata: {
+        ...(await caseStore.get(inputData.caseId))!.metadata,
+        activeTurnId: dispatch.turnId,
+      },
     });
-    await caseStore.markDispatchStarted(inputData.caseId, dispatch.leaseToken);
+    await caseStore.markDispatchStarted(dispatch.id, dispatch.leaseToken);
 
     const heartbeat = setInterval(
       () =>

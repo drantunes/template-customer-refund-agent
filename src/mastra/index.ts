@@ -10,11 +10,15 @@ import {
 import { triageAgent } from "./agents/triage-agent";
 import { responseAgent } from "./agents/response-agent";
 import { supportSupervisorAgent } from "./agents/support-supervisor";
+import { refundExecutionAgent } from "./agents/refund-execution-agent";
 import { ingestSupportCaseWorkflow } from "./workflows/ingest-support-case";
 import { resolveSupportCaseWorkflow } from "./workflows/resolve-support-case";
 import { indexSupportKnowledgeWorkflow } from "./workflows/index-support-knowledge";
 import { supportEvalScorerRegistry } from "./evals";
-import { getSharedLocalSqliteClient } from "./lib/sqlite-client";
+import {
+  closeSharedLocalSqliteClient,
+  getMastraSharedLocalSqliteClient,
+} from "./lib/sqlite-client";
 import { vectorStore } from "./lib/vector-store";
 import { supportRoutes } from "./server/routes";
 import { issueRefundTool } from "./tools/issue-refund";
@@ -26,12 +30,17 @@ import {
 import { searchSupportKnowledgeTool } from "./tools/search-support-knowledge";
 import { startLocalRuntimeWorkers } from "./runtime/local-runtime";
 import { setMastraStorageReady } from "./runtime/storage-lifecycle";
+import { LocalSupportAuthProvider } from "./server/auth";
+import { retentionPolicyFromEnvironment } from "./lib/case-store";
+
+const retentionPolicy = retentionPolicyFromEnvironment();
 
 export const mastra = new Mastra({
   agents: {
     triageAgent,
     responseAgent,
     supportSupervisorAgent,
+    refundExecutionAgent,
   },
   workflows: {
     ingestSupportCaseWorkflow,
@@ -45,7 +54,7 @@ export const mastra = new Mastra({
     lookupCustomerRefundHistoryTool,
     issueRefundTool,
   },
-  scorers: supportEvalScorerRegistry,
+  scorers: process.env.PHASE003_DISABLE_EVALS ? {} : supportEvalScorerRegistry,
   vectors: {
     supportKnowledge: vectorStore,
   },
@@ -53,12 +62,28 @@ export const mastra = new Mastra({
     id: "mastra-storage",
     // Supported client injection makes Mastra and CaseStore share one
     // cooperative write queue while keeping their table ownership separate.
-    client: getSharedLocalSqliteClient(),
+    client: getMastraSharedLocalSqliteClient(),
     maxRetries: 5,
     initialBackoffMs: 5,
+    // Use Mastra's supported retention API for its own memory and telemetry
+    // tables. Workflow snapshots are intentionally not configured here: their
+    // durable authority is retained until an explicit lifecycle policy exists.
+    retention: {
+      memory: {
+        messages: { maxAge: `${retentionPolicy.caseDays}d`, batchSize: 500 },
+        resources: { maxAge: `${retentionPolicy.caseDays}d`, batchSize: 500 },
+        threads: { maxAge: `${retentionPolicy.caseDays}d`, batchSize: 500 },
+      },
+      observability: {
+        spans: { maxAge: `${retentionPolicy.traceDays}d`, batchSize: 500 },
+      },
+    },
   }),
   server: {
     apiRoutes: supportRoutes,
+    // This protects the configured server's built-in agent/tool/workflow,
+    // approval, memory and storage routes as well as our custom API routes.
+    auth: new LocalSupportAuthProvider(),
   },
   logger: new PinoLogger({ name: "support-refund-agent", level: "info" }),
   observability: new Observability({
@@ -86,3 +111,9 @@ if (!process.env.VITEST)
   void storageReady.then(() =>
     startLocalRuntimeWorkers(mastra, mastra.getLogger()),
   );
+
+/** The supported orderly local shutdown: flush Mastra before releasing SQLite. */
+export async function shutdownLocalMastra() {
+  await mastra.shutdown();
+  await closeSharedLocalSqliteClient();
+}

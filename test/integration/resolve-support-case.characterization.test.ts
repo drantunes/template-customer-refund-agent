@@ -1,11 +1,14 @@
 import { rm } from "node:fs/promises";
-import { RequestContext } from "@mastra/core/request-context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   legacyAmountToMoney,
   refundFingerprint,
 } from "../../src/mastra/lib/money";
 import type { ProviderBinding } from "../../src/mastra/providers/contracts";
+import {
+  deterministicJsonModel,
+  deterministicRefundModel,
+} from "../fixtures/deterministic-language-model";
 
 const databaseFiles: string[] = [];
 const mastraRuntimes: Array<{ shutdown(): Promise<void> }> = [];
@@ -23,6 +26,7 @@ async function loadCharacterizationRuntime(draft: {
   );
   process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
   process.env.SUPPORT_SOURCE = "mock";
+  process.env.PHASE003_DISABLE_EVALS = "1";
   vi.resetModules();
   vi.doMock("@mastra/core/llm", async (importOriginal) => {
     const actual = await importOriginal<typeof import("@mastra/core/llm")>();
@@ -48,25 +52,23 @@ async function loadCharacterizationRuntime(draft: {
   const { triageAgent } = await import("../../src/mastra/agents/triage-agent");
   const { responseAgent } =
     await import("../../src/mastra/agents/response-agent");
-  const { searchSupportKnowledgeTool } =
-    await import("../../src/mastra/tools/search-support-knowledge");
   const { issueRefundTool } =
     await import("../../src/mastra/tools/issue-refund");
+  const { refundExecutionAgent } =
+    await import("../../src/mastra/agents/refund-execution-agent");
 
-  vi.spyOn(triageAgent, "generate").mockResolvedValue({
-    object: {
+  triageAgent.__updateModel({
+    model: deterministicJsonModel({
       intent: "duplicate_charge",
       urgency: "normal",
       sentiment: "negative",
       requiresHumanReview: draft.recommendRefund,
       confidence: 1,
       rationale: "Deterministic characterization double.",
-    },
-    usage: { inputTokens: 3, outputTokens: 5 },
-    response: { modelId: "deterministic/triage" },
-  } as never);
-  vi.spyOn(responseAgent, "generate").mockResolvedValue({
-    object: {
+    }),
+  });
+  responseAgent.__updateModel({
+    model: deterministicJsonModel({
       draftResponse:
         "A deterministic response grounded in the duplicate-charge policy.",
       citedSources: ["duplicate-charge-policy"],
@@ -78,22 +80,8 @@ async function loadCharacterizationRuntime(draft: {
       escalationReason: draft.requiresEscalation
         ? "Deterministic escalation."
         : undefined,
-    },
-    usage: { inputTokens: 7, outputTokens: 11 },
-    response: { modelId: "deterministic/response" },
-  } as never);
-  vi.spyOn(searchSupportKnowledgeTool, "execute").mockResolvedValue({
-    sources: [
-      {
-        metadata: {
-          title: "Duplicate charge policy",
-          source: "duplicate-charge-policy",
-          text: "Synthetic policy evidence for characterization.",
-        },
-        score: 0.99,
-      },
-    ],
-  } as never);
+    }),
+  });
 
   const normalized = await mockSupportAdapter.normalizeInbound({
     externalId: `characterization-${crypto.randomUUID()}`,
@@ -101,22 +89,106 @@ async function loadCharacterizationRuntime(draft: {
     subject: "I was charged twice",
     body: "Please refund the duplicate subscription charge.",
   });
-  const supportCase = await caseStore.create({
-    id: `case_${crypto.randomUUID()}`,
-    status: "new",
-    ...normalized,
+  const runId = `characterization-run-${crypto.randomUUID()}`;
+  const accepted = await caseStore.acceptInbound(
+    { id: `case_${crypto.randomUUID()}`, status: "new", ...normalized },
+    `event_${crypto.randomUUID()}`,
+    runId,
+  );
+  const supportCase = await caseStore.get(accepted.caseId);
+  if (!supportCase) throw new Error("Expected accepted support case.");
+  const [turn] = await caseStore.turns(supportCase.id);
+  if (!turn) throw new Error("Expected an immutable inbound turn.");
+  await caseStore.update(supportCase.id, {
+    workflowRunId: runId,
+    metadata: { ...supportCase.metadata, activeTurnId: turn.id },
+  });
+  const executionModel = async () => {
+    const action = await caseStore.getClientForTests().execute({
+      sql: "SELECT data FROM support_actions WHERE kind = 'refund-command' ORDER BY created_at DESC LIMIT 1",
+    });
+    const command = JSON.parse(String(action.rows[0]?.data ?? "{}")) as {
+      approvalCaseId?: string;
+      orderId?: string;
+      amount?: { minor?: number; currency?: string };
+      reason?: string;
+      idempotencyKey?: string;
+      fingerprint?: string;
+    };
+    return deterministicRefundModel({
+      caseId: command.approvalCaseId,
+      orderId: command.orderId,
+      amount: (command.amount?.minor ?? 0) / 100,
+      currency: command.amount?.currency,
+      reason: command.reason,
+      idempotencyKey: command.idempotencyKey,
+      fingerprint: command.fingerprint,
+    }) as never;
+  };
+  refundExecutionAgent.__updateModel({ model: executionModel });
+  mastra.getAgent("refundExecutionAgent").__updateModel({
+    model: executionModel,
   });
   mastraRuntimes.push(mastra);
 
   return {
     mastra,
     caseStore,
-    responseAgent,
-    searchSupportKnowledgeTool,
     supportCase,
-    triageAgent,
     issueRefundTool,
   };
+}
+
+async function startQueuedWorkflow(
+  runtime: Awaited<ReturnType<typeof loadCharacterizationRuntime>>,
+) {
+  const { recoverLocalWorkflows } =
+    await import("../../src/mastra/runtime/local-runtime");
+  expect(
+    await recoverLocalWorkflows(runtime.mastra, 10, runtime.caseStore),
+  ).toBe(1);
+  const supportCase = await runtime.caseStore.get(runtime.supportCase.id);
+  expect(supportCase).toMatchObject({ status: "waiting_approval" });
+  return supportCase!;
+}
+
+async function decideNativeApproval(
+  runtime: Awaited<ReturnType<typeof loadCharacterizationRuntime>>,
+  approved: boolean,
+) {
+  const supportCase = await runtime.caseStore.get(runtime.supportCase.id);
+  if (!supportCase) throw new Error("Expected a suspended support case.");
+  const native = (supportCase.metadata as Record<string, unknown>)
+    .nativeApproval as {
+    runId?: string;
+    toolCallId?: string;
+    turnId?: string;
+    fingerprint?: string;
+  };
+  if (
+    !native?.runId ||
+    !native.toolCallId ||
+    !native.turnId ||
+    !native.fingerprint
+  )
+    throw new Error("Expected a native approval binding.");
+  const decision = await runtime.caseStore.recordApprovalDecision({
+    caseId: runtime.supportCase.id,
+    turnId: native.turnId,
+    commandFingerprint: native.fingerprint,
+    principalId: "approver-demo",
+    approved,
+    nativeRunId: native.runId,
+    nativeToolCallId: native.toolCallId,
+  });
+  expect(decision.won).toBe(true);
+  const { recoverApprovedNativeDecisions } =
+    await import("../../src/mastra/runtime/local-runtime");
+  expect(
+    await recoverApprovedNativeDecisions(runtime.mastra, runtime.caseStore, {
+      disableScorers: true,
+    }),
+  ).toBe(1);
 }
 
 afterEach(async () => {
@@ -169,101 +241,51 @@ describe("resolve support case WIP characterization", () => {
   });
 
   it("suspends a refund recommendation, then resolves after the existing workflow approval checkpoint", async () => {
-    const {
-      mastra,
-      caseStore,
-      responseAgent,
-      searchSupportKnowledgeTool,
-      supportCase,
-      triageAgent,
-    } = await loadCharacterizationRuntime({
+    const runtime = await loadCharacterizationRuntime({
       recommendRefund: true,
       requiresEscalation: false,
       refundAmount: 49,
     });
-    const workflow = mastra.getWorkflow("resolveSupportCaseWorkflow");
-    const run = await workflow.createRun();
-    const requestContext = new RequestContext();
-    requestContext.setRaw("correlationId", "phase001-real-runtime");
-
-    const suspended = await run.start({
-      inputData: { caseId: supportCase.id },
-      requestContext,
-    });
-    expect(suspended.status).toBe("suspended");
-    expect((await caseStore.get(supportCase.id))?.status).toBe(
-      "waiting_approval",
-    );
+    const { caseStore, supportCase } = runtime;
+    const suspended = await startQueuedWorkflow(runtime);
     expect(
       (await caseStore.get(supportCase.id))?.policyMatches?.[0]?.source,
     ).toBe("duplicate-charge-policy");
-    const toolContext = vi.mocked(searchSupportKnowledgeTool.execute).mock
-      .calls[0]?.[1];
-    expect(toolContext).toMatchObject({ mastra });
-    expect(toolContext?.requestContext).toBe(requestContext);
-    expect(toolContext?.requestContext?.getRaw("correlationId")).toBe(
-      "phase001-real-runtime",
-    );
-    expect(toolContext?.tracingContext).toBeDefined();
     expect(
-      vi.mocked(triageAgent.generate).mock.calls[0]?.[1]?.requestContext,
-    ).toBe(requestContext);
-    expect(
-      vi.mocked(responseAgent.generate).mock.calls[0]?.[1]?.requestContext,
-    ).toBe(requestContext);
+      (suspended.metadata as Record<string, unknown>).nativeApproval,
+    ).toBeDefined();
 
-    const resumed = await run.resume({
-      step: "request-approval",
-      resumeData: { approved: true, approverId: "characterization-approver" },
-    });
-    expect(resumed.status).toBe("success");
+    await decideNativeApproval(runtime, true);
     expect(await caseStore.get(supportCase.id)).toMatchObject({
       status: "resolved",
-      approval: { approved: true, approverId: "characterization-approver" },
+      approval: { approved: true, approverId: "approver-demo" },
       refundResult: { amount: 49, status: "executed" },
     });
   });
 
   it("escalates when the existing approval checkpoint is rejected", async () => {
-    const { mastra, caseStore, supportCase } =
-      await loadCharacterizationRuntime({
-        recommendRefund: true,
-        requiresEscalation: false,
-        refundAmount: 49,
-      });
-    const run = await mastra
-      .getWorkflow("resolveSupportCaseWorkflow")
-      .createRun();
-
-    await run.start({ inputData: { caseId: supportCase.id } });
-    const resumed = await run.resume({
-      step: "request-approval",
-      resumeData: {
-        approved: false,
-        approverId: "characterization-approver",
-        note: "Needs review.",
-      },
+    const runtime = await loadCharacterizationRuntime({
+      recommendRefund: true,
+      requiresEscalation: false,
+      refundAmount: 49,
     });
-
-    expect(resumed.status).toBe("success");
+    const { caseStore, supportCase } = runtime;
+    await startQueuedWorkflow(runtime);
+    await decideNativeApproval(runtime, false);
     expect(await caseStore.get(supportCase.id)).toMatchObject({
       status: "escalated",
-      approval: { approved: false, approverId: "characterization-approver" },
+      approval: { approved: false, approverId: "approver-demo" },
     });
   });
 
   it("rejects a direct refund-tool bypass before approval and refuses a tampered persisted command after approval", async () => {
-    const { mastra, caseStore, issueRefundTool, supportCase } =
-      await loadCharacterizationRuntime({
-        recommendRefund: true,
-        requiresEscalation: false,
-        refundAmount: 49,
-      });
-    const run = await mastra
-      .getWorkflow("resolveSupportCaseWorkflow")
-      .createRun();
-    await run.start({ inputData: { caseId: supportCase.id } });
-    const suspended = await caseStore.get(supportCase.id);
+    const runtime = await loadCharacterizationRuntime({
+      recommendRefund: true,
+      requiresEscalation: false,
+      refundAmount: 49,
+    });
+    const { caseStore, issueRefundTool, supportCase } = runtime;
+    const suspended = await startQueuedWorkflow(runtime);
     expect(suspended).toBeDefined();
     if (!suspended) throw new Error("Expected workflow to suspend the case.");
     const command = (suspended.metadata as Record<string, unknown>)
@@ -299,30 +321,19 @@ describe("resolve support case WIP characterization", () => {
         },
       },
     });
-    const resumed = await run.resume({
-      step: "request-approval",
-      resumeData: { approved: true, approverId: "characterization-approver" },
-    });
-    expect(resumed.status).toBe("failed");
+    await decideNativeApproval(runtime, true);
     expect((await caseStore.get(supportCase.id))?.refundResult).toBeUndefined();
   });
 
   it("marks a detached workflow start failed when its refund quote exceeds the remaining balance", async () => {
-    const { mastra, caseStore, supportCase } =
-      await loadCharacterizationRuntime({
-        recommendRefund: true,
-        requiresEscalation: false,
-        refundAmount: 49,
-      });
-    const resolutionRun = await mastra
-      .getWorkflow("resolveSupportCaseWorkflow")
-      .createRun();
-    await resolutionRun.start({ inputData: { caseId: supportCase.id } });
-    const approved = await resolutionRun.resume({
-      step: "request-approval",
-      resumeData: { approved: true, approverId: "characterization-approver" },
+    const runtime = await loadCharacterizationRuntime({
+      recommendRefund: true,
+      requiresEscalation: false,
+      refundAmount: 49,
     });
-    expect(approved.status).toBe("success");
+    const { mastra, caseStore } = runtime;
+    await startQueuedWorkflow(runtime);
+    await decideNativeApproval(runtime, true);
 
     const payload = {
       externalId: `exhausted-balance-${crypto.randomUUID()}`,
@@ -356,7 +367,7 @@ describe("resolve support case WIP characterization", () => {
       });
     const run = await mastra
       .getWorkflow("resolveSupportCaseWorkflow")
-      .createRun();
+      .createRun({ runId: supportCase.workflowRunId!, disableScorers: true });
 
     const result = await run.start({ inputData: { caseId: supportCase.id } });
 
@@ -367,19 +378,17 @@ describe("resolve support case WIP characterization", () => {
     });
   });
 
-  it("reports a failed workflow when the deterministic triage double fails", async () => {
+  it("reports a failed workflow when the deterministic triage transport returns an invalid result", async () => {
     const { mastra, supportCase } = await loadCharacterizationRuntime({
       recommendRefund: false,
       requiresEscalation: false,
     });
     const { triageAgent } =
       await import("../../src/mastra/agents/triage-agent");
-    vi.mocked(triageAgent.generate).mockRejectedValueOnce(
-      new Error("Synthetic triage failure."),
-    );
+    triageAgent.__updateModel({ model: deterministicJsonModel({}) });
     const run = await mastra
       .getWorkflow("resolveSupportCaseWorkflow")
-      .createRun();
+      .createRun({ runId: supportCase.workflowRunId!, disableScorers: true });
 
     const result = await run.start({ inputData: { caseId: supportCase.id } });
 

@@ -3,86 +3,113 @@ import { serve } from "@hono/node-server";
 import { once } from "node:events";
 import { rm } from "node:fs/promises";
 import { Hono } from "hono";
+import { RequestContext } from "@mastra/core/request-context";
+import {
+  deterministicJsonModel,
+  deterministicRefundModel,
+  type DeterministicRefundModel,
+} from "../fixtures/deterministic-language-model";
 
 type Runtime = Awaited<ReturnType<typeof loadDeterministicRuntime>>;
 
 async function loadDeterministicRuntime() {
-  const databasePath = `/private/tmp/phase001-e2e-${crypto.randomUUID()}.db`;
+  const databasePath = `/private/tmp/phase003-e2e-${crypto.randomUUID()}.db`;
   process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
   delete process.env.TURSO_AUTH_TOKEN;
   process.env.SUPPORT_SOURCE = "mock";
-  // Constructor-time provider validation requires a key. The harness replaces every
-  // generation and embedding execution before a workflow begins, so this placeholder
-  // cannot reach an external provider.
-  process.env.OPENAI_API_KEY = "phase001-playwright-placeholder";
+  process.env.PHASE003_DISABLE_EVALS = "1";
+  process.env.LOCAL_AUTH_SIGNING_KEY =
+    "phase003-playwright-signing-key-must-be-at-least-32-characters";
+  process.env.OPENAI_API_KEY = "phase003-playwright-placeholder";
 
-  const [{ mastra }, { caseStore }] = await Promise.all([
-    import("../../src/mastra/index"),
-    import("../../src/mastra/lib/case-store"),
-  ]);
+  const { mastra, shutdownLocalMastra } =
+    await import("../../src/mastra/index");
+  const { caseStore } = await import("../../src/mastra/lib/case-store");
+  const { threadIdForCase, resourceIdForCase } =
+    await import("../../src/mastra/domain/support-case");
   const triageAgent = mastra.getAgent("triageAgent");
   const responseAgent = mastra.getAgent("responseAgent");
-  const searchTool = mastra.getTool("searchSupportKnowledgeTool");
-
-  triageAgent.generate = async () =>
-    ({
-      object: {
-        intent: "duplicate_charge",
-        urgency: "normal",
-        sentiment: "negative",
-        requiresHumanReview: true,
-        confidence: 1,
-        rationale: "Playwright deterministic model double.",
-      },
-      usage: { inputTokens: 1, outputTokens: 1 },
-      response: { modelId: "deterministic/triage" },
-    }) as never;
-  responseAgent.generate = async (messages) => {
-    const noRefund = JSON.stringify(messages).includes("update my address");
-    // The approved first journey intentionally leaves a balance for the
-    // independent rejection journey, while the runtime still rejects any
-    // quote above that balance.
-    return {
-      object: {
-        draftResponse: "A deterministic refund response.",
-        citedSources: ["duplicate-charge-policy"],
-        recommendRefund: !noRefund,
-        refundAmount: noRefund ? undefined : 20,
-        refundCurrency: noRefund ? undefined : "USD",
-        refundReason: noRefund ? undefined : "duplicate charge",
-        requiresEscalation: false,
-      },
-      usage: { inputTokens: 1, outputTokens: 1 },
-      response: { modelId: "deterministic/response" },
-    } as never;
+  const refundExecutionAgent = mastra.getAgent("refundExecutionAgent");
+  triageAgent.__updateModel({
+    model: deterministicJsonModel({
+      intent: "duplicate_charge",
+      urgency: "normal",
+      sentiment: "negative",
+      requiresHumanReview: true,
+      confidence: 1,
+      rationale: "Deterministic browser triage.",
+    }) as never,
+  });
+  responseAgent.__updateModel({
+    model: deterministicJsonModel({
+      draftResponse: "A deterministic refund response.",
+      citedSources: ["duplicate-charge-policy"],
+      recommendRefund: true,
+      refundAmount: 20,
+      refundCurrency: "USD",
+      refundReason: "duplicate charge",
+      requiresEscalation: false,
+    }) as never,
+  });
+  const refundModels = new Map<string, DeterministicRefundModel>();
+  const resolveRefundModel = async () => {
+    const action = await caseStore
+      .getClientForTests()
+      .execute(
+        "SELECT data FROM support_actions WHERE kind = 'refund-command' ORDER BY created_at DESC LIMIT 1",
+      );
+    const command = JSON.parse(String(action.rows[0]?.data ?? "{}")) as {
+      approvalCaseId: string;
+      orderId: string;
+      amount: { minor: number; currency: string };
+      reason: string;
+      idempotencyKey: string;
+      fingerprint: string;
+    };
+    let model = refundModels.get(command.fingerprint);
+    if (!model) {
+      model = deterministicRefundModel({
+        caseId: command.approvalCaseId,
+        orderId: command.orderId,
+        amount: command.amount.minor / 100,
+        currency: command.amount.currency,
+        reason: command.reason,
+        idempotencyKey: command.idempotencyKey,
+        fingerprint: command.fingerprint,
+      });
+      refundModels.set(command.fingerprint, model);
+    }
+    return model;
   };
-  searchTool.execute = async () =>
-    ({
-      sources: [
-        {
-          metadata: {
-            title: "Duplicate charge policy",
-            source: "duplicate-charge-policy",
-            text: "Deterministic policy evidence.",
-          },
-          score: 1,
-        },
-      ],
-    }) as never;
-
-  return { caseStore, databasePath, mastra };
+  refundExecutionAgent.__updateModel({ model: resolveRefundModel });
+  return {
+    caseStore,
+    databasePath,
+    mastra,
+    resourceIdForCase,
+    shutdownLocalMastra,
+    threadIdForCase,
+  };
 }
 
 async function startSupportApi(runtime: Runtime) {
   const routes = await import("../../src/mastra/server/routes");
   const app = new Hono();
   app.use("/support/*", async (c, next) => {
+    const requestContext = new RequestContext();
+    requestContext.setRaw("correlationId", c.req.header("x-correlation-id"));
     c.set("mastra", runtime.mastra);
+    c.set("requestContext", requestContext);
     await next();
   });
+  app.post("/support/auth/login", routes.supportLoginRoute.handler);
   app.post("/support/inbound", routes.supportInboundRoute.handler);
   app.get("/support/cases", routes.supportCasesListRoute.handler);
   app.get("/support/cases/:caseId", routes.supportCaseDetailRoute.handler);
+  app.post(
+    "/support/cases/:caseId/follow-ups",
+    routes.supportCaseFollowUpRoute.handler,
+  );
   app.post(
     "/support/cases/:caseId/approve",
     routes.supportCaseApproveRoute.handler,
@@ -95,14 +122,6 @@ async function startSupportApi(runtime: Runtime) {
     "/support/cases/:caseId/feedback",
     routes.supportCaseFeedbackRoute.handler,
   );
-  app.get(
-    "/support/monitoring/summary",
-    routes.supportMonitoringSummaryRoute.handler,
-  );
-  app.post(
-    "/support/knowledge/reindex",
-    routes.supportKnowledgeReindexRoute.handler,
-  );
   const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 4111 });
   if (!server.listening) await once(server, "listening");
   return () =>
@@ -111,103 +130,253 @@ async function startSupportApi(runtime: Runtime) {
     );
 }
 
-test("renders the local deterministic demo and reaches the portal", async ({
+async function signIn(
+  page: import("@playwright/test").Page,
+  email: string,
+  password: string,
+) {
+  await expect(page.getByText("Sign in to the local demo")).toBeVisible();
+  await page.locator("#session-email").fill(email);
+  await page.locator("#session-password").fill(password);
+  await page.getByRole("button", { name: "Sign in" }).click();
+}
+
+async function createCustomerCase(
+  page: import("@playwright/test").Page,
+  subject: string,
+) {
+  await page.getByLabel("Subject").fill(subject);
+  await page.getByLabel("Message").fill("Please refund the duplicate charge.");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByText("Your message is on its way")).toBeVisible();
+  await page.keyboard.press("Escape");
+}
+
+test("renders the local deterministic demo and reaches the signed-in portal", async ({
   page,
 }) => {
   await page.goto("/");
   await expect(page.getByText("Welcome to the demo")).toBeVisible();
   await page.getByRole("link", { name: "Let's go" }).click();
   await expect(page).toHaveURL(/\/portal$/);
-  await expect(
-    page.getByRole("heading", { name: "Customer portal" }),
-  ).toBeVisible();
+  await expect(page.getByText("Sign in to the local demo")).toBeVisible();
 });
 
-test("submits through real handlers and lets admin approve or reject the workflow", async ({
+test("runs customer follow-up, native approval, rejection, access denial, and session lifecycle", async ({
   page,
 }) => {
   const runtime = await loadDeterministicRuntime();
   const stopServer = await startSupportApi(runtime);
   try {
     await page.goto("/portal");
-    await page.getByLabel("Subject").fill("I was charged twice");
-    await page
-      .getByLabel("Message")
-      .fill("Please refund the duplicate charge.");
-    await page.getByRole("button", { name: "Send message" }).click();
-    await expect(page.getByText("Your message is on its way")).toBeVisible();
+    await signIn(page, "alex@example.com", "local-customer-alex");
+    await expect(
+      page.getByRole("heading", { name: "Customer portal" }),
+    ).toBeVisible();
+    await page.evaluate(() => {
+      const key = "support-demo:session";
+      const value = JSON.parse(localStorage.getItem(key) ?? "{}");
+      localStorage.setItem(
+        key,
+        JSON.stringify({ ...value, expiresAt: "2000-01-01T00:00:00.000Z" }),
+      );
+    });
+    await page.reload();
+    await expect(page.getByText("Sign in to the local demo")).toBeVisible();
+    await signIn(page, "alex@example.com", "local-customer-alex");
 
+    await createCustomerCase(page, "I was charged twice");
     await expect
       .poll(async () => (await runtime.caseStore.list())[0]?.status)
       .toBe("waiting_approval");
     const supportCase = (await runtime.caseStore.list())[0]!;
+    const firstTurn = (supportCase.metadata as Record<string, unknown>)
+      .activeTurnId;
+    const conversation = (
+      (supportCase.metadata as Record<string, unknown>).providerBinding as {
+        externalConversationId: string;
+      }
+    ).externalConversationId;
+    await page
+      .getByLabel("Follow-up message")
+      .fill("Please keep this in the same conversation.");
+    await page.getByRole("button", { name: "Send follow-up" }).click();
+    await expect
+      .poll(
+        async () =>
+          (await runtime.caseStore.get(supportCase.id))?.messages.length,
+      )
+      .toBe(2);
+    await expect
+      .poll(async () => (await runtime.caseStore.get(supportCase.id))?.status)
+      .toBe("waiting_approval");
+    const afterFollowUp = (await runtime.caseStore.get(supportCase.id))!;
+    expect(afterFollowUp.messages).toHaveLength(2);
+    expect(
+      (afterFollowUp.metadata as Record<string, unknown>).activeTurnId,
+    ).not.toBe(firstTurn);
+    expect(
+      (
+        (afterFollowUp.metadata as Record<string, unknown>).providerBinding as {
+          externalConversationId: string;
+        }
+      ).externalConversationId,
+    ).toBe(conversation);
+    expect(runtime.threadIdForCase(supportCase.id, "local-demo")).toContain(
+      supportCase.id,
+    );
+    expect(runtime.resourceIdForCase(supportCase.id, "local-demo")).toContain(
+      supportCase.id,
+    );
+    const fingerprint = (
+      (afterFollowUp.metadata as Record<string, unknown>).refundCommand as {
+        fingerprint: string;
+      }
+    ).fingerprint;
+
+    await page.getByRole("button", { name: "Sign out" }).click();
+    await expect(page.getByText("Sign in to the local demo")).toBeVisible();
     await page.goto(`/admin/${supportCase.id}`);
+    await signIn(page, "approver@local.test", "local-approver");
     await expect(page.getByText("Refund approval requested")).toBeVisible();
+    await expect(page.locator("code")).toContainText(fingerprint);
     await page.getByRole("button", { name: "Approve refund" }).click();
     await expect(page.getByText("Refund approved")).toBeVisible();
     await expect
       .poll(async () => (await runtime.caseStore.get(supportCase.id))?.status)
       .toBe("resolved");
+    expect(
+      await runtime.caseStore.approvalDecision(supportCase.id),
+    ).toMatchObject({
+      approved: true,
+      principalId: "approver-demo",
+      commandFingerprint: fingerprint,
+    });
+    const effects = await runtime.caseStore
+      .getClientForTests()
+      .execute(
+        "SELECT COUNT(*) AS count FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?",
+        ["local-demo", "local-demo"],
+      );
+    expect(Number(effects.rows[0]?.count)).toBe(1);
+
+    await page.getByLabel("More admin actions").click();
+    await page.getByRole("menuitem", { name: "Sign out" }).click();
+    await expect(page.getByText("Sign in to the local demo")).toBeVisible();
+
+    await runtime.caseStore.create({
+      id: "owner-denied",
+      externalId: "owner-denied-event",
+      source: "mock-email",
+      customer: { email: "jordan@example.com" },
+      subject: "Other owner",
+      messages: [],
+      status: "new",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      metadata: {
+        ownerId: "customer-jordan",
+        providerBinding: {
+          tenantId: "local-demo",
+          providerKind: "local",
+          providerAccountId: "local-demo",
+          externalConversationId: "owner-denied",
+        },
+      },
+    });
+    await runtime.caseStore.create({
+      id: "tenant-denied",
+      externalId: "tenant-denied-event",
+      source: "mock-email",
+      customer: { email: "alex@example.com" },
+      subject: "Other tenant",
+      messages: [],
+      status: "new",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      metadata: {
+        ownerId: "customer-alex",
+        providerBinding: {
+          tenantId: "other-tenant",
+          providerKind: "local",
+          providerAccountId: "other-tenant",
+          externalConversationId: "tenant-denied",
+        },
+      },
+    });
     await page.goto("/portal");
-    await page.getByRole("button", { name: "New message" }).click();
-    await page.getByLabel("Subject").fill("Duplicate charge requires review");
-    await page
-      .getByLabel("Message")
-      .fill("Please refund the duplicate charge.");
-    await page.getByRole("button", { name: "Send message" }).click();
+    await signIn(page, "alex@example.com", "local-customer-alex");
+    await expect(
+      page.getByRole("heading", { name: "Customer portal" }),
+    ).toBeVisible();
+    const denied = await page.evaluate(async () => {
+      const session = JSON.parse(
+        localStorage.getItem("support-demo:session") ?? "{}",
+      );
+      return Promise.all(
+        ["owner-denied", "tenant-denied"].map(
+          async (caseId) =>
+            (
+              await fetch(`/support/cases/${caseId}`, {
+                headers: { authorization: `Bearer ${session.token}` },
+              })
+            ).status,
+        ),
+      );
+    });
+    expect(denied).toEqual([403, 403]);
+
+    await createCustomerCase(page, "A separate refund request for review");
     await expect
-      .poll(async () => (await runtime.caseStore.list()).length)
+      .poll(
+        async () =>
+          (await runtime.caseStore.list()).filter((entry) =>
+            entry.id.startsWith("case_"),
+          ).length,
+      )
       .toBe(2);
-    const rejectedCase = (await runtime.caseStore.list()).find(
-      (candidate) => candidate.id !== supportCase.id,
-    );
-    expect(rejectedCase).toBeDefined();
+    const rejected = (await runtime.caseStore.list()).find(
+      (entry) => entry.id !== supportCase.id && entry.id.startsWith("case_"),
+    )!;
     await expect
-      .poll(async () => (await runtime.caseStore.get(rejectedCase!.id))?.status)
+      .poll(async () => (await runtime.caseStore.get(rejected.id))?.status)
       .toBe("waiting_approval");
-    await page.goto(`/admin/${rejectedCase!.id}`);
+    const rejectedFingerprint = (
+      (
+        (await runtime.caseStore.get(rejected.id))!.metadata as Record<
+          string,
+          unknown
+        >
+      ).refundCommand as { fingerprint: string }
+    ).fingerprint;
+    await page.getByRole("button", { name: "Sign out" }).click();
+    await page.goto(`/admin/${rejected.id}`);
+    await signIn(page, "approver@local.test", "local-approver");
+    await expect(page.locator("code")).toContainText(rejectedFingerprint);
     await page.getByRole("button", { name: "Reject and escalate" }).click();
     await expect(
       page.getByText("Refund rejected and case escalated"),
     ).toBeVisible();
     await expect
-      .poll(async () => (await runtime.caseStore.get(rejectedCase!.id))?.status)
+      .poll(async () => (await runtime.caseStore.get(rejected.id))?.status)
       .toBe("escalated");
-    await page.goto("/portal");
-    await page.getByRole("button", { name: "New message" }).click();
-    await page.getByLabel("Subject").fill("How do I update my address?");
-    await page.getByLabel("Message").fill("I need help updating my address.");
-    await page.getByRole("button", { name: "Send message" }).click();
-    await expect
-      .poll(async () => (await runtime.caseStore.list()).length)
-      .toBe(3);
-    const resolvedCase = (await runtime.caseStore.list()).find(
-      (candidate) =>
-        candidate.id !== supportCase.id && candidate.id !== rejectedCase!.id,
+    expect(await runtime.caseStore.approvalDecision(rejected.id)).toMatchObject(
+      {
+        approved: false,
+        principalId: "approver-demo",
+        commandFingerprint: rejectedFingerprint,
+      },
     );
-    expect(resolvedCase).toBeDefined();
-    await expect
-      .poll(async () => (await runtime.caseStore.get(resolvedCase!.id))?.status)
-      .toBe("resolved");
-    await expect(
-      page.getByText("A deterministic refund response.").first(),
-    ).toBeVisible();
-
-    const malformed = await page.evaluate(async () => {
-      const response = await fetch("/support/inbound", {
-        body: "{not-json",
-        headers: { "content-type": "application/json" },
-        method: "POST",
-      });
-      return { body: await response.json(), status: response.status };
-    });
-    expect(malformed).toEqual({
-      body: { error: "Invalid JSON body." },
-      status: 400,
-    });
-    expect(await runtime.caseStore.list()).toHaveLength(3);
+    const effectsAfterRejection = await runtime.caseStore
+      .getClientForTests()
+      .execute(
+        "SELECT COUNT(*) AS count FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?",
+        ["local-demo", "local-demo"],
+      );
+    expect(Number(effectsAfterRejection.rows[0]?.count)).toBe(1);
   } finally {
     await stopServer();
+    await runtime.shutdownLocalMastra();
     await Promise.all(
       [
         runtime.databasePath,
@@ -215,5 +384,6 @@ test("submits through real handlers and lets admin approve or reject the workflo
         `${runtime.databasePath}-wal`,
       ].map((path) => rm(path, { force: true })),
     );
+    delete process.env.PHASE003_DISABLE_EVALS;
   }
 });

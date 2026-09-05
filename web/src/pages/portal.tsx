@@ -40,16 +40,20 @@ import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/status-badge";
 import { CaseFeedback } from "@/components/portal/case-feedback";
-import { isCaseActive, listCases, submitCase } from "@/lib/api";
+import {
+  clearSession,
+  currentSession,
+  isCaseActive,
+  listCases,
+  submitCase,
+  submitFollowUp,
+  type SupportSession,
+} from "@/lib/api";
+import { SessionLogin } from "@/components/session-login";
 import { MOCK_INBOUND_EMAILS } from "@/lib/mock-emails";
 import type { MockEmailPayload, SupportCase } from "@/lib/types";
 import { ArrowUpRight, Plus, Send } from "lucide-react";
 import { Spinner } from "@/components/ui/spinner";
-
-// Every case submitted through this demo portal comes from the same
-// "logged in" customer - there's no per-user auth, so we skip asking for an
-// email and use one fixed address everywhere instead.
-const CUSTOMER_EMAIL = "alex@example.com";
 
 function CaseCard({
   supportCase,
@@ -119,6 +123,9 @@ function CaseCard({
 }
 
 export function Portal() {
+  const [session, setSession] = useState<SupportSession | undefined>(() =>
+    currentSession(),
+  );
   const [name, setName] = useState("");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
@@ -129,6 +136,7 @@ export function Portal() {
   const [view, setView] = useState<"form" | "cases">("form");
   const [nextStepsOpen, setNextStepsOpen] = useState(false);
   const [lastCaseId, setLastCaseId] = useState<string | null>(null);
+  const [followUp, setFollowUp] = useState("");
 
   const refreshCases = useCallback(async () => {
     setLoadingCases(true);
@@ -170,7 +178,7 @@ export function Portal() {
     try {
       const result = await submitCase({
         externalId: `web-${crypto.randomUUID()}`,
-        from: CUSTOMER_EMAIL,
+        from: session!.principal.email,
         fromName: name || undefined,
         subject,
         body,
@@ -190,12 +198,39 @@ export function Portal() {
     }
   }
 
+  if (!session)
+    return (
+      <SessionLogin
+        email="alex@example.com"
+        password="local-customer-alex"
+        onSession={setSession}
+      />
+    );
+  if (!session.principal.roles.includes("customer"))
+    return (
+      <p className="text-muted-foreground">
+        This session cannot access the customer portal.
+      </p>
+    );
+
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-8">
       <section className="flex flex-col gap-2">
-        <h1 className="text-3xl font-semibold tracking-tight">
-          Customer portal
-        </h1>
+        <div className="flex items-center justify-between gap-3">
+          <h1 className="text-3xl font-semibold tracking-tight">
+            Customer portal
+          </h1>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              clearSession();
+              setSession(undefined);
+            }}
+          >
+            Sign out
+          </Button>
+        </div>
         <p className="max-w-2xl text-muted-foreground">
           Send a message to support and watch the case status update as the AI
           works on it.
@@ -222,7 +257,7 @@ export function Portal() {
                 </Field>
                 <Field>
                   <FieldLabel htmlFor="email">Email</FieldLabel>
-                  <Input id="email" value={CUSTOMER_EMAIL} disabled />
+                  <Input id="email" value={session.principal.email} disabled />
                   <FieldDescription>
                     This demo uses one fixed customer account.
                   </FieldDescription>
@@ -335,11 +370,50 @@ export function Portal() {
                 />
               ))}
             </div>
+            {cases.length > 0 && (
+              <form
+                className="flex gap-2"
+                onSubmit={async (event) => {
+                  event.preventDefault();
+                  const target = cases[0];
+                  if (!target || !followUp.trim()) return;
+                  try {
+                    const updated = await submitFollowUp(
+                      target.id,
+                      followUp.trim(),
+                    );
+                    setCases((previous) =>
+                      previous.map((entry) =>
+                        entry.id === updated.id ? updated : entry,
+                      ),
+                    );
+                    setFollowUp("");
+                  } catch (error) {
+                    toast.error(
+                      error instanceof Error
+                        ? error.message
+                        : "Failed to send follow-up",
+                    );
+                  }
+                }}
+              >
+                <Textarea
+                  aria-label="Follow-up message"
+                  value={followUp}
+                  onChange={(event) => setFollowUp(event.target.value)}
+                  placeholder="Add a follow-up to your most recent case"
+                  rows={2}
+                />
+                <Button type="submit" variant="outline">
+                  Send follow-up
+                </Button>
+              </form>
+            )}
           </CardContent>
         </Card>
       )}
 
-      <Dialog open={nextStepsOpen} onOpenChange={() => {}}>
+      <Dialog open={nextStepsOpen} onOpenChange={setNextStepsOpen}>
         <DialogContent showCloseButton={false}>
           <DialogHeader>
             <DialogTitle>Your message is on its way</DialogTitle>
@@ -367,6 +441,7 @@ export function Portal() {
                   <ArrowUpRight data-icon="inline-end" />
                 </a>
               }
+              nativeButton={false}
               variant="outline"
             ></Button>
             <Button
@@ -380,6 +455,7 @@ export function Portal() {
                   <ArrowUpRight data-icon="inline-end" />
                 </a>
               }
+              nativeButton={false}
               onClick={() => setNextStepsOpen(false)}
             ></Button>
           </DialogFooter>
