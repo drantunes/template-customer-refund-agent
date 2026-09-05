@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -60,30 +60,76 @@ const FILTERS = [
 ] as const;
 
 export function Admin() {
+  const [session, setSession] = useState<SupportSession | undefined>(() =>
+    currentSession(),
+  );
+  if (!session)
+    return (
+      <SessionLogin
+        email="approver@local.test"
+        password="local-approver"
+        onSession={setSession}
+      />
+    );
+  if (
+    !session.principal.roles.includes("approver") &&
+    !session.principal.roles.includes("admin")
+  )
+    return (
+      <p className="text-muted-foreground">
+        This session cannot review refunds.
+      </p>
+    );
+
+  return (
+    <AdminSession
+      key={session.token}
+      session={session}
+      onSignOut={() => {
+        clearSession();
+        setSession(undefined);
+      }}
+    />
+  );
+}
+
+function AdminSession({
+  session,
+  onSignOut,
+}: {
+  session: SupportSession;
+  onSignOut: () => void;
+}) {
+  const mounted = useRef(true);
   const { caseId } = useParams<{ caseId?: string }>();
   const navigate = useNavigate();
 
   const [cases, setCases] = useState<SupportCase[]>([]);
-  const [session, setSession] = useState<SupportSession | undefined>(() =>
-    currentSession(),
-  );
   const [filter, setFilter] =
     useState<(typeof FILTERS)[number]["value"]>("all");
   const [reindexing, setReindexing] = useState(false);
   const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
-      const res = await listCases();
+      const res = await listCases(session);
+      if (!mounted.current) return;
       setCases(res.cases);
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Failed to load cases",
-      );
+      if (mounted.current)
+        toast.error(
+          error instanceof Error ? error.message : "Failed to load cases",
+        );
     } finally {
-      setLoading(false);
+      if (mounted.current) setLoading(false);
     }
-  }, []);
+  }, [session]);
 
   useEffect(() => {
     refresh();
@@ -114,12 +160,14 @@ export function Admin() {
   async function handleReindex() {
     setReindexing(true);
     try {
-      const result = await reindexKnowledge();
+      const result = await reindexKnowledge(session);
+      if (!mounted.current) return;
       toast.success(`Indexed ${result.indexed} policy chunks`);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Reindex failed");
+      if (mounted.current)
+        toast.error(error instanceof Error ? error.message : "Reindex failed");
     } finally {
-      setReindexing(false);
+      if (mounted.current) setReindexing(false);
     }
   }
 
@@ -131,36 +179,20 @@ export function Admin() {
     if (!selectedCase) return;
     try {
       const updated = approved
-        ? await approveCase(selectedCase.id, commandFingerprint, note)
-        : await rejectCase(selectedCase.id, commandFingerprint, note);
+        ? await approveCase(selectedCase.id, commandFingerprint, note, session)
+        : await rejectCase(selectedCase.id, commandFingerprint, note, session);
+      if (!mounted.current) return;
       setCases((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
       toast.success(
         approved ? "Refund approved" : "Refund rejected and case escalated",
       );
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Failed to submit decision",
-      );
+      if (mounted.current)
+        toast.error(
+          error instanceof Error ? error.message : "Failed to submit decision",
+        );
     }
   }
-
-  if (!session)
-    return (
-      <SessionLogin
-        email="approver@local.test"
-        password="local-approver"
-        onSession={setSession}
-      />
-    );
-  if (
-    !session.principal.roles.includes("approver") &&
-    !session.principal.roles.includes("admin")
-  )
-    return (
-      <p className="text-muted-foreground">
-        This session cannot review refunds.
-      </p>
-    );
 
   return (
     <div className="flex flex-col gap-6">
@@ -212,8 +244,7 @@ export function Admin() {
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 onClick={() => {
-                  clearSession();
-                  setSession(undefined);
+                  onSignOut();
                 }}
               >
                 Sign out
@@ -347,7 +378,7 @@ export function Admin() {
 
       <Separator />
 
-      <MonitoringSection />
+      <MonitoringSection session={session} />
     </div>
   );
 }

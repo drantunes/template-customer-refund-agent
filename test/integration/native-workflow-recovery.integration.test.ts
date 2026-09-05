@@ -1,4 +1,4 @@
-import type { LanguageModelV2 } from "@ai-sdk/provider";
+import type { LanguageModelV2, LanguageModelV2Prompt } from "@ai-sdk/provider";
 import { RequestContext } from "@mastra/core/request-context";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -91,7 +91,7 @@ function responseLookupModel(
       externalConversationId: string;
     };
   } = { customerEmail: "alex@example.com", orderId: "ORD-1001" },
-  prompts: string[] = [],
+  prompts: LanguageModelV2Prompt[] = [],
 ): LanguageModelV2 {
   let called = false;
   return {
@@ -100,7 +100,7 @@ function responseLookupModel(
     modelId: "deterministic-response-lookup",
     supportedUrls: {},
     async doGenerate(options) {
-      prompts.push(JSON.stringify(options.prompt));
+      prompts.push(options.prompt);
       if (
         !called &&
         options.tools?.some(
@@ -145,6 +145,23 @@ function responseLookupModel(
       );
     },
   };
+}
+
+function responseLookupToolResult(prompts: LanguageModelV2Prompt[]) {
+  const result = prompts
+    .flatMap((prompt) =>
+      prompt.flatMap((message) =>
+        message.role === "tool" ? message.content : [],
+      ),
+    )
+    .find(
+      (part) =>
+        part.type === "tool-result" &&
+        part.toolCallId === "response-lookup" &&
+        part.toolName === "lookup_order",
+    );
+  expect(result).toBeDefined();
+  return result!;
 }
 
 async function setup(
@@ -424,7 +441,7 @@ afterEach(async () => {
 describe("native approval workflow recovery", () => {
   it("lets the registered response Agent read only the durable current customer commerce scope", async () => {
     const caseId = `response-agent-lookup-${crypto.randomUUID()}`;
-    const observedPrompts: string[] = [];
+    const observedPrompts: LanguageModelV2Prompt[] = [];
     const { caseStore } = await setup(
       caseId,
       undefined,
@@ -432,47 +449,62 @@ describe("native approval workflow recovery", () => {
       { amount: 1001, currency: "USD" },
       { responseModel: responseLookupModel(undefined, observedPrompts) },
     );
-    // The second real Agent model turn carries the registered tool result.
-    // A draft-only assertion would pass even if lookup_order failed closed.
-    expect(observedPrompts.join("\n")).toContain("Pro Plan - Monthly");
-    expect(observedPrompts.join("\n")).toContain("alex@example.com");
+    // The second real Agent turn must carry this actual registered tool
+    // result. Initial workflow context contains these fields, so it cannot
+    // establish that the response Agent was able to call lookup_order.
+    expect(responseLookupToolResult(observedPrompts).output).toMatchObject({
+      type: "json",
+      value: {
+        found: true,
+        order: {
+          orderId: "ORD-1001",
+          customerEmail: "alex@example.com",
+          product: "Pro Plan - Monthly",
+        },
+      },
+    });
     expect((await caseStore.get(caseId))?.draft).toMatchObject({
       draftResponse: "Verified lookup response.",
     });
   });
 
-  it("denies foreign response-agent lookup arguments without exposing foreign commerce data", async () => {
+  it.each([
+    {
+      name: "a foreign owner with the durable provider binding",
+      input: { customerEmail: "jordan@example.com", orderId: "ORD-1002" },
+      error: "Commerce lookup scope does not match the verified case owner.",
+    },
+    {
+      name: "a foreign provider account with the durable owner",
+      input: {
+        customerEmail: "alex@example.com",
+        orderId: "ORD-1001",
+        binding: {
+          tenantId: "local-demo",
+          providerKind: "local" as const,
+          providerAccountId: "foreign-account",
+          externalConversationId: "foreign-conversation",
+        },
+      },
+      error: "Commerce lookup binding does not match the durable case.",
+    },
+  ])("denies response-agent lookup for $name", async ({ input, error }) => {
     const caseId = `response-agent-foreign-lookup-${crypto.randomUUID()}`;
-    const observedPrompts: string[] = [];
+    const observedPrompts: LanguageModelV2Prompt[] = [];
     const { caseStore } = await setup(
       caseId,
       undefined,
       undefined,
       { amount: 1001, currency: "USD" },
-      {
-        responseModel: responseLookupModel(
-          {
-            customerEmail: "jordan@example.com",
-            orderId: "ORD-1002",
-            binding: {
-              tenantId: "local-demo",
-              providerKind: "local",
-              providerAccountId: "foreign-account",
-              externalConversationId: "foreign-conversation",
-            },
-          },
-          observedPrompts,
-        ),
-      },
+      { responseModel: responseLookupModel(input, observedPrompts) },
     );
+    expect(responseLookupToolResult(observedPrompts).output).toMatchObject({
+      type: "error-text",
+      value: error,
+    });
     expect((await caseStore.get(caseId))?.draft).toMatchObject({
       draftResponse: "Verified lookup response.",
     });
-    // The model authored Jordan's identifiers, so those can appear in its
-    // request. The response Agent must never receive Jordan's durable order.
-    const modelInput = observedPrompts.join("\n");
-    expect(modelInput).not.toContain("Wireless Headphones");
-    expect(modelInput).not.toContain("12999");
   });
 
   it("uses the authenticated server acceptance time for future and past inbound retention in runtime and CLI", async () => {

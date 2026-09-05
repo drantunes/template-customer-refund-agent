@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -52,15 +52,17 @@ import {
 import { SessionLogin } from "@/components/session-login";
 import { MOCK_INBOUND_EMAILS } from "@/lib/mock-emails";
 import type { MockEmailPayload, SupportCase } from "@/lib/types";
-import { ArrowUpRight, Plus, Send } from "lucide-react";
+import { ArrowUpRight, Plus, RefreshCcw, Send } from "lucide-react";
 import { Spinner } from "@/components/ui/spinner";
 
 function CaseCard({
   supportCase,
   onCaseUpdated,
+  session,
 }: {
   supportCase: SupportCase;
   onCaseUpdated: (updated: SupportCase) => void;
+  session: SupportSession;
 }) {
   const lastAgentMessage = [...supportCase.messages]
     .reverse()
@@ -115,7 +117,11 @@ function CaseCard({
           </p>
         )}
         {isClosed && (
-          <CaseFeedback supportCase={supportCase} onSubmitted={onCaseUpdated} />
+          <CaseFeedback
+            supportCase={supportCase}
+            onSubmitted={onCaseUpdated}
+            session={session}
+          />
         )}
       </CardContent>
     </Card>
@@ -126,6 +132,41 @@ export function Portal() {
   const [session, setSession] = useState<SupportSession | undefined>(() =>
     currentSession(),
   );
+  if (!session)
+    return (
+      <SessionLogin
+        email="alex@example.com"
+        password="local-customer-alex"
+        onSession={setSession}
+      />
+    );
+  if (!session.principal.roles.includes("customer"))
+    return (
+      <p className="text-muted-foreground">
+        This session cannot access the customer portal.
+      </p>
+    );
+
+  return (
+    <PortalSession
+      key={session.token}
+      session={session}
+      onSignOut={() => {
+        clearSession();
+        setSession(undefined);
+      }}
+    />
+  );
+}
+
+function PortalSession({
+  session,
+  onSignOut,
+}: {
+  session: SupportSession;
+  onSignOut: () => void;
+}) {
+  const mounted = useRef(true);
   const [name, setName] = useState("");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
@@ -137,20 +178,27 @@ export function Portal() {
   const [nextStepsOpen, setNextStepsOpen] = useState(false);
   const [lastCaseId, setLastCaseId] = useState<string | null>(null);
   const [followUp, setFollowUp] = useState("");
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const refreshCases = useCallback(async () => {
     setLoadingCases(true);
     try {
-      const res = await listCases();
+      const res = await listCases(session);
+      if (!mounted.current) return null;
       setCases(res.cases);
       return res.cases;
     } catch {
       // Keep showing the last known list on transient errors.
       return null;
     } finally {
-      setLoadingCases(false);
+      if (mounted.current) setLoadingCases(false);
     }
-  }, []);
+  }, [session]);
 
   useEffect(() => {
     (async () => {
@@ -176,13 +224,17 @@ export function Portal() {
     if (!subject || !body) return;
     setSubmitting(true);
     try {
-      const result = await submitCase({
-        externalId: `web-${crypto.randomUUID()}`,
-        from: session!.principal.email,
-        fromName: name || undefined,
-        subject,
-        body,
-      });
+      const result = await submitCase(
+        {
+          externalId: `web-${crypto.randomUUID()}`,
+          from: session.principal.email,
+          fromName: name || undefined,
+          subject,
+          body,
+        },
+        session,
+      );
+      if (!mounted.current) return;
       setSubject("");
       setBody("");
       setLastCaseId(result.caseId);
@@ -190,28 +242,14 @@ export function Portal() {
       setNextStepsOpen(true);
       await refreshCases();
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Failed to submit case",
-      );
+      if (mounted.current)
+        toast.error(
+          error instanceof Error ? error.message : "Failed to submit case",
+        );
     } finally {
-      setSubmitting(false);
+      if (mounted.current) setSubmitting(false);
     }
   }
-
-  if (!session)
-    return (
-      <SessionLogin
-        email="alex@example.com"
-        password="local-customer-alex"
-        onSession={setSession}
-      />
-    );
-  if (!session.principal.roles.includes("customer"))
-    return (
-      <p className="text-muted-foreground">
-        This session cannot access the customer portal.
-      </p>
-    );
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-8">
@@ -224,8 +262,7 @@ export function Portal() {
             variant="outline"
             size="sm"
             onClick={() => {
-              clearSession();
-              setSession(undefined);
+              onSignOut();
             }}
           >
             Sign out
@@ -333,10 +370,25 @@ export function Portal() {
                 Everything you've sent to support.
               </CardDescription>
             </div>
-            <Button variant="outline" size="sm" onClick={() => setView("form")}>
-              <Plus data-icon="inline-start" />
-              New message
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void refreshCases()}
+                disabled={loadingCases}
+              >
+                <RefreshCcw data-icon="inline-start" />
+                Refresh cases
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setView("form")}
+              >
+                <Plus data-icon="inline-start" />
+                New message
+              </Button>
+            </div>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
             {loadingCases && cases.length === 0 && (
@@ -367,6 +419,7 @@ export function Portal() {
                       ),
                     )
                   }
+                  session={session}
                 />
               ))}
             </div>
@@ -381,7 +434,9 @@ export function Portal() {
                     const updated = await submitFollowUp(
                       target.id,
                       followUp.trim(),
+                      session,
                     );
+                    if (!mounted.current) return;
                     setCases((previous) =>
                       previous.map((entry) =>
                         entry.id === updated.id ? updated : entry,
@@ -389,11 +444,12 @@ export function Portal() {
                     );
                     setFollowUp("");
                   } catch (error) {
-                    toast.error(
-                      error instanceof Error
-                        ? error.message
-                        : "Failed to send follow-up",
-                    );
+                    if (mounted.current)
+                      toast.error(
+                        error instanceof Error
+                          ? error.message
+                          : "Failed to send follow-up",
+                      );
                   }
                 }}
               >

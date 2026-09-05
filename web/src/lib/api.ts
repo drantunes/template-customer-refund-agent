@@ -50,8 +50,11 @@ export async function login(email: string, password: string) {
 // In production, point VITE_API_BASE_URL at wherever the Mastra app is deployed.
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const session = currentSession();
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  session = currentSession(),
+): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     headers: {
@@ -69,15 +72,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export function listCases(): Promise<{ cases: SupportCase[] }> {
-  return request<{ cases?: SupportCase[] }>("/support/cases").then(
-    (response) => {
-      if (!Array.isArray(response.cases)) {
-        throw new Error("Support API returned an invalid case-list response.");
-      }
-      return { cases: response.cases };
-    },
-  );
+export function listCases(
+  session?: SupportSession,
+): Promise<{ cases: SupportCase[] }> {
+  return request<{ cases?: SupportCase[] }>(
+    "/support/cases",
+    undefined,
+    session,
+  ).then((response) => {
+    if (!Array.isArray(response.cases)) {
+      throw new Error("Support API returned an invalid case-list response.");
+    }
+    return { cases: response.cases };
+  });
 }
 
 export function getCase(caseId: string): Promise<SupportCase> {
@@ -86,62 +93,91 @@ export function getCase(caseId: string): Promise<SupportCase> {
 
 export function submitCase(
   payload: MockEmailPayload,
+  session?: SupportSession,
 ): Promise<InboundSupportResponse> {
-  return request("/support/inbound", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+  return request(
+    "/support/inbound",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    session,
+  );
 }
 
 export function approveCase(
   caseId: string,
   commandFingerprint: string,
   note?: string,
+  session?: SupportSession,
 ): Promise<SupportCase> {
-  return request(`/support/cases/${caseId}/approve`, {
-    method: "POST",
-    body: JSON.stringify({ commandFingerprint, note }),
-  });
+  return request(
+    `/support/cases/${caseId}/approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({ commandFingerprint, note }),
+    },
+    session,
+  );
 }
 
 export function rejectCase(
   caseId: string,
   commandFingerprint: string,
   note?: string,
+  session?: SupportSession,
 ): Promise<SupportCase> {
-  return request(`/support/cases/${caseId}/reject`, {
-    method: "POST",
-    body: JSON.stringify({ commandFingerprint, note }),
-  });
+  return request(
+    `/support/cases/${caseId}/reject`,
+    {
+      method: "POST",
+      body: JSON.stringify({ commandFingerprint, note }),
+    },
+    session,
+  );
 }
 
 export function submitFollowUp(
   caseId: string,
   body: string,
+  session?: SupportSession,
 ): Promise<SupportCase> {
-  return request(`/support/cases/${caseId}/follow-ups`, {
-    method: "POST",
-    body: JSON.stringify({ body }),
-  });
+  return request(
+    `/support/cases/${caseId}/follow-ups`,
+    {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    },
+    session,
+  );
 }
 
-export function reindexKnowledge(): Promise<{ indexed: number }> {
-  return request("/support/knowledge/reindex", { method: "POST" });
+export function reindexKnowledge(
+  session?: SupportSession,
+): Promise<{ indexed: number }> {
+  return request("/support/knowledge/reindex", { method: "POST" }, session);
 }
 
 export function submitCaseFeedback(
   caseId: string,
   rating: "up" | "down",
   comment?: string,
+  session?: SupportSession,
 ): Promise<SupportCase> {
-  return request(`/support/cases/${caseId}/feedback`, {
-    method: "POST",
-    body: JSON.stringify({ rating, comment }),
-  });
+  return request(
+    `/support/cases/${caseId}/feedback`,
+    {
+      method: "POST",
+      body: JSON.stringify({ rating, comment }),
+    },
+    session,
+  );
 }
 
-export function getMonitoringSummary(): Promise<MonitoringSummary> {
-  return request("/support/monitoring/summary");
+export function getMonitoringSummary(
+  session?: SupportSession,
+): Promise<MonitoringSummary> {
+  return request("/support/monitoring/summary", undefined, session);
 }
 
 /** A case is still moving through the pipeline and worth polling for updates. */

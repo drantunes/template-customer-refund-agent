@@ -148,6 +148,40 @@ async function createCustomerCase(
   await page.keyboard.press("Escape");
 }
 
+async function createTerminalCase(
+  runtime: Runtime,
+  input: { id: string; ownerId: string; email: string; subject: string },
+) {
+  const createdAt = new Date().toISOString();
+  await runtime.caseStore.create({
+    id: input.id,
+    externalId: `${input.id}-event`,
+    source: "mock-email",
+    customer: { email: input.email },
+    subject: input.subject,
+    messages: [
+      {
+        id: `${input.id}-message`,
+        author: "customer",
+        body: "Synthetic terminal case for browser session isolation.",
+        createdAt,
+      },
+    ],
+    status: "resolved",
+    createdAt,
+    updatedAt: createdAt,
+    metadata: {
+      ownerId: input.ownerId,
+      providerBinding: {
+        tenantId: "local-demo",
+        providerKind: "local",
+        providerAccountId: "local-demo",
+        externalConversationId: input.id,
+      },
+    },
+  });
+}
+
 test("renders the local deterministic demo and reaches the signed-in portal", async ({
   page,
 }) => {
@@ -158,12 +192,115 @@ test("renders the local deterministic demo and reaches the signed-in portal", as
   await expect(page.getByText("Sign in to the local demo")).toBeVisible();
 });
 
+async function assertMountedSessionIsolation(
+  page: import("@playwright/test").Page,
+  runtime: Runtime,
+) {
+  let releaseOldPortalList: (() => void) | undefined;
+  let delayNextPortalList = true;
+  let resolveOldPortalListCompleted: (() => void) | undefined;
+  const oldPortalListCompleted = new Promise<void>((resolve) => {
+    resolveOldPortalListCompleted = resolve;
+  });
+  await createTerminalCase(runtime, {
+    id: "alex-terminal-session-case",
+    ownerId: "customer-alex",
+    email: "alex@example.com",
+    subject: "Alex terminal session case",
+  });
+  await createTerminalCase(runtime, {
+    id: "jordan-terminal-session-case",
+    ownerId: "customer-jordan",
+    email: "jordan@example.com",
+    subject: "Jordan terminal session case",
+  });
+
+  await page.goto("/portal");
+  await signIn(page, "alex@example.com", "local-customer-alex");
+  await expect(page.getByText("Alex terminal session case")).toBeVisible();
+
+  const oldPortalListStarted = new Promise<void>((resolve) => {
+    void page.route("**/support/cases", async (route) => {
+      if (!delayNextPortalList) {
+        await route.continue();
+        return;
+      }
+      delayNextPortalList = false;
+      const response = await route.fetch();
+      resolve();
+      await new Promise<void>((release) => {
+        releaseOldPortalList = release;
+      });
+      await route.fulfill({ response });
+      resolveOldPortalListCompleted?.();
+    });
+  });
+  await page.getByRole("button", { name: "Refresh cases" }).click();
+  await oldPortalListStarted;
+
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page.getByText("Sign in to the local demo")).toBeVisible();
+  await expect(page.getByText("Alex terminal session case")).toHaveCount(0);
+  await signIn(page, "jordan@example.com", "local-customer-jordan");
+  await expect(page.getByText("Jordan terminal session case")).toBeVisible();
+  await expect(page.getByText("Alex terminal session case")).toHaveCount(0);
+
+  releaseOldPortalList?.();
+  await oldPortalListCompleted;
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  await expect(page.getByText("Alex terminal session case")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page.getByText("Sign in to the local demo")).toBeVisible();
+  await page.goto("/admin");
+  await signIn(page, "approver@local.test", "local-approver");
+  await expect(page.getByText("Alex terminal session case")).toBeVisible();
+
+  let releaseOldAdminList: (() => void) | undefined;
+  let delayNextAdminList = true;
+  let resolveOldAdminListCompleted: (() => void) | undefined;
+  const oldAdminListCompleted = new Promise<void>((resolve) => {
+    resolveOldAdminListCompleted = resolve;
+  });
+  const oldAdminListStarted = new Promise<void>((resolve) => {
+    void page.route("**/support/cases", async (route) => {
+      if (!delayNextAdminList) {
+        await route.continue();
+        return;
+      }
+      delayNextAdminList = false;
+      const response = await route.fetch();
+      resolve();
+      await new Promise<void>((release) => {
+        releaseOldAdminList = release;
+      });
+      await route.fulfill({ response });
+      resolveOldAdminListCompleted?.();
+    });
+  });
+  await oldAdminListStarted;
+  await page.getByLabel("More admin actions").click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await expect(page.getByText("Sign in to the local demo")).toBeVisible();
+  await expect(page.getByText("Alex terminal session case")).toHaveCount(0);
+  await signIn(page, "agent@other.test", "local-other-agent");
+  await expect(
+    page.getByText("This session cannot review refunds."),
+  ).toBeVisible();
+  releaseOldAdminList?.();
+  await oldAdminListCompleted;
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  await expect(page.getByText("Alex terminal session case")).toHaveCount(0);
+}
+
 test("runs customer follow-up, native approval, rejection, access denial, and session lifecycle", async ({
   page,
 }) => {
   const runtime = await loadDeterministicRuntime();
   const stopServer = await startSupportApi(runtime);
   try {
+    await assertMountedSessionIsolation(page, runtime);
+    await page.evaluate(() => localStorage.removeItem("support-demo:session"));
     await page.goto("/portal");
     await signIn(page, "alex@example.com", "local-customer-alex");
     await expect(

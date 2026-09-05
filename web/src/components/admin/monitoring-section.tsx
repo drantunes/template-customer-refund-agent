@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -24,7 +24,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { getMonitoringSummary } from "@/lib/api";
+import { getMonitoringSummary, type SupportSession } from "@/lib/api";
 import type { MonitoringSummary } from "@/lib/types";
 import {
   Info,
@@ -90,27 +90,41 @@ function RateCard({
  * token cost / tool health data Mastra already tracks for every case.
  * Rendered as a section within the admin page rather than its own route.
  */
-export function MonitoringSection() {
+export function MonitoringSection({ session }: { session: SupportSession }) {
+  const mounted = useRef(true);
   const [summary, setSummary] = useState<MonitoringSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-
-  const refresh = useCallback(async (silent = false) => {
-    if (!silent) setRefreshing(true);
-    try {
-      const result = await getMonitoringSummary();
-      setSummary(result);
-    } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : "Failed to load monitoring data",
-      );
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
   }, []);
+
+  const refresh = useCallback(
+    async (silent = false) => {
+      if (!silent) setRefreshing(true);
+      try {
+        const result = await getMonitoringSummary(session);
+        if (!mounted.current) return;
+        setSummary(result);
+      } catch (error) {
+        if (mounted.current)
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : "Failed to load monitoring data",
+          );
+      } finally {
+        if (mounted.current) {
+          setLoading(false);
+          setRefreshing(false);
+        }
+      }
+    },
+    [session],
+  );
 
   useEffect(() => {
     refresh();
