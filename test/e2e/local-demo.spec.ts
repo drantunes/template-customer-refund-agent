@@ -141,6 +141,8 @@ async function createCustomerCase(
   page: import("@playwright/test").Page,
   subject: string,
 ) {
+  const newMessage = page.getByRole("button", { name: "New message" });
+  if (await newMessage.isVisible()) await newMessage.click();
   await page.getByLabel("Subject").fill(subject);
   await page.getByLabel("Message").fill("Please refund the duplicate charge.");
   await page.getByRole("button", { name: "Send message" }).click();
@@ -317,12 +319,21 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
     await page.reload();
     await expect(page.getByText("Sign in to the local demo")).toBeVisible();
     await signIn(page, "alex@example.com", "local-customer-alex");
+    await expect(page.getByText("Alex terminal session case")).toBeVisible();
+    await page.getByRole("button", { name: "New message" }).click();
 
     await createCustomerCase(page, "I was charged twice");
     await expect
-      .poll(async () => (await runtime.caseStore.list())[0]?.status)
+      .poll(
+        async () =>
+          (await runtime.caseStore.list()).find((entry) =>
+            entry.id.startsWith("case_"),
+          )?.status,
+      )
       .toBe("waiting_approval");
-    const supportCase = (await runtime.caseStore.list())[0]!;
+    const supportCase = (await runtime.caseStore.list()).find((entry) =>
+      entry.id.startsWith("case_"),
+    )!;
     const firstTurn = (supportCase.metadata as Record<string, unknown>)
       .activeTurnId;
     const conversation = (
@@ -456,6 +467,8 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
     await expect(
       page.getByRole("heading", { name: "Customer portal" }),
     ).toBeVisible();
+    await expect(page.getByText("I was charged twice")).toBeVisible();
+    await page.getByRole("button", { name: "New message" }).click();
     const denied = await page.evaluate(async () => {
       const session = JSON.parse(
         localStorage.getItem("support-demo:session") ?? "{}",
@@ -541,6 +554,8 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
     await page.getByRole("menuitem", { name: "Sign out" }).click();
     await page.goto("/portal");
     await signIn(page, "jordan@example.com", "local-customer-jordan");
+    await expect(page.getByText("Jordan terminal session case")).toBeVisible();
+    await page.getByRole("button", { name: "New message" }).click();
     await createCustomerCase(page, "Jordan's separate refund request");
     await expect
       .poll(
