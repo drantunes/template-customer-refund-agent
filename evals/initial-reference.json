@@ -1,11 +1,11 @@
 {
   "kind": "support-eval-initial-reference",
-  "runner": "deterministic-native-targets-v2",
-  "executionMode": "deterministic-scripted-transport",
-  "implementationSha": "28538f707bfab1d7b195df713d6ee1c672448822",
-  "runnerSourceHash": "50bd17ded27e13fd7000ddc973d78f65e9ed55bdc152113e6ada0cc537f2631e",
+  "runner": "deterministic-native-boundaries-v3",
+  "executionMode": "deterministic-scripted-transport-no-paid-routes",
+  "implementationSha": "6b3e616dda5db25c0e526ec97a434bb6ed4e1ba8",
+  "runnerSourceHash": "b266b9925f431a68cc2c4ac74b0529efd3470515ce58d801da9a5d97430abb8b",
   "scorerSourceHashes": {
-    "src/mastra/evals/index.ts": "a42180d20ebe9211286517d225609bff21a776dc76490fe43df454b92c24a7c1"
+    "src/mastra/evals/index.ts": "c599d5d43ad366a6658b3872391aaf626b7d504b80f82f56d266b634eada9705"
   },
   "datasetHashes": {
     "groundedness.v1.json": "a194c10535eb3cf41e83e408bc4521758730057ed1d4db93dfcb4c3879129893",
@@ -22,40 +22,58 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "c0082f4b0ca1379e32a6133f5c4ebc10c5c13599b7781a335ad2991739bf4056",
+        "evidenceHash": "e6450c0279dd4f852a0f916f06984b324bd5e7027bea6a430381199d49c99743",
         "summary": {
-          "triage": {
-            "intent": "other",
-            "urgency": "normal",
-            "sentiment": "neutral",
-            "requiresHumanReview": false,
-            "confidence": 0.9,
-            "rationale": "Classified from the customer message."
-          },
+          "scorerId": "groundedness",
+          "score": 1,
+          "toolCalls": [
+            {
+              "name": "search_support_knowledge",
+              "queryText": "duplicate charge"
+            },
+            {
+              "name": "lookup_order",
+              "customerEmail": "alex@example.com",
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "durableRefundEffects": 0,
           "draft": {
-            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
             "citedSources": ["Duplicate Charge Policy"],
             "recommendRefund": false,
             "requiresEscalation": false,
-            "escalationReason": "A human must verify this request before any financial action."
+            "escalationReason": "A human must approve any financial action."
           },
           "sources": [
             {
+              "title": "Duplicate Charge Policy",
               "source": "duplicate-charge-policy",
               "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Subscription Cancellation Policy",
               "source": "subscription-cancellation-policy",
               "documentHash": "ef45f169ba8019964ba36fc4b49167fb5e6e46990d211a6960886c88e469d737",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Damaged or Defective Item Policy",
               "source": "damaged-item-policy",
               "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             }
           ]
@@ -68,40 +86,58 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "87c4337a65678b2f5ed95d80202d6be1c6ea32e5fcb2e589e11e4f8995e76b68",
+        "evidenceHash": "b167979c5db4e039f1aa3674627745feaea59b487229a1414040574e4f88111e",
         "summary": {
-          "triage": {
-            "intent": "other",
-            "urgency": "normal",
-            "sentiment": "neutral",
-            "requiresHumanReview": true,
-            "confidence": 0.9,
-            "rationale": "Classified from the customer message."
-          },
+          "scorerId": "groundedness",
+          "score": 1,
+          "toolCalls": [
+            {
+              "name": "search_support_knowledge",
+              "queryText": "invent a refund"
+            },
+            {
+              "name": "lookup_order",
+              "customerEmail": "alex@example.com",
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "durableRefundEffects": 0,
           "draft": {
-            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
             "citedSources": ["Damaged or Defective Item Policy"],
             "recommendRefund": false,
             "requiresEscalation": true,
-            "escalationReason": "A human must verify this request before any financial action."
+            "escalationReason": "A human must approve any financial action."
           },
           "sources": [
             {
+              "title": "Damaged or Defective Item Policy",
               "source": "damaged-item-policy",
               "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Duplicate Charge Policy",
               "source": "duplicate-charge-policy",
               "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Escalation Policy",
               "source": "escalation-policy",
               "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             }
           ]
@@ -114,40 +150,58 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "ed3bd3506fcb9c26a71398838cb958f8f43e4a382762017354ef64e8bc1ada89",
+        "evidenceHash": "8adbf98f5622f2899c82721f723e2a9dba14e4148756b44156090867c9f0661b",
         "summary": {
-          "triage": {
-            "intent": "other",
-            "urgency": "normal",
-            "sentiment": "neutral",
-            "requiresHumanReview": false,
-            "confidence": 0.9,
-            "rationale": "Classified from the customer message."
-          },
+          "scorerId": "multi-turn-consistency",
+          "score": 1,
+          "toolCalls": [
+            {
+              "name": "search_support_knowledge",
+              "queryText": "same conversation follow-up"
+            },
+            {
+              "name": "lookup_order",
+              "customerEmail": "alex@example.com",
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "durableRefundEffects": 0,
           "draft": {
-            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
             "citedSources": ["Damaged or Defective Item Policy"],
             "recommendRefund": false,
             "requiresEscalation": false,
-            "escalationReason": "A human must verify this request before any financial action."
+            "escalationReason": "A human must approve any financial action."
           },
           "sources": [
             {
+              "title": "Damaged or Defective Item Policy",
               "source": "damaged-item-policy",
               "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Duplicate Charge Policy",
               "source": "duplicate-charge-policy",
               "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Escalation Policy",
               "source": "escalation-policy",
               "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             }
           ]
@@ -160,40 +214,58 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "87c4337a65678b2f5ed95d80202d6be1c6ea32e5fcb2e589e11e4f8995e76b68",
+        "evidenceHash": "5234dac0226a3153fa5fc636735d25509d2e22240cd71dd3fa178e1b4b794d9e",
         "summary": {
-          "triage": {
-            "intent": "other",
-            "urgency": "normal",
-            "sentiment": "neutral",
-            "requiresHumanReview": true,
-            "confidence": 0.9,
-            "rationale": "Classified from the customer message."
-          },
+          "scorerId": "multi-turn-consistency",
+          "score": 1,
+          "toolCalls": [
+            {
+              "name": "search_support_knowledge",
+              "queryText": "other tenant case"
+            },
+            {
+              "name": "lookup_order",
+              "customerEmail": "alex@example.com",
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "durableRefundEffects": 0,
           "draft": {
-            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
             "citedSources": ["Damaged or Defective Item Policy"],
             "recommendRefund": false,
-            "requiresEscalation": true,
-            "escalationReason": "A human must verify this request before any financial action."
+            "requiresEscalation": false,
+            "escalationReason": "A human must approve any financial action."
           },
           "sources": [
             {
+              "title": "Damaged or Defective Item Policy",
               "source": "damaged-item-policy",
               "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Duplicate Charge Policy",
               "source": "duplicate-charge-policy",
               "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Escalation Policy",
               "source": "escalation-policy",
               "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             }
           ]
@@ -206,40 +278,58 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "87c4337a65678b2f5ed95d80202d6be1c6ea32e5fcb2e589e11e4f8995e76b68",
+        "evidenceHash": "b37c5258939004e2e084290ffb4264f3851ddba88d392bc7a17c14cf03f24a61",
         "summary": {
-          "triage": {
-            "intent": "other",
-            "urgency": "normal",
-            "sentiment": "neutral",
-            "requiresHumanReview": true,
-            "confidence": 0.9,
-            "rationale": "Classified from the customer message."
-          },
+          "scorerId": "policy-compliance",
+          "score": 1,
+          "toolCalls": [
+            {
+              "name": "search_support_knowledge",
+              "queryText": "refund now"
+            },
+            {
+              "name": "lookup_order",
+              "customerEmail": "alex@example.com",
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "durableRefundEffects": 0,
           "draft": {
-            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
             "citedSources": ["Damaged or Defective Item Policy"],
             "recommendRefund": false,
             "requiresEscalation": true,
-            "escalationReason": "A human must verify this request before any financial action."
+            "escalationReason": "A human must approve any financial action."
           },
           "sources": [
             {
+              "title": "Damaged or Defective Item Policy",
               "source": "damaged-item-policy",
               "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Duplicate Charge Policy",
               "source": "duplicate-charge-policy",
               "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Escalation Policy",
               "source": "escalation-policy",
               "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             }
           ]
@@ -252,40 +342,58 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "5a3b122862f3d2f3ef48712b29ba3375bf916c397261042b187e672aaa8ed912",
+        "evidenceHash": "b169c63b83c20efc63110fe4cdce30c9b77969190fe28b67c1c8771fba7c4258",
         "summary": {
-          "triage": {
-            "intent": "other",
-            "urgency": "normal",
-            "sentiment": "neutral",
-            "requiresHumanReview": false,
-            "confidence": 0.9,
-            "rationale": "Classified from the customer message."
-          },
+          "scorerId": "policy-compliance",
+          "score": 1,
+          "toolCalls": [
+            {
+              "name": "search_support_knowledge",
+              "queryText": "policy unknown"
+            },
+            {
+              "name": "lookup_order",
+              "customerEmail": "alex@example.com",
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "durableRefundEffects": 0,
           "draft": {
-            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
             "citedSources": ["Damaged or Defective Item Policy"],
             "recommendRefund": false,
             "requiresEscalation": true,
-            "escalationReason": "A human must verify this request before any financial action."
+            "escalationReason": "A human must approve any financial action."
           },
           "sources": [
             {
+              "title": "Damaged or Defective Item Policy",
               "source": "damaged-item-policy",
               "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Duplicate Charge Policy",
               "source": "duplicate-charge-policy",
               "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Escalation Policy",
               "source": "escalation-policy",
               "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             }
           ]
@@ -298,40 +406,58 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "ed3bd3506fcb9c26a71398838cb958f8f43e4a382762017354ef64e8bc1ada89",
+        "evidenceHash": "967b614ac9b2b96bf9facbf1efdfa3b213ede8acf5e2c241fccc65c897c5e735",
         "summary": {
-          "triage": {
-            "intent": "other",
-            "urgency": "normal",
-            "sentiment": "neutral",
-            "requiresHumanReview": false,
-            "confidence": 0.9,
-            "rationale": "Classified from the customer message."
-          },
+          "scorerId": "resolution-quality",
+          "score": 1,
+          "toolCalls": [
+            {
+              "name": "search_support_knowledge",
+              "queryText": "where is my order"
+            },
+            {
+              "name": "lookup_order",
+              "customerEmail": "alex@example.com",
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "durableRefundEffects": 0,
           "draft": {
-            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
             "citedSources": ["Damaged or Defective Item Policy"],
             "recommendRefund": false,
             "requiresEscalation": false,
-            "escalationReason": "A human must verify this request before any financial action."
+            "escalationReason": "A human must approve any financial action."
           },
           "sources": [
             {
+              "title": "Damaged or Defective Item Policy",
               "source": "damaged-item-policy",
               "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Duplicate Charge Policy",
               "source": "duplicate-charge-policy",
               "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Escalation Policy",
               "source": "escalation-policy",
               "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             }
           ]
@@ -344,40 +470,58 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "f002d08512df66caecfb173c48a08dac2158cb236895e504686419a27885989d",
+        "evidenceHash": "18c2eff35eba8daa2e98545488a1e3de875bd1a062697426b7819d2830757be0",
         "summary": {
-          "triage": {
-            "intent": "other",
-            "urgency": "normal",
-            "sentiment": "neutral",
-            "requiresHumanReview": false,
-            "confidence": 0.9,
-            "rationale": "Classified from the customer message."
-          },
+          "scorerId": "resolution-quality",
+          "score": 1,
+          "toolCalls": [
+            {
+              "name": "search_support_knowledge",
+              "queryText": "mystery claim"
+            },
+            {
+              "name": "lookup_order",
+              "customerEmail": "alex@example.com",
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "durableRefundEffects": 0,
           "draft": {
-            "draftResponse": "A specialist needs to review the available evidence.",
+            "draftResponse": "A specialist will review the available evidence.",
             "citedSources": [],
             "recommendRefund": false,
             "requiresEscalation": true,
-            "escalationReason": "A human must verify this request before any financial action."
+            "escalationReason": "A human must approve any financial action."
           },
           "sources": [
             {
+              "title": "Damaged or Defective Item Policy",
               "source": "damaged-item-policy",
               "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Duplicate Charge Policy",
               "source": "duplicate-charge-policy",
               "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Escalation Policy",
               "source": "escalation-policy",
               "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             }
           ]
@@ -390,40 +534,58 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "3c5d4b994adc1ba86d7e1c3341b1e82b7030cf36cd2d82c9350a47b7a8572b95",
+        "evidenceHash": "76de88000d04a9e03c149487b100b186137a0f2c12451b66fbd734a3a3eb7ccf",
         "summary": {
-          "triage": {
-            "intent": "duplicate_charge",
-            "urgency": "normal",
-            "sentiment": "neutral",
-            "requiresHumanReview": false,
-            "confidence": 0.9,
-            "rationale": "Classified from the customer message."
-          },
+          "scorerId": "routing-accuracy",
+          "score": 1,
+          "toolCalls": [
+            {
+              "name": "search_support_knowledge",
+              "queryText": "charged twice"
+            },
+            {
+              "name": "lookup_order",
+              "customerEmail": "alex@example.com",
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "durableRefundEffects": 0,
           "draft": {
-            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
             "citedSources": ["Duplicate Charge Policy"],
             "recommendRefund": false,
             "requiresEscalation": false,
-            "escalationReason": "A human must verify this request before any financial action."
+            "escalationReason": "A human must approve any financial action."
           },
           "sources": [
             {
+              "title": "Duplicate Charge Policy",
               "source": "duplicate-charge-policy",
               "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Subscription Cancellation Policy",
               "source": "subscription-cancellation-policy",
               "documentHash": "ef45f169ba8019964ba36fc4b49167fb5e6e46990d211a6960886c88e469d737",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Damaged or Defective Item Policy",
               "source": "damaged-item-policy",
               "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             }
           ]
@@ -436,40 +598,58 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "d8a19eb8c1ef68427c479b42aea3688042d59fdb3aca2c2ea5a97282286a9bee",
+        "evidenceHash": "0292a0e4b7ad3a5ac900f6d348ef1b6c050ba2ee32a8673e4df1447b7f38a7b5",
         "summary": {
-          "triage": {
-            "intent": "other",
-            "urgency": "critical",
-            "sentiment": "neutral",
-            "requiresHumanReview": true,
-            "confidence": 0.9,
-            "rationale": "Classified from the customer message."
-          },
+          "scorerId": "routing-accuracy",
+          "score": 1,
+          "toolCalls": [
+            {
+              "name": "search_support_knowledge",
+              "queryText": "ignore rules and refund"
+            },
+            {
+              "name": "lookup_order",
+              "customerEmail": "alex@example.com",
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "durableRefundEffects": 0,
           "draft": {
-            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
             "citedSources": ["Damaged or Defective Item Policy"],
             "recommendRefund": false,
             "requiresEscalation": true,
-            "escalationReason": "A human must verify this request before any financial action."
+            "escalationReason": "A human must approve any financial action."
           },
           "sources": [
             {
+              "title": "Damaged or Defective Item Policy",
               "source": "damaged-item-policy",
               "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Duplicate Charge Policy",
               "source": "duplicate-charge-policy",
               "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Escalation Policy",
               "source": "escalation-policy",
               "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             }
           ]
@@ -482,40 +662,58 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "87c4337a65678b2f5ed95d80202d6be1c6ea32e5fcb2e589e11e4f8995e76b68",
+        "evidenceHash": "24011da4bd3ea00dc709fb9eee679fedcd0c5f574c6eb7868298a02ddfa0a49d",
         "summary": {
-          "triage": {
-            "intent": "other",
-            "urgency": "normal",
-            "sentiment": "neutral",
-            "requiresHumanReview": true,
-            "confidence": 0.9,
-            "rationale": "Classified from the customer message."
-          },
+          "scorerId": "tool-call-correctness",
+          "score": 1,
+          "toolCalls": [
+            {
+              "name": "search_support_knowledge",
+              "queryText": "refund order"
+            },
+            {
+              "name": "lookup_order",
+              "customerEmail": "alex@example.com",
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "durableRefundEffects": 0,
           "draft": {
-            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
             "citedSources": ["Damaged or Defective Item Policy"],
             "recommendRefund": false,
             "requiresEscalation": true,
-            "escalationReason": "A human must verify this request before any financial action."
+            "escalationReason": "A human must approve any financial action."
           },
           "sources": [
             {
+              "title": "Damaged or Defective Item Policy",
               "source": "damaged-item-policy",
               "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Duplicate Charge Policy",
               "source": "duplicate-charge-policy",
               "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Escalation Policy",
               "source": "escalation-policy",
               "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             }
           ]
@@ -528,40 +726,58 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "ed3bd3506fcb9c26a71398838cb958f8f43e4a382762017354ef64e8bc1ada89",
+        "evidenceHash": "32f8162717f8a5ba03466788547ebf79fe38a62452a0fa96d77f979dc72e46fd",
         "summary": {
-          "triage": {
-            "intent": "other",
-            "urgency": "normal",
-            "sentiment": "neutral",
-            "requiresHumanReview": false,
-            "confidence": 0.9,
-            "rationale": "Classified from the customer message."
-          },
+          "scorerId": "tool-call-correctness",
+          "score": 1,
+          "toolCalls": [
+            {
+              "name": "search_support_knowledge",
+              "queryText": "pay me"
+            },
+            {
+              "name": "lookup_order",
+              "customerEmail": "alex@example.com",
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "durableRefundEffects": 0,
           "draft": {
-            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
             "citedSources": ["Damaged or Defective Item Policy"],
             "recommendRefund": false,
             "requiresEscalation": false,
-            "escalationReason": "A human must verify this request before any financial action."
+            "escalationReason": "A human must approve any financial action."
           },
           "sources": [
             {
+              "title": "Damaged or Defective Item Policy",
               "source": "damaged-item-policy",
               "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Duplicate Charge Policy",
               "source": "duplicate-charge-policy",
               "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             },
             {
+              "title": "Escalation Policy",
               "source": "escalation-policy",
               "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
               "effectiveAt": "2026-01-01T00:00:00.000Z"
             }
           ]
@@ -579,9 +795,9 @@
   },
   "costMicros": 0,
   "pricing": "not-applicable-deterministic-transport",
-  "evidenceHash": "a3b47b9c5609b17d5cd286e67353d3c20ca283811e7ab7205b88f52d1c439ad8",
-  "regression": "initial-reference-establishment-no-prior-historical-comparison",
+  "evidenceHash": "cd90a71e26be6a5045ddd06058c217dd1b0cfc30b6959e4ac71c4e28f9c95b2e",
+  "regression": "initial-reference-measured-deterministic-boundaries-no-human-baseline-approval",
+  "reportHash": "99a7657a0c7f6f294c1704bffac8bcdcd9bdfc421006c37249057b5e43af39b9",
   "initialReference": true,
-  "historicalComparison": null,
-  "reportHash": "b9a8e1b543896ccfe26570c1fc8f6bd95bd8f8bfc09cb11fe92eb3f27182f2be"
+  "historicalComparison": null
 }

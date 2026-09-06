@@ -1,82 +1,54 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
-  REQUIRED_AXES,
   reportHash,
   validateEvalReference,
 } from "../../scripts/eval-baseline-record.mjs";
 
-const digest = (char: string) => char.repeat(64);
-
 function measuredReference() {
-  const record = {
-    kind: "support-eval-initial-reference",
-    initialReference: true,
-    historicalComparison: null,
-    runner: "deterministic-native-targets-v2",
-    runnerSourceHash: digest("a"),
-    scorerSourceHashes: { "src/mastra/evals/index.ts": digest("b") },
-    executionMode: "deterministic-scripted-transport",
-    implementationSha: "1c5da14",
-    datasetHashes: Object.fromEntries(
-      REQUIRED_AXES.map((axis, index) => [
-        `${axis}.v1.json`,
-        digest(String(index + 1)),
-      ]),
+  return JSON.parse(
+    readFileSync(
+      new URL("../../evals/initial-reference.json", import.meta.url),
+      "utf8",
     ),
-    perCaseScores: REQUIRED_AXES.map((axis, index) => ({
-      id: `${axis}-case`,
-      axis,
-      critical: index < 2,
-      score: 1,
-      evidence: { observed: true },
-    })),
-    sixAxisScores: Object.fromEntries(REQUIRED_AXES.map((axis) => [axis, 1])),
-    costMicros: 0,
-    evidenceHash: digest("c"),
-    regression: "initial-reference-establishment-no-prior-comparison",
-  };
-  return { ...record, reportHash: reportHash(record) };
+  );
+}
+function rehash(record: Record<string, unknown>) {
+  record.reportHash = reportHash(record);
+  return record;
 }
 
 describe("immutable eval reference records", () => {
-  it("accepts a complete first measured reference without invented human approval", () => {
+  it("accepts the measured first reference without inventing a human approval", () => {
     expect(
       validateEvalReference(measuredReference(), { initial: true }),
-    ).toMatchObject({
-      initialReference: true,
-      historicalComparison: null,
-    });
+    ).toMatchObject({ initialReference: true, historicalComparison: null });
   });
 
-  it("rejects corrupt hashes, missing axes, duplicate IDs, failed critical cases, and invalid evidence", () => {
-    const corrupted = measuredReference();
-    corrupted.sixAxisScores.groundedness = Number.NaN;
-    expect(() => validateEvalReference(corrupted)).toThrow(
-      "hash does not match",
+  it("rejects removed coverage, altered critical classifications, empty evidence, and fabricated aggregates", () => {
+    const missing = measuredReference();
+    missing.perCaseScores.pop();
+    expect(() => validateEvalReference(rehash(missing))).toThrow("cover every");
+
+    const critical = measuredReference();
+    critical.perCaseScores.find(
+      (item: { critical: boolean }) => item.critical,
+    ).critical = false;
+    expect(() => validateEvalReference(rehash(critical))).toThrow(
+      "critical coverage",
     );
 
-    const missingAxis = measuredReference();
-    delete missingAxis.sixAxisScores.groundedness;
-    missingAxis.reportHash = reportHash(missingAxis);
-    expect(() => validateEvalReference(missingAxis)).toThrow("all six");
-
-    const duplicate = measuredReference();
-    duplicate.perCaseScores[1]!.id = duplicate.perCaseScores[0]!.id;
-    duplicate.reportHash = reportHash(duplicate);
-    expect(() => validateEvalReference(duplicate)).toThrow("duplicate");
-
-    const failedCritical = measuredReference();
-    failedCritical.perCaseScores[0]!.score = 0;
-    failedCritical.reportHash = reportHash(failedCritical);
-    expect(() => validateEvalReference(failedCritical)).toThrow(
-      "failed critical",
+    const evidence = measuredReference();
+    evidence.perCaseScores[0].evidence.summary = {};
+    evidence.perCaseScores[0].evidence.evidenceHash = "0".repeat(64);
+    expect(() => validateEvalReference(rehash(evidence))).toThrow(
+      "invalid, duplicate, or unevidenced",
     );
 
-    const wrongRunnerHash = measuredReference();
-    wrongRunnerHash.runnerSourceHash = "not-a-hash";
-    wrongRunnerHash.reportHash = reportHash(wrongRunnerHash);
-    expect(() => validateEvalReference(wrongRunnerHash)).toThrow(
-      "runner provenance",
+    const aggregate = measuredReference();
+    aggregate.sixAxisScores.groundedness = 0;
+    expect(() => validateEvalReference(rehash(aggregate))).toThrow(
+      "aggregates",
     );
   });
 });
