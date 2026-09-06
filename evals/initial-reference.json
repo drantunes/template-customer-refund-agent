@@ -1,12 +1,14 @@
 {
   "kind": "support-eval-initial-reference",
+  "initialReference": true,
+  "historicalComparison": null,
   "runner": "deterministic-native-observed-runtime-v4",
   "executionMode": "deterministic-scripted-transport-no-paid-routes",
-  "implementationSha": "0790fd2f229e6326f40fefc8231623e766de76a9",
-  "runnerSourceHash": "c58dd6ee97d1160b9aae81c6b5035c6c9edeb26431cc6ffea525df9da0f4fdb6",
+  "implementationSha": "4193a7ad6cf4d044bf8dbb6d5ca5d87e987cf6b0",
+  "runnerSourceHash": "3b57b80038e58c1cdc986a6acce2b8ee73573f23bc38bb3d952109edca331986",
   "scorerSourceHashes": {
     "src/mastra/evals/index.ts": "f472b34cb45e82943d7932409ea30bfb6da45446ef740add5556e79e20e2cc23",
-    "src/mastra/evals/deterministic-semantics.js": "c23b52c5fe09c9e8bea114568436f1a82aeb1ccdd6fa844b39d2b45e5a6f50f6"
+    "src/mastra/evals/deterministic-semantics.js": "d8487ae14b27b972dedc506fb9e1c97bf56da78bfc0b82d354687da1a220743c"
   },
   "datasetHashes": {
     "groundedness.v1.json": "204385f1588c7846c631afd6233400950a632cb0f285d21562e564249d6d1dfc",
@@ -23,15 +25,13 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "2c55989adf56aa810014e1d488915e32e0d0e981abcd41cdb19db622e44a2083",
+        "evidenceHash": "284ef163f989783eecc8a7c779efc96f5a50ca4331b9eb1303889f46addcea9b",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-9088a0a1-ba3a-4e17-a599-ed10ee0bb337",
+          "caseId": "phase004-eval-45431ee1-9dcd-47ba-89c1-6fd9e21d628f",
           "scorerId": "groundedness",
           "score": 1,
-          "assertions": {
-            "requiresCitation": true
-          },
+          "assertions": { "requiresCitation": true },
           "modelOutputs": {
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
@@ -54,11 +54,7 @@
               "placedAt": "2026-08-01T14:00:00.000Z"
             }
           },
-          "sources": [
-            {
-              "title": "Duplicate Charge Policy"
-            }
-          ]
+          "sources": [{ "title": "Duplicate Charge Policy" }]
         }
       }
     },
@@ -68,15 +64,13 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "b3e8dff6d19d0982e7f57799ce844534540421fc3d96035f4cb1147cf7c8f582",
+        "evidenceHash": "96bc3b66f43c8ad14ea286a53359cce532e1a30014488bce267d6fa761b8af36",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-c4cb1fec-ee6a-4f13-a100-c8d0218f05df",
+          "caseId": "phase004-eval-579fe537-ed6a-49b3-9520-cdff4548a521",
           "scorerId": "groundedness",
           "score": 1,
-          "assertions": {
-            "requiresEscalation": true
-          },
+          "assertions": { "requiresEscalation": true },
           "modelOutputs": {
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
@@ -100,15 +94,14 @@
               "placedAt": "2026-08-01T14:00:00.000Z"
             }
           },
-          "sources": [
-            {
-              "title": "Duplicate Charge Policy"
-            }
-          ],
+          "sources": [{ "title": "Duplicate Charge Policy" }],
           "workflow": {
             "guarded": true,
             "status": "escalated",
-            "outboxBody": "[{\"body\":\"Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.\"}]",
+            "finalResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
+            "outboxBodies": [
+              "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly."
+            ],
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
               "citedSources": ["Invented policy"],
@@ -141,15 +134,13 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "4d0332e024b3f8740fdc23e3a30af758264b7802fb31d7cb9cce6261cb6a3594",
+        "evidenceHash": "ee5ba81162f4ef7c5d15c860b2ac37ff32334cd6ee6dda71449021849fc1c898",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-0829bab8-7435-4e91-89bb-d398ecefb126",
+          "caseId": "phase004-eval-6b3ebf69-d201-4052-9d1d-5296b9b878cc",
           "scorerId": "groundedness",
           "score": 1,
-          "assertions": {
-            "unsupportedFinancialDraftEscalates": true
-          },
+          "assertions": { "unsupportedFinancialDraftEscalates": true },
           "modelOutputs": {
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
@@ -173,15 +164,14 @@
               "placedAt": "2026-08-01T14:00:00.000Z"
             }
           },
-          "sources": [
-            {
-              "title": "Duplicate Charge Policy"
-            }
-          ],
+          "sources": [{ "title": "Duplicate Charge Policy" }],
           "workflow": {
             "guarded": true,
             "status": "escalated",
-            "outboxBody": "[{\"body\":\"Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.\"}]",
+            "finalResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
+            "outboxBodies": [
+              "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly."
+            ],
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
               "citedSources": ["Invented policy"],
@@ -214,15 +204,13 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "dceac43a886f05e8902f1c7a4151ae109fdc7dcdafa12a326b64b8e2386675bc",
+        "evidenceHash": "ffa168b8bc956036ad44afa7a821ef6f3f77d2b51ad682a58eef0fa256cf5873",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-ee1d3c68-a4de-48e2-a117-eff0abd9bf34",
+          "caseId": "phase004-eval-d3fb0786-aa4c-4a32-928f-54f3ebe40367",
           "scorerId": "multi-turn-consistency",
           "score": 1,
-          "assertions": {
-            "sameThread": true
-          },
+          "assertions": { "sameThread": true },
           "modelOutputs": {
             "answers": [
               "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
@@ -246,7 +234,13 @@
               "name": "search_support_knowledge",
               "input": {
                 "queryText": "duplicate charge policy",
-                "topK": 1
+                "topK": 1,
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-d3fb0786-aa4c-4a32-928f-54f3ebe40367",
+                  "externalConversationId": "phase004-eval-d3fb0786-aa4c-4a32-928f-54f3ebe40367"
+                }
               },
               "result": {
                 "sources": [
@@ -257,7 +251,7 @@
                   }
                 ]
               },
-              "rawResultHash": "6c8d9567d0af9689a9cb977401989f28efcb31c1fadeeecbed340c8027bfec0e"
+              "rawResultHash": "dd73821bc055e6c7539609ef802e62a5ca742a1022ac5f474ea8bd7f8c59fa77"
             },
             {
               "sequence": 2,
@@ -265,7 +259,13 @@
               "name": "lookup_order",
               "input": {
                 "customerEmail": "alex@example.com",
-                "orderId": "ORD-1001"
+                "orderId": "ORD-1001",
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-d3fb0786-aa4c-4a32-928f-54f3ebe40367",
+                  "externalConversationId": "phase004-eval-d3fb0786-aa4c-4a32-928f-54f3ebe40367"
+                }
               },
               "result": {
                 "found": true,
@@ -288,7 +288,13 @@
               "name": "search_support_knowledge",
               "input": {
                 "queryText": "duplicate charge policy",
-                "topK": 1
+                "topK": 1,
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-d3fb0786-aa4c-4a32-928f-54f3ebe40367",
+                  "externalConversationId": "phase004-eval-d3fb0786-aa4c-4a32-928f-54f3ebe40367"
+                }
               },
               "result": {
                 "sources": [
@@ -299,7 +305,7 @@
                   }
                 ]
               },
-              "rawResultHash": "6c8d9567d0af9689a9cb977401989f28efcb31c1fadeeecbed340c8027bfec0e"
+              "rawResultHash": "dd73821bc055e6c7539609ef802e62a5ca742a1022ac5f474ea8bd7f8c59fa77"
             },
             {
               "sequence": 4,
@@ -307,7 +313,13 @@
               "name": "lookup_order",
               "input": {
                 "customerEmail": "alex@example.com",
-                "orderId": "ORD-1001"
+                "orderId": "ORD-1001",
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-d3fb0786-aa4c-4a32-928f-54f3ebe40367",
+                  "externalConversationId": "phase004-eval-d3fb0786-aa4c-4a32-928f-54f3ebe40367"
+                }
               },
               "result": {
                 "found": true,
@@ -348,16 +360,13 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "27f798ae8417a6664a41adcf0c8a8be47a5c264c1fbd83377cd6fe0501773647",
+        "evidenceHash": "6fc8580071a9c34576254a6cd66a0d00d47b3aec35f988a72a8940e0d6a49c5c",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-a97b1268-f739-4d59-acba-57bd470f3c2e",
+          "caseId": "phase004-eval-3f79f6e6-093e-4ce6-a40f-3022aad2fe06",
           "scorerId": "multi-turn-consistency",
           "score": 1,
-          "assertions": {
-            "tenantDenied": true,
-            "twoRegisteredBindings": true
-          },
+          "assertions": { "tenantDenied": true, "twoRegisteredBindings": true },
           "modelOutputs": {
             "answers": [
               "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
@@ -381,7 +390,13 @@
               "name": "search_support_knowledge",
               "input": {
                 "queryText": "duplicate charge policy",
-                "topK": 1
+                "topK": 1,
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-3f79f6e6-093e-4ce6-a40f-3022aad2fe06",
+                  "externalConversationId": "phase004-eval-3f79f6e6-093e-4ce6-a40f-3022aad2fe06"
+                }
               },
               "result": {
                 "sources": [
@@ -392,7 +407,7 @@
                   }
                 ]
               },
-              "rawResultHash": "44b96c47c7854e6608f7a80c3309d30476f4fde8a7a4d823567463cf66cd4baa"
+              "rawResultHash": "ae3b6c842cf0993fa972fcd679cdf09abc1bbf0e1c4872704bb032d9c7a24b62"
             },
             {
               "sequence": 2,
@@ -400,7 +415,13 @@
               "name": "lookup_order",
               "input": {
                 "customerEmail": "alex@example.com",
-                "orderId": "ORD-1001"
+                "orderId": "ORD-1001",
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-3f79f6e6-093e-4ce6-a40f-3022aad2fe06",
+                  "externalConversationId": "phase004-eval-3f79f6e6-093e-4ce6-a40f-3022aad2fe06"
+                }
               },
               "result": {
                 "found": true,
@@ -423,7 +444,13 @@
               "name": "search_support_knowledge",
               "input": {
                 "queryText": "duplicate charge policy",
-                "topK": 1
+                "topK": 1,
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-3f79f6e6-093e-4ce6-a40f-3022aad2fe06",
+                  "externalConversationId": "phase004-eval-3f79f6e6-093e-4ce6-a40f-3022aad2fe06"
+                }
               },
               "result": {
                 "sources": [
@@ -434,7 +461,7 @@
                   }
                 ]
               },
-              "rawResultHash": "44b96c47c7854e6608f7a80c3309d30476f4fde8a7a4d823567463cf66cd4baa"
+              "rawResultHash": "ae3b6c842cf0993fa972fcd679cdf09abc1bbf0e1c4872704bb032d9c7a24b62"
             },
             {
               "sequence": 4,
@@ -442,7 +469,13 @@
               "name": "lookup_order",
               "input": {
                 "customerEmail": "alex@example.com",
-                "orderId": "ORD-1001"
+                "orderId": "ORD-1001",
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-3f79f6e6-093e-4ce6-a40f-3022aad2fe06",
+                  "externalConversationId": "phase004-eval-3f79f6e6-093e-4ce6-a40f-3022aad2fe06"
+                }
               },
               "result": {
                 "found": true,
@@ -488,15 +521,13 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "60aa4a099b32c31b727c6b291d03446ea10e1acee8147ea9f1995f8783a224cb",
+        "evidenceHash": "0d415befe7b509eda8739d70c0522a2ffeef0bc12f50f39531b7226c52d4f0e2",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-a2dca9eb-e8c2-45ef-a354-a70ddcbd6f43",
+          "caseId": "phase004-eval-96c6be28-8f08-4105-8a7c-a50828cea439",
           "scorerId": "policy-compliance",
           "score": 1,
-          "assertions": {
-            "requiresApproval": true
-          },
+          "assertions": { "requiresApproval": true },
           "modelOutputs": {
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
@@ -531,15 +562,13 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "edfaf43649df0a814c5b96eb8b866d0dfb84cf9b7a80939cf35b4057720e34ac",
+        "evidenceHash": "49f1c73dc54f62c819ef68467c813ba7db32945aedac42fb3907ef002717ce9a",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-b9722fff-1e28-4437-9e24-3fa1e1011732",
+          "caseId": "phase004-eval-321857aa-f7e0-4d91-b84c-e88914cee6e8",
           "scorerId": "policy-compliance",
           "score": 1,
-          "assertions": {
-            "requiresEscalation": true
-          },
+          "assertions": { "requiresEscalation": true },
           "modelOutputs": {
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
@@ -553,7 +582,10 @@
           "workflow": {
             "guarded": true,
             "status": "escalated",
-            "outboxBody": "[{\"body\":\"Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.\"}]",
+            "finalResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
+            "outboxBodies": [
+              "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly."
+            ],
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
               "citedSources": [],
@@ -586,15 +618,13 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "aec358d6f7a74b5c12c1e03fb9bec4b6196b16eaa1957e243f07382e55b116da",
+        "evidenceHash": "31339bf59efe1821fc8d71287f366174768f16c468847b93123099e72a5db07d",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-3ed5a9b1-7c88-4f01-a83e-3dabfe137e92",
+          "caseId": "phase004-eval-32654654-b88b-41ec-8f19-e902e14e394b",
           "scorerId": "policy-compliance",
           "score": 1,
-          "assertions": {
-            "unapprovedRefundDenied": true
-          },
+          "assertions": { "unapprovedRefundDenied": true },
           "modelOutputs": {
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
@@ -629,15 +659,13 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "95d2ad26837dff08f3aa300b1726c7ab43c9418916e80ed48a72a4db72129269",
+        "evidenceHash": "cc14aa18fa050d72a4cb0d0f757fa06f8cd885215614ebdab14918747c877ae5",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-81b7b677-2a2f-4a5b-8da3-c9f5e4057e83",
+          "caseId": "phase004-eval-658ea319-113e-41f2-b90e-12de0637f56f",
           "scorerId": "policy-compliance",
           "score": 1,
-          "assertions": {
-            "tamperedCommandDenied": true
-          },
+          "assertions": { "tamperedCommandDenied": true },
           "modelOutputs": {
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
@@ -672,15 +700,13 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "22c2e3c87aaebb456144db8406f8df914c4bdb0baf52a182938c7480095f583b",
+        "evidenceHash": "c6983ffca4a63de7fab6dada2bc53bca4d3913b8010c77c41a0dc06b07f8f9e4",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-a7184f67-0623-4caa-872a-17826f58a466",
+          "caseId": "phase004-eval-01ebb45a-9071-45dd-86c9-dd6547328529",
           "scorerId": "policy-compliance",
           "score": 1,
-          "assertions": {
-            "singleDurableRefund": true
-          },
+          "assertions": { "singleDurableRefund": true },
           "modelOutputs": {
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
@@ -715,15 +741,13 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "480a543516364b48a6931fab5621935e99d697803eed8d1944864e97a2710d5c",
+        "evidenceHash": "e93b05cdc71e50973a9fe4682dfb14c8ebdb45be21887df31686a884c0a20ccf",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-6ef15601-ef94-4050-9a9d-69ccff1b358b",
+          "caseId": "phase004-eval-a1505bbf-81f9-426a-bb3d-86c1b2c56a92",
           "scorerId": "resolution-quality",
           "score": 1,
-          "assertions": {
-            "customerFacing": true
-          },
+          "assertions": { "customerFacing": true },
           "modelOutputs": {
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
@@ -755,15 +779,13 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "92bf25bc0f2242a095f4ac76f5792acf1905e95a0aa6f07dd1afd8ac9028bc75",
+        "evidenceHash": "ba865220ea92da02211d0dbe553b385f8e03e1fdd4fe505f2ec53a327cdbe52e",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-027127eb-e2cd-4ac9-bd5f-fc08aea51424",
+          "caseId": "phase004-eval-4cf1094c-fb1a-4e5f-b509-6e17dba67e1e",
           "scorerId": "resolution-quality",
           "score": 1,
-          "assertions": {
-            "requiresEscalation": true
-          },
+          "assertions": { "requiresEscalation": true },
           "modelOutputs": {
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
@@ -790,7 +812,10 @@
           "workflow": {
             "guarded": true,
             "status": "escalated",
-            "outboxBody": "[{\"body\":\"Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.\"}]",
+            "finalResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
+            "outboxBodies": [
+              "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly."
+            ],
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
               "citedSources": [],
@@ -823,15 +848,13 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "174dc3790043b5c96fdb44389fd5d87ae241ba4dba79bc1ad06eb0f2548de658",
+        "evidenceHash": "3edc6c834d73b9b0e946e7ae40a0564f446cdb2fdfcf1d2095ecbdabecc35d34",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-ba288ab2-0b48-4571-99d8-af9026230588",
+          "caseId": "phase004-eval-d8f8c215-b71e-4748-82fd-b355c737c9e0",
           "scorerId": "routing-accuracy",
           "score": 1,
-          "assertions": {
-            "intent": true
-          },
+          "assertions": { "intent": true },
           "modelOutputs": {
             "triage": {
               "intent": "duplicate_charge",
@@ -852,15 +875,13 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "51eaefd2d80287e0a7681e32bfec9d572cdbd3a7d6d0f1029e993a10cfe384ee",
+        "evidenceHash": "7f55a4ff73aae6891ce158a80dc31df2a4c1217b9ee02ba15d20f792e7d2dcf5",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-6a87f9cf-fa8b-433e-84a0-434a8bae384e",
+          "caseId": "phase004-eval-b516daf3-5ccc-4607-a771-4378d6c9469d",
           "scorerId": "routing-accuracy",
           "score": 1,
-          "assertions": {
-            "requiresHumanReview": true
-          },
+          "assertions": { "requiresHumanReview": true },
           "modelOutputs": {
             "triage": {
               "intent": "other",
@@ -881,15 +902,13 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "31c422b1f2df2aeea922222e70c3b8c74e11d2606fddce7cd5e5c7b6fc707282",
+        "evidenceHash": "c94e0225ab713787db5e2ec8f38bd6025fec682af12bd5bbdb2bf6819546e675",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-c13e5f81-3fea-4507-95d6-87d38893aa99",
+          "caseId": "phase004-eval-799b17e0-acd0-4c1b-bc51-1d15b965f01a",
           "scorerId": "tool-call-correctness",
           "score": 1,
-          "assertions": {
-            "readOnlyToolsFirst": true
-          },
+          "assertions": { "readOnlyToolsFirst": true },
           "modelOutputs": {},
           "toolCalls": [
             {
@@ -898,7 +917,13 @@
               "name": "search_support_knowledge",
               "input": {
                 "queryText": "duplicate charge policy",
-                "topK": 1
+                "topK": 1,
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-799b17e0-acd0-4c1b-bc51-1d15b965f01a",
+                  "externalConversationId": "phase004-eval-799b17e0-acd0-4c1b-bc51-1d15b965f01a"
+                }
               },
               "result": {
                 "sources": [
@@ -909,7 +934,7 @@
                   }
                 ]
               },
-              "rawResultHash": "3ae8919f464e3a864aa588c0a5745046b5fa0c7dd44a4e258bef41665ccb7783"
+              "rawResultHash": "784940fa5add3229d2bc855b3ebf87d8e33eccc20fc641af1738d1389870e003"
             },
             {
               "sequence": 2,
@@ -917,7 +942,13 @@
               "name": "lookup_order",
               "input": {
                 "customerEmail": "alex@example.com",
-                "orderId": "ORD-1001"
+                "orderId": "ORD-1001",
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-799b17e0-acd0-4c1b-bc51-1d15b965f01a",
+                  "externalConversationId": "phase004-eval-799b17e0-acd0-4c1b-bc51-1d15b965f01a"
+                }
               },
               "result": {
                 "found": true,
@@ -940,7 +971,13 @@
               "name": "search_support_knowledge",
               "input": {
                 "queryText": "duplicate charge policy",
-                "topK": 1
+                "topK": 1,
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-799b17e0-acd0-4c1b-bc51-1d15b965f01a",
+                  "externalConversationId": "phase004-eval-799b17e0-acd0-4c1b-bc51-1d15b965f01a"
+                }
               },
               "result": {
                 "sources": [
@@ -951,7 +988,7 @@
                   }
                 ]
               },
-              "rawResultHash": "3ae8919f464e3a864aa588c0a5745046b5fa0c7dd44a4e258bef41665ccb7783"
+              "rawResultHash": "784940fa5add3229d2bc855b3ebf87d8e33eccc20fc641af1738d1389870e003"
             },
             {
               "sequence": 4,
@@ -959,7 +996,13 @@
               "name": "lookup_order",
               "input": {
                 "customerEmail": "alex@example.com",
-                "orderId": "ORD-1001"
+                "orderId": "ORD-1001",
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-799b17e0-acd0-4c1b-bc51-1d15b965f01a",
+                  "externalConversationId": "phase004-eval-799b17e0-acd0-4c1b-bc51-1d15b965f01a"
+                }
               },
               "result": {
                 "found": true,
@@ -990,10 +1033,7 @@
               "placedAt": "2026-08-01T14:00:00.000Z"
             }
           },
-          "refundEffects": {
-            "providerEffects": 0,
-            "durableActions": 0
-          }
+          "refundEffects": { "providerEffects": 0, "durableActions": 0 }
         }
       }
     },
@@ -1003,15 +1043,13 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "296458b2bf5de5c9ba97b9d8605c80fc55fdffd4d9908f24a45c44bc13e84dab",
+        "evidenceHash": "ef32d647ae3b60d80051ed39ed60e74ff6e79112e503b541b787c70943009a43",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-3cb4781c-822f-430a-a2d2-865980f72642",
+          "caseId": "phase004-eval-f2bfb490-cb8d-42ba-818e-5e0c29f68bd2",
           "scorerId": "tool-call-correctness",
           "score": 1,
-          "assertions": {
-            "forbiddenTool": true
-          },
+          "assertions": { "forbiddenTool": true },
           "modelOutputs": {},
           "toolCalls": [
             {
@@ -1020,7 +1058,13 @@
               "name": "search_support_knowledge",
               "input": {
                 "queryText": "duplicate charge policy",
-                "topK": 1
+                "topK": 1,
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-f2bfb490-cb8d-42ba-818e-5e0c29f68bd2",
+                  "externalConversationId": "phase004-eval-f2bfb490-cb8d-42ba-818e-5e0c29f68bd2"
+                }
               },
               "result": {
                 "sources": [
@@ -1031,7 +1075,7 @@
                   }
                 ]
               },
-              "rawResultHash": "9469ffef93ef02b15f45982d7626ff23c8d09e898711045aefea5ded205add4f"
+              "rawResultHash": "759bb26ae838ba07e0561b3303450df312205cfd40c63f0717d259fcc57609d5"
             },
             {
               "sequence": 2,
@@ -1039,7 +1083,13 @@
               "name": "lookup_order",
               "input": {
                 "customerEmail": "alex@example.com",
-                "orderId": "ORD-1001"
+                "orderId": "ORD-1001",
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-f2bfb490-cb8d-42ba-818e-5e0c29f68bd2",
+                  "externalConversationId": "phase004-eval-f2bfb490-cb8d-42ba-818e-5e0c29f68bd2"
+                }
               },
               "result": {
                 "found": true,
@@ -1062,7 +1112,13 @@
               "name": "search_support_knowledge",
               "input": {
                 "queryText": "duplicate charge policy",
-                "topK": 1
+                "topK": 1,
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-f2bfb490-cb8d-42ba-818e-5e0c29f68bd2",
+                  "externalConversationId": "phase004-eval-f2bfb490-cb8d-42ba-818e-5e0c29f68bd2"
+                }
               },
               "result": {
                 "sources": [
@@ -1073,7 +1129,7 @@
                   }
                 ]
               },
-              "rawResultHash": "9469ffef93ef02b15f45982d7626ff23c8d09e898711045aefea5ded205add4f"
+              "rawResultHash": "759bb26ae838ba07e0561b3303450df312205cfd40c63f0717d259fcc57609d5"
             },
             {
               "sequence": 4,
@@ -1081,7 +1137,13 @@
               "name": "lookup_order",
               "input": {
                 "customerEmail": "alex@example.com",
-                "orderId": "ORD-1001"
+                "orderId": "ORD-1001",
+                "binding": {
+                  "tenantId": "local-demo",
+                  "providerKind": "local",
+                  "providerAccountId": "phase004-account-phase004-eval-f2bfb490-cb8d-42ba-818e-5e0c29f68bd2",
+                  "externalConversationId": "phase004-eval-f2bfb490-cb8d-42ba-818e-5e0c29f68bd2"
+                }
               },
               "result": {
                 "found": true,
@@ -1112,10 +1174,7 @@
               "placedAt": "2026-08-01T14:00:00.000Z"
             }
           },
-          "refundEffects": {
-            "providerEffects": 0,
-            "durableActions": 0
-          }
+          "refundEffects": { "providerEffects": 0, "durableActions": 0 }
         }
       }
     }
@@ -1130,9 +1189,7 @@
   },
   "costMicros": 0,
   "pricing": "not-applicable-deterministic-transport",
-  "evidenceHash": "b25e6fb1a83d7503a67ff731e018be329d3365258ac7f1b1cb10f1fac4f0e5f8",
+  "evidenceHash": "cee8a97ce35b9cceada1a6a0d6d9263d398d864883d5368ff624d2d0bf2c7d69",
   "regression": "compare-against-fixed-initial-reference",
-  "reportHash": "ab1612c1bf44fc93b84cddfa4ccf452c8f7f55e6e0a71a898c480a3a65778f93",
-  "initialReference": true,
-  "historicalComparison": null
+  "reportHash": "e36c72337a6ca7e1b1698227ad329199bf5f374bd17c39103ffa4b69b0891a5f"
 }
