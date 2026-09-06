@@ -2,6 +2,9 @@ export type DeterministicRecord = Record<string, unknown>;
 export declare function isPlainJsonRecord(
   value: unknown,
 ): value is DeterministicRecord;
+export declare function canonicalScorerRecord(
+  value: unknown,
+): DeterministicRecord | null;
 export declare const SUPPORTED_AXES: readonly string[];
 export declare function evaluateDatasetAssertions(
   assertions: DeterministicRecord,

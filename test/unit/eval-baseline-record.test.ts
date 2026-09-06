@@ -1180,6 +1180,52 @@ describe("immutable eval reference records", () => {
           );
         },
       },
+      {
+        name: "cycle",
+        output: (value: Record<string, unknown>) => {
+          const audit: Record<string, unknown> = {};
+          audit.self = audit;
+          value.audit = audit;
+        },
+        truth: (value: Record<string, unknown>) => {
+          const knowledge = value.knowledgeEvidence as Record<string, unknown>;
+          knowledge.self = knowledge;
+        },
+      },
+      {
+        name: "BigInt",
+        output: (value: Record<string, unknown>) => {
+          value.audit = { count: 1n };
+        },
+        truth: (value: Record<string, unknown>) => {
+          (value.knowledgeEvidence as Record<string, unknown>).count = 1n;
+        },
+      },
+      {
+        name: "custom object prototype",
+        output: (value: Record<string, unknown>) => {
+          value.audit = Object.create({ inherited: true });
+        },
+        truth: (value: Record<string, unknown>) => {
+          Object.setPrototypeOf(
+            value.knowledgeEvidence as Record<string, unknown>,
+            { inherited: true },
+          );
+        },
+      },
+      {
+        name: "custom array prototype",
+        output: (value: Record<string, unknown>) => {
+          const audit: unknown[] = [];
+          Object.setPrototypeOf(audit, { inherited: true });
+          value.audit = audit;
+        },
+        truth: (value: Record<string, unknown>) => {
+          const allowedSources = [...(value.allowedSources as string[])];
+          Object.setPrototypeOf(allowedSources, { inherited: true });
+          value.allowedSources = allowedSources;
+        },
+      },
     ];
     for (const id of cases)
       for (const variant of variants) {
@@ -1212,6 +1258,144 @@ describe("immutable eval reference records", () => {
           `${pair.axis}/${variant.name} nested truth registered`,
         ).resolves.toMatchObject({ score: 0 });
       }
+  });
+
+  it("rejects hostile top-level arrays and never invokes hostile evidence traps", async () => {
+    const record = measuredReference();
+    const pairFor = (id: string) => {
+      const item = caseScore(record, id);
+      return {
+        axis: item.axis,
+        output: scorerInputFromObservation(
+          item.axis,
+          observation(item.evidence.summary),
+        ),
+        truth: truthForDatasetCase(item.axis, assertionsForCase(id), id),
+      };
+    };
+    const cases = [
+      "duplicate-charge",
+      "grounded-policy",
+      "approval-required",
+      "lookup-before-refund",
+      "follow-up-stays-scoped",
+      "clear-resolution",
+    ];
+
+    for (const id of cases) {
+      const pair = pairFor(id);
+      const hostileOutput: unknown[] = [];
+      const hostileTruth: unknown[] = [];
+      Object.setPrototypeOf(hostileOutput, { hostile: true });
+      Object.setPrototypeOf(hostileTruth, { hostile: true });
+      expect(scoreAxis(pair.axis, hostileOutput, pair.truth)).toBe(0);
+      expect(scoreAxis(pair.axis, pair.output, hostileTruth)).toBe(0);
+      await expect(
+        registeredScorer(pair.axis).run({
+          output: hostileOutput,
+          groundTruth: pair.truth,
+        }),
+      ).resolves.toMatchObject({ score: 0 });
+      await expect(
+        registeredScorer(pair.axis).run({
+          output: pair.output,
+          groundTruth: hostileTruth,
+        }),
+      ).resolves.toMatchObject({ score: 0 });
+
+      let getterReads = 0;
+      const accessorOutput = structuredClone(pair.output);
+      Object.defineProperty(accessorOutput, "hostile", {
+        get: () => {
+          getterReads += 1;
+          return true;
+        },
+        enumerable: true,
+        configurable: true,
+      });
+      let proxyReads = 0;
+      const proxyTruth = new Proxy(pair.truth, {
+        get: () => {
+          proxyReads += 1;
+          return undefined;
+        },
+      });
+      await expect(
+        registeredScorer(pair.axis).run({
+          output: accessorOutput,
+          groundTruth: proxyTruth,
+        }),
+      ).resolves.toMatchObject({ score: 0 });
+      expect(getterReads, `${pair.axis} accessor read`).toBe(0);
+      expect(proxyReads, `${pair.axis} proxy read`).toBe(0);
+    }
+  });
+
+  it("snapshots observation adapters before selecting fields and admits only native undefined optionals", () => {
+    const record = measuredReference();
+    const item = caseScore(record, "grounded-policy");
+    const validObservation = observation(item.evidence.summary);
+    validObservation.financial = undefined;
+    const truth = truthForDatasetCase(
+      item.axis,
+      assertionsForCase(item.id),
+      item.id,
+    );
+    expect(
+      scoreAxis(
+        item.axis,
+        scorerInputFromObservation(item.axis, validObservation),
+        truth,
+      ),
+    ).toBe(1);
+
+    const toolItem = caseScore(record, "lookup-before-refund");
+    const optionalExpiry = observation(toolItem.evidence.summary);
+    const searchCall = (
+      optionalExpiry.calls as Array<{
+        name: string;
+        result: { sources: Array<{ metadata: Record<string, unknown> }> };
+      }>
+    ).find((call) => call.name === "search_support_knowledge");
+    if (!searchCall) throw new Error("Missing fixture knowledge call");
+    searchCall.result.sources[0].metadata.expiresAt = undefined;
+    expect(
+      scoreAxis(
+        toolItem.axis,
+        scorerInputFromObservation(toolItem.axis, optionalExpiry),
+        truthForDatasetCase(
+          toolItem.axis,
+          assertionsForCase(toolItem.id),
+          toolItem.id,
+        ),
+      ),
+    ).toBe(1);
+
+    const invalidUndefined = observation(item.evidence.summary);
+    (invalidUndefined.draft as Record<string, unknown>).unrelated = undefined;
+    expect(
+      scoreAxis(
+        item.axis,
+        scorerInputFromObservation(item.axis, invalidUndefined),
+        truth,
+      ),
+    ).toBe(0);
+
+    let reads = 0;
+    const hostileObservation = new Proxy(observation(item.evidence.summary), {
+      get: () => {
+        reads += 1;
+        return undefined;
+      },
+    });
+    expect(
+      scoreAxis(
+        item.axis,
+        scorerInputFromObservation(item.axis, hostileObservation),
+        truth,
+      ),
+    ).toBe(0);
+    expect(reads).toBe(0);
   });
 
   it("keeps factory authorities isolated after a contaminated trajectory", async () => {

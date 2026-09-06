@@ -1,5 +1,9 @@
 import { createScorer, type MastraScorers } from "@mastra/core/evals";
-import { isPlainJsonRecord, scoreAxis } from "./deterministic-semantics.js";
+import {
+  canonicalScorerRecord,
+  isPlainJsonRecord,
+  scoreAxis,
+} from "./deterministic-semantics.js";
 
 /**
  * CI evaluates executable, deterministic safety behavior. These registered
@@ -15,7 +19,7 @@ function plainRecord(value: unknown): EvalOutput {
 
 /** Parse only Mastra's explicit top-level model-output text boundary. */
 function topLevelModelOutput(value: unknown): unknown {
-  if (isPlainJsonRecord(value) || typeof value !== "string") return value;
+  if (typeof value !== "string") return value;
   try {
     return JSON.parse(value);
   } catch {
@@ -33,10 +37,13 @@ function deterministicScorer(
     description: `Deterministic ${name} scorer for versioned support-eval evidence.`,
     type: "agent",
   })
-    .preprocess(({ run }) => ({
-      output: topLevelModelOutput(run.output),
-      truth: run.groundTruth,
-    }))
+    .preprocess(({ run }) => {
+      // Parse only the explicit top-level output text boundary, then snapshot
+      // both inputs before any scorer callback can inspect hostile evidence.
+      const output = canonicalScorerRecord(topLevelModelOutput(run.output));
+      const truth = canonicalScorerRecord(run.groundTruth);
+      return { output, truth };
+    })
     .generateScore(({ results }) =>
       score
         ? score(
@@ -54,8 +61,8 @@ function deterministicScorer(
           ),
     )
     .generateReason(
-      ({ results, score }) =>
-        `${id}=${score.toFixed(2)} from deterministic runtime evidence: ${JSON.stringify(results.preprocessStepResult ?? {})}`,
+      ({ score }) =>
+        `${id}=${Number.isFinite(score) ? score.toFixed(2) : "0.00"} from deterministic canonical evidence`,
     );
 }
 
@@ -101,7 +108,9 @@ export const supportEvalScorers: MastraScorers = {
 };
 
 export function scoreDraftResolutionFields(output: unknown) {
-  const parsed = plainRecord(topLevelModelOutput(output)),
+  const parsed = plainRecord(
+      canonicalScorerRecord(topLevelModelOutput(output)),
+    ),
     citedSources = Array.isArray(parsed.citedSources)
       ? parsed.citedSources.filter(
           (source): source is string => typeof source === "string",
@@ -126,7 +135,7 @@ export const conversationCoverageScorer = deterministicScorer(
   "conversation-coverage",
   "Conversation Coverage",
   (output) => {
-    const answers = plainRecord(output).answers;
+    const answers = plainRecord(canonicalScorerRecord(output)).answers;
     return (Array.isArray(answers) ? answers : []).filter(
       (answer) => typeof answer === "string",
     ).length > 1

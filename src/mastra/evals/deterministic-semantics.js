@@ -113,7 +113,12 @@ function ordinaryDataDescriptor(descriptor) {
  * Reflect descriptors let us reject accessors without invoking them, and the
  * Node proxy check happens before any reflective operation can trigger a trap.
  */
-function canonicalJsonSnapshot(value, ancestors = new WeakSet()) {
+function canonicalJsonSnapshot(
+  value,
+  ancestors = new WeakSet(),
+  allowsUndefined = () => false,
+  path = [],
+) {
   if (value === null) return null;
   if (
     typeof value === "string" ||
@@ -127,6 +132,10 @@ function canonicalJsonSnapshot(value, ancestors = new WeakSet()) {
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
+      // Check this before asking an array for its length, keys, or
+      // descriptors. Array.isArray accepts arrays with a replaced prototype.
+      if (Object.getPrototypeOf(value) !== Array.prototype)
+        return INVALID_JSON_SNAPSHOT;
       const keys = Reflect.ownKeys(value);
       const length = value.length;
       const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
@@ -146,7 +155,12 @@ function canonicalJsonSnapshot(value, ancestors = new WeakSet()) {
         if (!keys.includes(key)) return INVALID_JSON_SNAPSHOT;
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
         if (!ordinaryDataDescriptor(descriptor)) return INVALID_JSON_SNAPSHOT;
-        const entry = canonicalJsonSnapshot(descriptor.value, ancestors);
+        const entry = canonicalJsonSnapshot(
+          descriptor.value,
+          ancestors,
+          allowsUndefined,
+          [...path, key],
+        );
         if (entry === INVALID_JSON_SNAPSHOT) return INVALID_JSON_SNAPSHOT;
         snapshot.push(entry);
       }
@@ -162,7 +176,14 @@ function canonicalJsonSnapshot(value, ancestors = new WeakSet()) {
     for (const key of keys.sort()) {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       if (!ordinaryDataDescriptor(descriptor)) return INVALID_JSON_SNAPSHOT;
-      const entry = canonicalJsonSnapshot(descriptor.value, ancestors);
+      if (descriptor.value === undefined && allowsUndefined(path, key))
+        continue;
+      const entry = canonicalJsonSnapshot(
+        descriptor.value,
+        ancestors,
+        allowsUndefined,
+        [...path, key],
+      );
       if (entry === INVALID_JSON_SNAPSHOT) return INVALID_JSON_SNAPSHOT;
       Object.defineProperty(snapshot, key, {
         value: entry,
@@ -179,9 +200,17 @@ function canonicalJsonSnapshot(value, ancestors = new WeakSet()) {
   }
 }
 
-function canonicalJsonRecord(value) {
-  const snapshot = canonicalJsonSnapshot(value);
+function canonicalJsonRecord(value, allowsUndefined) {
+  const snapshot = canonicalJsonSnapshot(value, new WeakSet(), allowsUndefined);
   return isPlainJsonRecord(snapshot) ? snapshot : null;
+}
+
+/** A registered scorer boundary never exposes the original evidence. */
+export function canonicalScorerRecord(value) {
+  const snapshot = canonicalJsonRecord(value);
+  // The frozen authority remains private. Registered scorer steps receive an
+  // independent ordinary JSON copy that can safely cross Mastra's boundary.
+  return snapshot ? structuredClone(snapshot) : null;
 }
 
 /**
@@ -191,8 +220,9 @@ function canonicalJsonRecord(value) {
  * Null-prototype records remain valid JSON records and are intentionally kept.
  */
 export function isPlainJsonRecord(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  if (utilTypes.isProxy(value)) return false;
+  if (!value || typeof value !== "object" || utilTypes.isProxy(value))
+    return false;
+  if (Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }
@@ -207,31 +237,44 @@ function definedRecord(value) {
   );
 }
 
+const OPTIONAL_OBSERVATION_KEYS = new Set([
+  "answers",
+  "authorization",
+  "calls",
+  "draft",
+  "financial",
+  "historyEstablished",
+  "order",
+  "refundEffects",
+  "toolCalls",
+  "triage",
+  "turns",
+  "workflow",
+]);
+
 /** Native tool schemas express `expiresAt` as optional, while JSON represents
  * an absent optional value by omitting the key rather than assigning undefined.
+ * This narrowly admits only native optional fields while copying descriptors.
  */
+function observationAllowsUndefined(path, key) {
+  if (path.length === 0) return OPTIONAL_OBSERVATION_KEYS.has(key);
+  return (
+    key === "expiresAt" &&
+    (path[0] === "calls" || path[0] === "toolCalls") &&
+    path.length === 6 &&
+    /^\d+$/.test(path[1]) &&
+    path[2] === "result" &&
+    path[3] === "sources" &&
+    /^\d+$/.test(path[4]) &&
+    path[5] === "metadata"
+  );
+}
+
 function scorerCallsFromObservation(value) {
-  if (!Array.isArray(value)) return [];
-  return value.map((call) => {
-    const record = plainRecord(call);
-    if (record.name !== "search_support_knowledge") return record;
-    const result = plainRecord(record.result);
-    const sources = strictRecords(result.sources);
-    if (!sources) return record;
-    return {
-      ...record,
-      result: {
-        ...result,
-        sources: sources.map((source) => {
-          const metadata = plainRecord(source.metadata);
-          if (metadata.expiresAt !== undefined) return source;
-          const normalizedMetadata = { ...metadata };
-          delete normalizedMetadata.expiresAt;
-          return { ...source, metadata: normalizedMetadata };
-        }),
-      },
-    };
-  });
+  // `value` is always selected from the canonical observation above. Do not
+  // normalize raw calls here: spreading or reading a hostile call would invoke
+  // its getters before the descriptor-safe snapshot rejects it.
+  return Array.isArray(value) ? value : [];
 }
 
 /**
@@ -702,7 +745,15 @@ export function truthForDatasetCase(
 export function scorerInputFromObservation(axis, observed) {
   if (!SUPPORTED_AXES.includes(axis))
     throw new Error(`Dataset axis has no deterministic semantics: ${axis}`);
-  const observation = plainRecord(observed);
+  const observationSnapshot = canonicalJsonRecord(
+    observed,
+    observationAllowsUndefined,
+  );
+  // Invalid observations are evidence failures. Keep a harmless, ordinary
+  // record so callers receive a deterministic zero rather than a coercion to
+  // a potentially valid empty contract.
+  if (!observationSnapshot) return { invalidScorerObservation: true };
+  const observation = structuredClone(observationSnapshot);
   const draft = plainRecord(observation.draft);
   if (axis === "routing-accuracy") return plainRecord(observation.triage);
   if (axis === "groundedness")
