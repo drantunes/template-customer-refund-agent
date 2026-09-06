@@ -612,18 +612,32 @@ export const supportCaseSupervisorRoute = registerApiRoute(
                 ...(model
                   ? {
                       model,
-                      // Delegated specialists own independent model instances.
-                      // Validation blocks those routes rather than letting a
-                      // child bypass this execution's ledger.
-                      delegation: {
+                    }
+                  : {}),
+                delegation: {
+                  ...(model
+                    ? {
                         onDelegationStart: () => ({
                           proceed: false,
                           rejectionReason:
                             "Budgeted supervisor validation does not permit delegated model calls.",
                         }),
-                      },
-                    }
-                  : {}),
+                      }
+                    : {}),
+                  // Native delegation preserves each specialist's actual tool
+                  // outcomes here. Expose those read-only observations beside
+                  // the parent delegation result so staff and acceptance tests
+                  // can distinguish a completed delegation from one that
+                  // merely returned prose without exercising its evidence.
+                  onDelegationComplete: ({ primitiveId, result }) => {
+                    observedToolResults.push(
+                      ...(result.subAgentToolResults ?? []).map((entry) => ({
+                        name: `${primitiveId}.${entry.toolName}`,
+                        result: entry.result,
+                      })),
+                    );
+                  },
+                },
                 onIterationComplete: ({ toolResults }) => {
                   observedToolResults.push(...toolResults);
                 },
@@ -645,10 +659,9 @@ export const supportCaseSupervisorRoute = registerApiRoute(
       const toolResults = observedToolResults.map((entry) => ({
         toolName: entry.name,
         result: entry.error ? { error: entry.error.message } : entry.result,
-        // All four direct supervisor tools and both registered specialists
-        // have object output schemas. Mastra materializes a thrown tool error
-        // as its message string in this native hook rather than setting
-        // `error`, so a string here is the observed denied-tool outcome.
+        // Registered read tools and delegated specialist tools have object
+        // output schemas. Mastra materializes a thrown tool error as its
+        // message string in the native hook rather than setting `error`.
         isError: Boolean(entry.error) || typeof entry.result === "string",
       }));
       return c.json(
