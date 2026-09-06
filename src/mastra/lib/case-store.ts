@@ -1376,13 +1376,18 @@ export class CaseStore {
         sql: "SELECT outcome_data FROM support_turns WHERE id = ? AND case_id = ?",
         args: [input.turnId, input.caseId],
       });
-      if (priorOutcome.rows[0]?.outcome_data) {
-        const outcome = JSON.parse(
-          String(priorOutcome.rows[0].outcome_data),
-        ) as {
-          finalResponse?: string;
-          status?: string;
-        };
+      const existingOutcome = priorOutcome.rows[0]?.outcome_data
+        ? (JSON.parse(String(priorOutcome.rows[0].outcome_data)) as {
+            finalResponse?: string;
+            status?: string;
+            [key: string]: unknown;
+          })
+        : undefined;
+      // Telemetry is attached before terminalization.  It is not itself a
+      // terminal outcome, so only a prior final response can participate in
+      // replay-conflict detection.
+      if (existingOutcome?.finalResponse !== undefined) {
+        const outcome = existingOutcome;
         if (
           outcome.finalResponse !== input.finalResponse ||
           outcome.status !== input.status
@@ -1433,10 +1438,11 @@ export class CaseStore {
         ],
       });
       await tx.execute({
-        sql: "UPDATE support_turns SET state = ?, outcome_data = COALESCE(outcome_data, ?), updated_at = ? WHERE id = ? AND case_id = ?",
+        sql: "UPDATE support_turns SET state = ?, outcome_data = ?, updated_at = ? WHERE id = ? AND case_id = ?",
         args: [
           input.status,
           JSON.stringify({
+            ...existingOutcome,
             status: input.status,
             finalResponse: input.finalResponse,
             escalationReason: input.escalationReason,

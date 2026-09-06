@@ -2,45 +2,46 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { validateApprovedBaseline } from "./eval-baseline-record.mjs";
+import { validateEvalReference } from "./eval-baseline-record.mjs";
 
-let baseline;
+let reference;
 try {
-  baseline = JSON.parse(
-    await readFile(new URL("../evals/approved-baseline.json", import.meta.url)),
+  reference = JSON.parse(
+    await readFile(new URL("../evals/initial-reference.json", import.meta.url)),
   );
-} catch {
-  console.error(
-    "EVAL BASELINE PENDING: human approval of a candidate report is required.",
-  );
-  process.exit(2);
-}
-try {
-  baseline = validateApprovedBaseline(baseline);
+  validateEvalReference(reference, { initial: true });
 } catch (error) {
   console.error(
-    `EVAL BASELINE INVALID: ${error instanceof Error ? error.message : String(error)}`,
+    `EVAL REFERENCE INVALID: ${error instanceof Error ? error.message : String(error)}`,
   );
   process.exit(2);
 }
-const directory = await mkdtemp(join(tmpdir(), "support-eval-baseline-"));
+
+const directory = await mkdtemp(join(tmpdir(), "support-eval-reference-"));
 const candidatePath = join(directory, "candidate.json");
 try {
   execFileSync("node", ["scripts/eval-candidate-report.mjs"], {
     stdio: "inherit",
     env: { ...process.env, SUPPORT_EVAL_CANDIDATE_OUTPUT: candidatePath },
   });
-  const candidate = JSON.parse(await readFile(candidatePath, "utf8"));
-  if (
-    candidate.runner !== baseline.runner ||
-    candidate.executionMode !== baseline.executionMode ||
-    JSON.stringify(candidate.datasetHashes) !==
-      JSON.stringify(baseline.datasetHashes)
-  ) {
-    throw new Error(
-      "candidate runner, mode, or dataset identities are incompatible with the approved baseline",
-    );
+  const candidate = validateEvalReference(
+    JSON.parse(await readFile(candidatePath, "utf8")),
+  );
+  for (const identity of ["runner", "runnerSourceHash", "executionMode"]) {
+    if (candidate[identity] !== reference[identity])
+      throw new Error(
+        `candidate ${identity} is incompatible with the fixed reference`,
+      );
   }
+  if (
+    JSON.stringify(candidate.scorerSourceHashes) !==
+      JSON.stringify(reference.scorerSourceHashes) ||
+    JSON.stringify(candidate.datasetHashes) !==
+      JSON.stringify(reference.datasetHashes)
+  )
+    throw new Error(
+      "candidate scorer or dataset identities are incompatible with the fixed reference",
+    );
   const floors = {
     groundedness: 0.9,
     "policy-compliance": 0.9,
@@ -51,13 +52,8 @@ try {
   };
   for (const [axis, floor] of Object.entries(floors)) {
     const candidateScore = candidate.sixAxisScores[axis];
-    const baselineScore = baseline.sixAxisScores[axis];
-    if (
-      !Number.isFinite(candidateScore) ||
-      !Number.isFinite(baselineScore) ||
-      candidateScore < floor ||
-      candidateScore < baselineScore - 0.02
-    )
+    const referenceScore = reference.sixAxisScores[axis];
+    if (candidateScore < floor || candidateScore < referenceScore - 0.02)
       throw new Error(`candidate failed ${axis} floor or regression limit`);
   }
   for (const item of candidate.perCaseScores)
@@ -65,7 +61,7 @@ try {
       throw new Error(`critical case failed: ${item.id}`);
 } catch (error) {
   console.error(
-    `EVAL BASELINE INVALID: ${error instanceof Error ? error.message : String(error)}`,
+    `EVAL REFERENCE INVALID: ${error instanceof Error ? error.message : String(error)}`,
   );
   process.exit(2);
 } finally {

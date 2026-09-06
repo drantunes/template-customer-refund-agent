@@ -470,6 +470,18 @@ afterAll(async () => {
   );
   const report = {
     runner: "deterministic-native-targets-v2",
+    runnerSourceHash: createHash("sha256")
+      .update(await readFile(new URL(import.meta.url)))
+      .digest("hex"),
+    scorerSourceHashes: {
+      "src/mastra/evals/index.ts": createHash("sha256")
+        .update(
+          await readFile(
+            new URL("../../src/mastra/evals/index.ts", import.meta.url),
+          ),
+        )
+        .digest("hex"),
+    },
     executionMode: "deterministic-scripted-transport",
     datasetHashes,
     perCaseScores: results,

@@ -1,58 +1,82 @@
 import { describe, expect, it } from "vitest";
 import {
+  REQUIRED_AXES,
   reportHash,
-  validateApprovedBaseline,
+  validateEvalReference,
 } from "../../scripts/eval-baseline-record.mjs";
 
-function approvedRecord() {
+const digest = (char: string) => char.repeat(64);
+
+function measuredReference() {
   const record = {
-    kind: "support-eval-candidate",
+    kind: "support-eval-initial-reference",
+    initialReference: true,
+    historicalComparison: null,
     runner: "deterministic-native-targets-v2",
+    runnerSourceHash: digest("a"),
+    scorerSourceHashes: { "src/mastra/evals/index.ts": digest("b") },
     executionMode: "deterministic-scripted-transport",
     implementationSha: "1c5da14",
-    datasetHashes: { "groundedness.v1.json": "a".repeat(64) },
-    perCaseScores: [{ id: "critical-case", critical: true, score: 1 }],
-    sixAxisScores: { groundedness: 1 },
+    datasetHashes: Object.fromEntries(
+      REQUIRED_AXES.map((axis, index) => [
+        `${axis}.v1.json`,
+        digest(String(index + 1)),
+      ]),
+    ),
+    perCaseScores: REQUIRED_AXES.map((axis, index) => ({
+      id: `${axis}-case`,
+      axis,
+      critical: index < 2,
+      score: 1,
+      evidence: { observed: true },
+    })),
+    sixAxisScores: Object.fromEntries(REQUIRED_AXES.map((axis) => [axis, 1])),
     costMicros: 0,
-    evidenceHash: "b".repeat(64),
-    regression: "pending-human-baseline-approval",
+    evidenceHash: digest("c"),
+    regression: "initial-reference-establishment-no-prior-comparison",
   };
-  const reportHashValue = reportHash(record);
-  return {
-    ...record,
-    reportHash: reportHashValue,
-    approval: {
-      approvedBy: "human-reviewer",
-      approvedAt: "2026-09-05T20:00:00.000Z",
-      reportHash: reportHashValue,
-    },
-  };
+  return { ...record, reportHash: reportHash(record) };
 }
 
-describe("approved eval baseline records", () => {
-  it("accepts a human approval bound to the measured report", () => {
-    expect(validateApprovedBaseline(approvedRecord())).toMatchObject({
-      implementationSha: "1c5da14",
+describe("immutable eval reference records", () => {
+  it("accepts a complete first measured reference without invented human approval", () => {
+    expect(
+      validateEvalReference(measuredReference(), { initial: true }),
+    ).toMatchObject({
+      initialReference: true,
+      historicalComparison: null,
     });
   });
 
-  it("rejects corruption and an approval bound to another report", () => {
-    const corrupted = approvedRecord();
-    corrupted.sixAxisScores.groundedness = 0;
-    expect(() => validateApprovedBaseline(corrupted)).toThrow(
-      "report hash does not match",
+  it("rejects corrupt hashes, missing axes, duplicate IDs, failed critical cases, and invalid evidence", () => {
+    const corrupted = measuredReference();
+    corrupted.sixAxisScores.groundedness = Number.NaN;
+    expect(() => validateEvalReference(corrupted)).toThrow(
+      "hash does not match",
     );
 
-    const unbound = approvedRecord();
-    unbound.approval.reportHash = "c".repeat(64);
-    expect(() => validateApprovedBaseline(unbound)).toThrow("content-bound");
+    const missingAxis = measuredReference();
+    delete missingAxis.sixAxisScores.groundedness;
+    missingAxis.reportHash = reportHash(missingAxis);
+    expect(() => validateEvalReference(missingAxis)).toThrow("all six");
 
-    const failedCritical = approvedRecord();
+    const duplicate = measuredReference();
+    duplicate.perCaseScores[1]!.id = duplicate.perCaseScores[0]!.id;
+    duplicate.reportHash = reportHash(duplicate);
+    expect(() => validateEvalReference(duplicate)).toThrow("duplicate");
+
+    const failedCritical = measuredReference();
     failedCritical.perCaseScores[0]!.score = 0;
     failedCritical.reportHash = reportHash(failedCritical);
-    failedCritical.approval.reportHash = failedCritical.reportHash;
-    expect(() => validateApprovedBaseline(failedCritical)).toThrow(
+    expect(() => validateEvalReference(failedCritical)).toThrow(
       "failed critical",
+    );
+
+    const wrongRunnerHash = measuredReference();
+    wrongRunnerHash.runnerSourceHash = "not-a-hash";
+    wrongRunnerHash.reportHash = reportHash(wrongRunnerHash);
+    expect(() => validateEvalReference(wrongRunnerHash)).toThrow(
+      "runner provenance",
     );
   });
 });

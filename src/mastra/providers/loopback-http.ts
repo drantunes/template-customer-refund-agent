@@ -99,6 +99,11 @@ const evidenceSchema = z
     source: z.string(),
     score: z.number().finite(),
     version: z.string(),
+    // These belong to the source record.  The knowledge publication layer
+    // deliberately refuses to invent an applicability window, so the
+    // loopback contract must preserve them end-to-end.
+    effectiveAt: z.iso.datetime().optional(),
+    expiresAt: z.iso.datetime().optional(),
   })
   .strict();
 const knowledgeDocumentRefSchema = z

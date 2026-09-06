@@ -30,7 +30,7 @@ try {
     executionMode: execution.executionMode,
     implementationSha,
     ...execution,
-    regression: "pending-human-baseline-approval",
+    regression: "compare-against-fixed-initial-reference",
   };
   report.reportHash = reportHash(report);
   if (process.env.SUPPORT_EVAL_CANDIDATE_OUTPUT)
