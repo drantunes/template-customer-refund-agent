@@ -32,8 +32,15 @@ export interface KnowledgePublication {
   revision: number;
 }
 
-const accountKey = (binding: ProviderBinding) =>
-  `${binding.tenantId}\u0000${binding.providerKind}\u0000${binding.providerAccountId}`;
+/** A durable database key must not use NUL separators: SQLite bindings can
+ * truncate those values. JSON preserves all three independently selected
+ * account components without delimiter ambiguity. */
+export const knowledgeAccountKey = (binding: ProviderBinding) =>
+  JSON.stringify([
+    binding.tenantId,
+    binding.providerKind,
+    binding.providerAccountId,
+  ]);
 
 const tokenize = (value: string) =>
   value.toLowerCase().match(/[a-z0-9]{2,}/g) ?? [];
@@ -85,6 +92,82 @@ export class KnowledgePublicationStore {
         sql: "INSERT OR IGNORE INTO support_knowledge_schema_migrations(version, applied_at) VALUES (1, ?)",
         args: [new Date().toISOString()],
       });
+      const keyMigration = await this.client.execute({
+        sql: "SELECT version FROM support_knowledge_schema_migrations WHERE version = 2",
+      });
+      if (!keyMigration.rows[0]) {
+        const tx = await this.client.transaction("write");
+        try {
+          // Older NUL-delimited bindings were truncated by the SQLite client.
+          // Re-key every generation from its independently persisted fields,
+          // then retain each legacy serving pointer under that generation's
+          // exact account tuple. A pointer that was already re-keyed wins.
+          const generations = await tx.execute(
+            "SELECT id, tenant_id, provider_kind, provider_account_id FROM support_knowledge_generations",
+          );
+          for (const row of generations.rows) {
+            const value = row as Record<string, unknown>;
+            await tx.execute({
+              sql: "UPDATE support_knowledge_generations SET account_key = ? WHERE id = ?",
+              args: [
+                knowledgeAccountKey({
+                  tenantId: String(value.tenant_id),
+                  providerKind: String(
+                    value.provider_kind,
+                  ) as ProviderBinding["providerKind"],
+                  providerAccountId: String(value.provider_account_id),
+                  externalConversationId: "knowledge-publication-migration",
+                }),
+                String(value.id),
+              ],
+            });
+          }
+          const publications = await tx.execute(
+            "SELECT p.account_key AS legacy_key, p.generation_id, p.revision, p.published_at, g.tenant_id, g.provider_kind, g.provider_account_id FROM support_knowledge_publications p JOIN support_knowledge_generations g ON g.id = p.generation_id",
+          );
+          for (const row of publications.rows) {
+            const value = row as Record<string, unknown>;
+            const key = knowledgeAccountKey({
+              tenantId: String(value.tenant_id),
+              providerKind: String(
+                value.provider_kind,
+              ) as ProviderBinding["providerKind"],
+              providerAccountId: String(value.provider_account_id),
+              externalConversationId: "knowledge-publication-migration",
+            });
+            const legacyKey = String(value.legacy_key);
+            if (legacyKey === key) continue;
+            const existing = await tx.execute({
+              sql: "SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?",
+              args: [key],
+            });
+            if (!existing.rows[0])
+              await tx.execute({
+                sql: "INSERT INTO support_knowledge_publications(account_key, generation_id, revision, published_at) VALUES (?, ?, ?, ?)",
+                args: [
+                  key,
+                  String(value.generation_id),
+                  Number(value.revision),
+                  String(value.published_at),
+                ],
+              });
+            await tx.execute({
+              sql: "DELETE FROM support_knowledge_publications WHERE account_key = ?",
+              args: [legacyKey],
+            });
+          }
+          await tx.execute({
+            sql: "INSERT INTO support_knowledge_schema_migrations(version, applied_at) VALUES (2, ?)",
+            args: [new Date().toISOString()],
+          });
+          await tx.commit();
+        } catch (error) {
+          try {
+            await tx.rollback();
+          } catch {}
+          throw error;
+        }
+      }
     })();
     await this.ready;
   }
@@ -160,7 +243,7 @@ export class KnowledgePublicationStore {
         sql: "INSERT INTO support_knowledge_generations(id, account_key, tenant_id, provider_kind, provider_account_id, state, created_at, base_revision) VALUES (?, ?, ?, ?, ?, 'candidate', ?, ?)",
         args: [
           generationId,
-          accountKey(binding),
+          knowledgeAccountKey(binding),
           binding.tenantId,
           binding.providerKind,
           binding.providerAccountId,
@@ -202,7 +285,7 @@ export class KnowledgePublicationStore {
     expected: KnowledgePublication,
   ) {
     await this.ensured();
-    const key = accountKey(binding);
+    const key = knowledgeAccountKey(binding);
     const tx = await this.client.transaction("write");
     try {
       const candidate = await tx.execute({
@@ -253,7 +336,7 @@ export class KnowledgePublicationStore {
     await this.ensured();
     const result = await this.client.execute({
       sql: "SELECT generation_id, revision FROM support_knowledge_publications WHERE account_key = ?",
-      args: [accountKey(binding)],
+      args: [knowledgeAccountKey(binding)],
     });
     return {
       generationId: result.rows[0]?.generation_id as string | undefined,
@@ -321,7 +404,7 @@ export class KnowledgePublicationStore {
     await this.ensured();
     const row = await this.client.execute({
       sql: "SELECT d.* FROM support_knowledge_documents d JOIN support_knowledge_generations g ON g.id = d.generation_id WHERE d.generation_id = ? AND d.source = ? AND d.document_hash = ? AND g.account_key = ?",
-      args: [generationId, source, documentHash, accountKey(binding)],
+      args: [generationId, source, documentHash, knowledgeAccountKey(binding)],
     });
     const value = row.rows[0] as Record<string, unknown> | undefined;
     if (!value) return undefined;

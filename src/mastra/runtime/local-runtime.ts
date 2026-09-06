@@ -45,6 +45,7 @@ import {
   isRefundPolicyEvidenceError,
   refundPolicyEvidenceError,
 } from "../lib/refund-policy-evidence";
+import { knowledgeAccountKey } from "../lib/knowledge-publications";
 
 // Keep this runtime boundary independent of the workflow module: the workflow
 // itself uses LocalRuntime through providers and importing it here would create
@@ -128,11 +129,34 @@ async function assertRefundPolicyEvidenceAtFirstEffect(
     binding?: Record<string, unknown>;
     citations?: unknown;
   };
+  let knowledgeBinding: ProviderBinding;
   try {
     stored = JSON.parse(text(action.rows[0]?.data)) as typeof stored;
+    // The evidence action is immutable command material, but the selected
+    // knowledge account is case-owned authority. Resolve it from the durable
+    // originating case, never from the financial command or model input.
+    const originatingCase = await tx.execute({
+      sql: "SELECT data FROM support_cases WHERE id = ?",
+      args: [command.approvalCaseId],
+    });
+    const persisted = JSON.parse(text(originatingCase.rows[0]?.data)) as {
+      externalId?: unknown;
+      metadata?: unknown;
+    };
+    if (
+      !persisted ||
+      typeof persisted !== "object" ||
+      !persisted.metadata ||
+      typeof persisted.metadata !== "object"
+    )
+      throw new Error("missing originating case knowledge binding");
+    knowledgeBinding = bindingsForPersistedCase({
+      externalId: text(persisted.externalId),
+      metadata: persisted.metadata as Record<string, unknown>,
+    }).knowledge;
   } catch {
     throw refundPolicyEvidenceError(
-      "the approved command has no parseable evidence binding",
+      "the approved command has no parseable originating policy evidence binding",
     );
   }
   const citations = Array.isArray(stored.citations) ? stored.citations : [];
@@ -141,8 +165,9 @@ async function assertRefundPolicyEvidenceAtFirstEffect(
     stored.turnId !== nativeTurnId ||
     !binding ||
     binding.tenantId !== command.binding.tenantId ||
-    binding.providerKind !== command.binding.providerKind ||
-    binding.providerAccountId !== command.binding.providerAccountId ||
+    binding.tenantId !== knowledgeBinding.tenantId ||
+    binding.providerKind !== knowledgeBinding.providerKind ||
+    binding.providerAccountId !== knowledgeBinding.providerAccountId ||
     citations.length === 0 ||
     !citations.every(isRefundPolicyEvidence)
   )
@@ -150,7 +175,7 @@ async function assertRefundPolicyEvidenceAtFirstEffect(
       "the approved command is not bound to complete originating policy evidence",
     );
 
-  const accountKey = `${command.binding.tenantId}\u0000${command.binding.providerKind}\u0000${command.binding.providerAccountId}`;
+  const accountKey = knowledgeAccountKey(knowledgeBinding);
   const publication = await tx.execute({
     sql: "SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?",
     args: [accountKey],
@@ -163,7 +188,7 @@ async function assertRefundPolicyEvidenceAtFirstEffect(
         "the cited policy generation is no longer the active publication",
       );
     const authoritative = await tx.execute({
-      sql: "SELECT d.*, g.account_key, g.state FROM support_knowledge_documents d JOIN support_knowledge_generations g ON g.id = d.generation_id WHERE d.generation_id = ? AND d.source = ? AND d.document_hash = ?",
+      sql: "SELECT d.*, g.account_key AS generation_account_key, g.tenant_id AS generation_tenant_id, g.provider_kind AS generation_provider_kind, g.provider_account_id AS generation_provider_account_id, g.state AS generation_state FROM support_knowledge_documents d JOIN support_knowledge_generations g ON g.id = d.generation_id WHERE d.generation_id = ? AND d.source = ? AND d.document_hash = ?",
       args: [citation.generationId, citation.source, citation.documentHash],
     });
     const row = authoritative.rows[0] as Record<string, unknown> | undefined;
@@ -173,7 +198,12 @@ async function assertRefundPolicyEvidenceAtFirstEffect(
       : undefined;
     if (
       !row ||
-      row.state !== "active" ||
+      row.generation_state !== "active" ||
+      text(row.generation_account_key) !== accountKey ||
+      text(row.generation_tenant_id) !== knowledgeBinding.tenantId ||
+      text(row.generation_provider_kind) !== knowledgeBinding.providerKind ||
+      text(row.generation_provider_account_id) !==
+        knowledgeBinding.providerAccountId ||
       text(row.title) !== citation.title ||
       text(row.version) !== citation.version ||
       text(row.effective_at) !== citation.effectiveAt ||
@@ -182,8 +212,8 @@ async function assertRefundPolicyEvidenceAtFirstEffect(
         citation.expiresAt ||
       text(row.provider_kind) !== citation.providerKind ||
       text(row.provider_account_id) !== citation.providerAccountId ||
-      citation.providerKind !== command.binding.providerKind ||
-      citation.providerAccountId !== command.binding.providerAccountId ||
+      citation.providerKind !== knowledgeBinding.providerKind ||
+      citation.providerAccountId !== knowledgeBinding.providerAccountId ||
       !Number.isFinite(effectiveAt) ||
       effectiveAt > now ||
       (expiresAt !== undefined &&

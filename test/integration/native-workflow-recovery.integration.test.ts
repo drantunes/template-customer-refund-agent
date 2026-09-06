@@ -6,6 +6,8 @@ import { rm } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { issueLocalSession } from "../../src/mastra/server/auth";
+import { knowledgeAccountKey } from "../../src/mastra/lib/knowledge-publications";
+import type { CaseProviderBindings } from "../../src/mastra/providers/contracts";
 
 const files: string[] = [];
 const runtimes: Array<{ shutdown(): Promise<void> }> = [];
@@ -184,6 +186,7 @@ async function setup(
     quoteDelayMs?: number;
     quoteFailure?: boolean;
     allowInitialWorkflowFailure?: boolean;
+    providerBindings?: CaseProviderBindings;
   },
 ) {
   const path = `/private/tmp/phase003-native-workflow-${crypto.randomUUID()}.db`;
@@ -268,21 +271,38 @@ async function setup(
       ) as never),
   });
 
-  const binding =
+  const configured =
     configuredBinding ?? defaultLocalBinding(`conversation-${caseId}`);
-  await localRuntime.seed(binding);
+  const bindings: CaseProviderBindings = options?.providerBindings ?? {
+    support: configured,
+    commerce: configured,
+    transactions: configured,
+    knowledge: configured,
+  };
+  const binding = bindings.support;
+  const configuredBindings = [
+    ...new Map(
+      Object.values(bindings).map((candidate) => [
+        `${candidate.tenantId}\u0000${candidate.providerKind}\u0000${candidate.providerAccountId}`,
+        candidate,
+      ]),
+    ).values(),
+  ];
+  await Promise.all(
+    configuredBindings.map((candidate) => localRuntime.seed(candidate)),
+  );
   const { legacyAmountToMoney } = await import("../../src/mastra/lib/money");
   await caseStore.getClientForTests().execute({
     sql: "UPDATE local_orders SET currency = ?, amount_minor = ? WHERE tenant_id = ? AND provider_account_id = ? AND order_id = ?",
     args: [
       refundCurrency,
       legacyAmountToMoney(refundAmount + 1_000, refundCurrency).minor,
-      binding.tenantId,
-      binding.providerAccountId,
+      bindings.transactions.tenantId,
+      bindings.transactions.providerAccountId,
       "ORD-1001",
     ],
   });
-  if (configuredBinding) {
+  if (configuredBinding || options?.providerBindings) {
     const { registerProviderRegistry } =
       await import("../../src/mastra/providers/registry");
     const { createLocalLoopbackFacade, LoopbackHttpProviderRegistry } =
@@ -291,7 +311,7 @@ async function setup(
       new LoopbackHttpProviderRegistry(
         createLocalLoopbackFacade(localRuntime, loopbackFailure),
       ),
-      [binding],
+      configuredBindings,
     );
   }
   const createdAt = new Date().toISOString();
@@ -313,7 +333,11 @@ async function setup(
       status: "new",
       createdAt,
       updatedAt: createdAt,
-      metadata: { providerBinding: binding, ownerId: "customer-alex" },
+      metadata: {
+        providerBinding: binding,
+        providerBindings: bindings,
+        ownerId: "customer-alex",
+      },
     },
     `event-${caseId}`,
     `workflow-${caseId}`,
@@ -377,6 +401,7 @@ async function setup(
   if (options?.deferInitialWorkflow)
     return {
       binding,
+      bindings,
       caseStore,
       mastra,
       app,
@@ -414,6 +439,7 @@ async function setup(
   if (options?.allowInitialWorkflowFailure)
     return {
       binding,
+      bindings,
       caseStore,
       mastra,
       app,
@@ -447,6 +473,7 @@ async function setup(
   });
   return {
     binding,
+    bindings,
     caseStore,
     mastra,
     app,
@@ -465,6 +492,36 @@ afterEach(async () => {
   delete process.env.SUPPORT_TEST_DISPATCH_HEARTBEAT_MS;
   await Promise.all(files.splice(0).map((file) => rm(file, { force: true })));
 });
+
+function independentCaseBindings(caseId: string): CaseProviderBindings {
+  const binding = (providerAccountId: string) => ({
+    tenantId: "local-demo",
+    providerKind: "local" as const,
+    providerAccountId,
+    externalConversationId: `conversation-${caseId}`,
+  });
+  return {
+    support: binding(`support-${caseId}`),
+    commerce: binding(`commerce-${caseId}`),
+    transactions: binding(`transactions-${caseId}`),
+    knowledge: binding(`knowledge-${caseId}`),
+  };
+}
+
+async function approveNativeRefund(
+  app: Hono,
+  caseId: string,
+  commandFingerprint: string,
+) {
+  return app.request(`http://support.test/support/cases/${caseId}/approve`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${issueLocalSession({ id: "approver-demo" })}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ commandFingerprint }),
+  });
+}
 
 describe("native approval workflow recovery", () => {
   it("lets the registered response Agent read only the durable current customer commerce scope", async () => {
@@ -1576,7 +1633,9 @@ describe("native approval workflow recovery", () => {
       sql: "UPDATE support_knowledge_documents SET expires_at = ? WHERE generation_id = (SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?)",
       args: [
         "2000-01-01T00:00:00.000Z",
-        `${(await caseStore.get(caseId))!.metadata.providerBinding.tenantId}\u0000local\u0000${(await caseStore.get(caseId))!.metadata.providerBinding.providerAccountId}`,
+        knowledgeAccountKey(
+          (await caseStore.get(caseId))!.metadata.providerBinding,
+        ),
       ],
     });
 
@@ -1655,15 +1714,281 @@ describe("native approval workflow recovery", () => {
     expect((await caseStore.get(caseId))?.refundResult).toBeUndefined();
   });
 
+  it("executes an authenticated first refund with independently configured knowledge and transaction accounts", async () => {
+    const caseId = `independent-accounts-approval-${crypto.randomUUID()}`;
+    const bindings = independentCaseBindings(caseId);
+    const { app, caseStore, native } = await setup(
+      caseId,
+      undefined,
+      undefined,
+      undefined,
+      { providerBindings: bindings },
+    );
+
+    const response = await approveNativeRefund(app, caseId, native.fingerprint);
+
+    expect(response.status).toBe(200);
+    expect(await localRefundCount(caseStore)).toBe(1);
+    const providerEffect = await caseStore.getClientForTests().execute({
+      sql: "SELECT tenant_id, provider_account_id, order_id, amount_minor FROM local_refunds",
+    });
+    expect(providerEffect.rows).toEqual([
+      {
+        tenant_id: bindings.transactions.tenantId,
+        provider_account_id: bindings.transactions.providerAccountId,
+        order_id: "ORD-1001",
+        amount_minor: 2000,
+      },
+    ]);
+    expect(
+      await caseStore.getAction(
+        caseId,
+        "refund-policy-evidence",
+        native.fingerprint,
+      ),
+    ).toMatchObject({
+      turnId: native.turnId,
+      binding: {
+        tenantId: bindings.knowledge.tenantId,
+        providerKind: bindings.knowledge.providerKind,
+        providerAccountId: bindings.knowledge.providerAccountId,
+      },
+    });
+  });
+
+  it("denies an authenticated first refund after knowledge authority expires with independent accounts", async () => {
+    const caseId = `independent-accounts-expiry-${crypto.randomUUID()}`;
+    const bindings = independentCaseBindings(caseId);
+    const { app, caseStore, native } = await setup(
+      caseId,
+      undefined,
+      undefined,
+      undefined,
+      { providerBindings: bindings },
+    );
+    await caseStore.getClientForTests().execute({
+      sql: "UPDATE support_knowledge_documents SET expires_at = ? WHERE generation_id = (SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?)",
+      args: [
+        "2000-01-01T00:00:00.000Z",
+        knowledgeAccountKey(bindings.knowledge),
+      ],
+    });
+
+    const response = await approveNativeRefund(app, caseId, native.fingerprint);
+
+    expect(response.status).toBe(500);
+    expect(await localRefundCount(caseStore)).toBe(0);
+    expect(await caseStore.get(caseId)).toMatchObject({ status: "escalated" });
+    expect(
+      await caseStore.getAction(
+        caseId,
+        "refund-policy-evidence-rejected",
+        native.fingerprint,
+      ),
+    ).toMatchObject({ category: "policy", classification: "requires-review" });
+  });
+
+  it("denies recovery after replacing knowledge authority with independent accounts", async () => {
+    const caseId = `independent-accounts-replacement-${crypto.randomUUID()}`;
+    const bindings = independentCaseBindings(caseId);
+    const { caseStore, mastra, native, recoverApprovedNativeDecisions } =
+      await setup(caseId, undefined, undefined, undefined, {
+        providerBindings: bindings,
+      });
+    const { publishKnowledge } =
+      await import("../../src/mastra/lib/publish-knowledge");
+    const original = await caseStore.getClientForTests().execute({
+      sql: "SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?",
+      args: [knowledgeAccountKey(bindings.knowledge)],
+    });
+    const replacement = await publishKnowledge(bindings.knowledge);
+    expect(replacement.generationId).not.toBe(original.rows[0]?.generation_id);
+    await caseStore.recordApprovalDecision({
+      caseId,
+      turnId: native.turnId,
+      commandFingerprint: native.fingerprint,
+      principalId: "approver-demo",
+      approved: true,
+      nativeRunId: native.runId,
+      nativeToolCallId: native.toolCallId,
+    });
+
+    expect(
+      await recoverApprovedNativeDecisions(mastra, caseStore, {
+        disableScorers: true,
+      }),
+    ).toBe(0);
+    expect(await localRefundCount(caseStore)).toBe(0);
+    expect(await caseStore.get(caseId)).toMatchObject({ status: "escalated" });
+  });
+
+  it("reconciles an existing native effect after knowledge expiry with independent accounts", async () => {
+    const caseId = `independent-accounts-replay-${crypto.randomUUID()}`;
+    const bindings = independentCaseBindings(caseId);
+    const { caseStore, mastra, native, recoverApprovedNativeDecisions } =
+      await setup(caseId, undefined, undefined, undefined, {
+        providerBindings: bindings,
+      });
+    await caseStore.recordApprovalDecision({
+      caseId,
+      turnId: native.turnId,
+      commandFingerprint: native.fingerprint,
+      principalId: "approver-demo",
+      approved: true,
+      nativeRunId: native.runId,
+      nativeToolCallId: native.toolCallId,
+    });
+    const dispatch = await caseStore.claimDispatchForResume(
+      caseId,
+      (await caseStore.get(caseId))!.workflowRunId,
+      native.turnId,
+    );
+    const { withDispatchLeaseScope } =
+      await import("../../src/mastra/lib/dispatch-lease-scope");
+    const { resumeApprovedNativeTool } =
+      await import("../../src/mastra/providers/native-execution");
+    const originalUpdate = caseStore.update.bind(caseStore);
+    let projectionFault = true;
+    const update = vi
+      .spyOn(caseStore, "update")
+      .mockImplementation(async (id, patch, expectedVersion) => {
+        if (projectionFault && patch.refundResult) {
+          projectionFault = false;
+          throw new Error("injected post-provider projection crash");
+        }
+        return originalUpdate(id, patch, expectedVersion);
+      });
+    await withDispatchLeaseScope(
+      {
+        dispatchId: dispatch!.id,
+        caseId,
+        turnId: native.turnId,
+        leaseToken: dispatch!.leaseToken!,
+      },
+      () =>
+        resumeApprovedNativeTool({
+          mastra,
+          approved: true,
+          scope: {
+            caseId,
+            turnId: native.turnId,
+            nativeRunId: native.runId,
+            nativeToolCallId: native.toolCallId,
+            commandFingerprint: native.fingerprint,
+            dispatchId: dispatch!.id,
+            leaseToken: dispatch!.leaseToken!,
+          },
+        }),
+    );
+    update.mockRestore();
+    await caseStore.completeDispatch(
+      dispatch!.id,
+      "suspended",
+      undefined,
+      dispatch!.leaseToken,
+    );
+    expect(await localRefundCount(caseStore)).toBe(1);
+    const providerEffect = await caseStore.getClientForTests().execute({
+      sql: "SELECT provider_account_id FROM local_refunds",
+    });
+    expect(providerEffect.rows).toEqual([
+      { provider_account_id: bindings.transactions.providerAccountId },
+    ]);
+    await caseStore.getClientForTests().execute({
+      sql: "UPDATE support_knowledge_documents SET expires_at = ? WHERE generation_id = (SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?)",
+      args: [
+        "2000-01-01T00:00:00.000Z",
+        knowledgeAccountKey(bindings.knowledge),
+      ],
+    });
+
+    expect(
+      await recoverApprovedNativeDecisions(mastra, caseStore, {
+        disableScorers: true,
+      }),
+    ).toBe(1);
+    expect(await localRefundCount(caseStore)).toBe(1);
+    expect((await caseStore.get(caseId))?.refundResult).toMatchObject({
+      status: "executed",
+      amount: 20,
+    });
+  });
+
+  it.each([
+    ["missing", (evidence: Record<string, unknown>) => delete evidence.binding],
+    [
+      "foreign",
+      (evidence: Record<string, unknown>) => {
+        evidence.binding = {
+          ...(evidence.binding as Record<string, unknown>),
+          providerAccountId: "foreign-knowledge-account",
+        };
+      },
+    ],
+    [
+      "transaction-tampered",
+      (evidence: Record<string, unknown>, bindings: CaseProviderBindings) => {
+        evidence.binding = {
+          ...(evidence.binding as Record<string, unknown>),
+          providerAccountId: bindings.transactions.providerAccountId,
+        };
+      },
+    ],
+  ])(
+    "denies a %s immutable knowledge binding before an authenticated provider effect",
+    async (_kind, mutate) => {
+      const caseId = `independent-accounts-binding-${crypto.randomUUID()}`;
+      const bindings = independentCaseBindings(caseId);
+      const { app, caseStore, native } = await setup(
+        caseId,
+        undefined,
+        undefined,
+        undefined,
+        { providerBindings: bindings },
+      );
+      const evidence = (await caseStore.getAction(
+        caseId,
+        "refund-policy-evidence",
+        native.fingerprint,
+      )) as Record<string, unknown>;
+      mutate(evidence, bindings);
+      await caseStore.getClientForTests().execute({
+        sql: "UPDATE support_actions SET data = ? WHERE case_id = ? AND kind = ? AND fingerprint = ?",
+        args: [
+          JSON.stringify(evidence),
+          caseId,
+          "refund-policy-evidence",
+          native.fingerprint,
+        ],
+      });
+
+      const response = await approveNativeRefund(
+        app,
+        caseId,
+        native.fingerprint,
+      );
+
+      expect(response.status).toBe(500);
+      expect(await localRefundCount(caseStore)).toBe(0);
+      expect(
+        await caseStore.getAction(
+          caseId,
+          "refund-policy-evidence-rejected",
+          native.fingerprint,
+        ),
+      ).toMatchObject({
+        category: "policy",
+        classification: "requires-review",
+      });
+    },
+  );
+
   it("escalates an authenticated approval when its bound policy expires during native suspension", async () => {
     const caseId = `policy-expired-approval-${crypto.randomUUID()}`;
     const { app, binding, caseStore, native } = await setup(caseId);
     await caseStore.getClientForTests().execute({
       sql: "UPDATE support_knowledge_documents SET expires_at = ? WHERE generation_id = (SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?)",
-      args: [
-        "2000-01-01T00:00:00.000Z",
-        `${binding.tenantId}\u0000${binding.providerKind}\u0000${binding.providerAccountId}`,
-      ],
+      args: ["2000-01-01T00:00:00.000Z", knowledgeAccountKey(binding)],
     });
 
     const response = await app.request(
@@ -1707,9 +2032,7 @@ describe("native approval workflow recovery", () => {
     const originalGeneration = (
       await caseStore.getClientForTests().execute({
         sql: "SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?",
-        args: [
-          `${binding.tenantId}\u0000${binding.providerKind}\u0000${binding.providerAccountId}`,
-        ],
+        args: [knowledgeAccountKey(binding)],
       })
     ).rows[0]?.generation_id;
     const replacement = await publishKnowledge(binding);
