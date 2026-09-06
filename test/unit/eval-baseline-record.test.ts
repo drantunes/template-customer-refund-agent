@@ -5,6 +5,15 @@ import {
   reportHash,
   validateEvalReference,
 } from "../../scripts/eval-baseline-record.mjs";
+import {
+  scoreAxis,
+  scorerInputFromObservation,
+  truthForDatasetCase,
+} from "../../src/mastra/evals/deterministic-semantics.js";
+import {
+  scoreDraftResolutionFields,
+  supportEvalScorerRegistry,
+} from "../../src/mastra/evals/index";
 
 function measuredReference() {
   return JSON.parse(
@@ -41,6 +50,91 @@ function rehashEvidence(record: {
     .update(JSON.stringify(record.perCaseScores))
     .digest("hex");
   return record;
+}
+
+function remeasuredCandidateReference() {
+  const record = measuredReference();
+  const replaceMeasurementAt = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(replaceMeasurementAt);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>))
+      if (entry === "2026-01-01T00:00:02.000Z")
+        (value as Record<string, unknown>)[key] = "2026-08-01T14:00:01.000Z";
+      else replaceMeasurementAt(entry);
+  };
+  replaceMeasurementAt(record);
+  return rehash(rehashEvidence(record));
+}
+
+type Summary = Record<string, unknown>;
+type CaseScore = {
+  id: string;
+  axis: string;
+  evidence: { summary: Summary };
+};
+
+function caseScore(record: Record<string, unknown>, id: string): CaseScore {
+  const item = (record.perCaseScores as CaseScore[]).find(
+    (candidate) => candidate.id === id,
+  );
+  if (!item) throw new Error(`Missing fixed dataset case ${id}`);
+  return item;
+}
+
+function observation(summary: Summary) {
+  const modelOutputs = summary.modelOutputs as Record<string, unknown>;
+  return {
+    triage: modelOutputs.triage,
+    draft: modelOutputs.draft,
+    calls: summary.toolCalls,
+    workflow: summary.workflow,
+    authorization: summary.authorization,
+    financial: summary.financial,
+    historyEstablished: summary.historyEstablished,
+    refundEffects: summary.refundEffects,
+    order: summary.order,
+    answers: modelOutputs.answers,
+    turns: modelOutputs.turns,
+  };
+}
+
+function registeredScorer(axis: string) {
+  const scorers = {
+    groundedness: supportEvalScorerRegistry.groundedness,
+    "policy-compliance": supportEvalScorerRegistry.policyCompliance,
+    "routing-accuracy": supportEvalScorerRegistry.routingAccuracy,
+    "tool-call-correctness": supportEvalScorerRegistry.toolCallCorrectness,
+    "multi-turn-consistency": supportEvalScorerRegistry.multiTurnConsistency,
+    "resolution-quality": supportEvalScorerRegistry.resolutionQuality,
+  };
+  const scorer = scorers[axis as keyof typeof scorers];
+  if (!scorer) throw new Error(`Missing registered scorer for ${axis}`);
+  return scorer;
+}
+
+function assertionsForCase(id: string) {
+  for (const dataset of [
+    "groundedness.v1.json",
+    "multi-turn-consistency.v1.json",
+    "policy-compliance.v1.json",
+    "resolution-quality.v1.json",
+    "routing-accuracy.v1.json",
+    "tool-call-correctness.v1.json",
+  ]) {
+    const parsed = JSON.parse(
+      readFileSync(new URL(`../../evals/datasets/${dataset}`, import.meta.url)),
+    ) as { cases: Array<{ id: string; assertions: Record<string, unknown> }> };
+    const found = parsed.cases.find((item) => item.id === id);
+    if (found) return found.assertions;
+  }
+  throw new Error(`Missing versioned assertions for ${id}`);
+}
+
+function cloneAsRecordWithPrototype(value: unknown, prototype: object) {
+  return Object.assign(Object.create(prototype), structuredClone(value));
 }
 
 describe("immutable eval reference records", () => {
@@ -504,5 +598,222 @@ describe("immutable eval reference records", () => {
       },
     ])
       mutate("lookup-before-refund", apply);
+  });
+
+  it("requires plain nested records across registered, direct, and rehashed replay boundaries", async () => {
+    const boundaryMutations = [
+      {
+        name: "binding",
+        id: "lookup-before-refund",
+        get: (summary: Summary) =>
+          (summary.toolCalls as Array<{ input: Record<string, unknown> }>)[2]
+            .input.binding,
+        set: (summary: Summary, value: unknown) => {
+          (
+            summary.toolCalls as Array<{ input: Record<string, unknown> }>
+          )[2].input.binding = value;
+        },
+      },
+      {
+        name: "knowledge result",
+        id: "lookup-before-refund",
+        get: (summary: Summary) =>
+          (summary.toolCalls as Array<{ result: unknown }>)[2].result,
+        set: (summary: Summary, value: unknown) => {
+          (summary.toolCalls as Array<{ result: unknown }>)[2].result = value;
+        },
+      },
+      {
+        name: "metadata",
+        id: "lookup-before-refund",
+        get: (summary: Summary) =>
+          (
+            summary.toolCalls as Array<{
+              result: { sources: Array<{ metadata: unknown }> };
+            }>
+          )[2].result.sources[0].metadata,
+        set: (summary: Summary, value: unknown) => {
+          (
+            summary.toolCalls as Array<{
+              result: { sources: Array<{ metadata: unknown }> };
+            }>
+          )[2].result.sources[0].metadata = value;
+        },
+      },
+      {
+        name: "lookup result",
+        id: "lookup-before-refund",
+        get: (summary: Summary) =>
+          (summary.toolCalls as Array<{ result: unknown }>)[3].result,
+        set: (summary: Summary, value: unknown) => {
+          (summary.toolCalls as Array<{ result: unknown }>)[3].result = value;
+        },
+      },
+      {
+        name: "complete order",
+        id: "lookup-before-refund",
+        get: (summary: Summary) =>
+          (
+            summary.toolCalls as Array<{
+              result: { order: unknown };
+            }>
+          )[3].result.order,
+        set: (summary: Summary, value: unknown) => {
+          (
+            summary.toolCalls as Array<{
+              result: { order: unknown };
+            }>
+          )[3].result.order = value;
+        },
+      },
+      {
+        name: "workflow",
+        id: "workflow-guard-mutation",
+        get: (summary: Summary) => summary.workflow,
+        set: (summary: Summary, value: unknown) => {
+          summary.workflow = value;
+        },
+      },
+      {
+        name: "financial",
+        id: "approval-required",
+        get: (summary: Summary) => summary.financial,
+        set: (summary: Summary, value: unknown) => {
+          summary.financial = value;
+        },
+      },
+      {
+        name: "authorization",
+        id: "cross-tenant-denied",
+        get: (summary: Summary) => summary.authorization,
+        set: (summary: Summary, value: unknown) => {
+          summary.authorization = value;
+        },
+      },
+      {
+        name: "refund effects",
+        id: "lookup-before-refund",
+        get: (summary: Summary) => summary.refundEffects,
+        set: (summary: Summary, value: unknown) => {
+          summary.refundEffects = value;
+        },
+      },
+      {
+        name: "triage",
+        id: "adversarial-routing",
+        get: (summary: Summary) =>
+          (summary.modelOutputs as Record<string, unknown>).triage,
+        set: (summary: Summary, value: unknown) => {
+          (summary.modelOutputs as Record<string, unknown>).triage = value;
+        },
+      },
+      {
+        name: "draft",
+        id: "grounded-policy",
+        get: (summary: Summary) =>
+          (summary.modelOutputs as Record<string, unknown>).draft,
+        set: (summary: Summary, value: unknown) => {
+          (summary.modelOutputs as Record<string, unknown>).draft = value;
+        },
+      },
+      {
+        name: "summary order",
+        id: "clear-resolution",
+        get: (summary: Summary) => summary.order,
+        set: (summary: Summary, value: unknown) => {
+          summary.order = value;
+        },
+      },
+    ];
+
+    const score = async (record: Record<string, unknown>, id: string) => {
+      const item = caseScore(record, id);
+      const assertions = assertionsForCase(id);
+      const observed = observation(item.evidence.summary);
+      const output = scorerInputFromObservation(item.axis, observed);
+      const truth = truthForDatasetCase(item.axis, assertions, id);
+      const direct = scoreAxis(item.axis, output, truth);
+      const registered = await registeredScorer(item.axis).run({
+        output,
+        groundTruth: truth,
+      });
+      return { direct, registered: registered.score };
+    };
+
+    for (const boundary of boundaryMutations) {
+      const record = remeasuredCandidateReference();
+      expect(validateEvalReference(record, { initial: true })).toBe(record);
+      const summary = caseScore(record, boundary.id).evidence.summary;
+      boundary.set(summary, JSON.stringify(boundary.get(summary)));
+      expect(await score(record, boundary.id), boundary.name).toEqual({
+        direct: 0,
+        registered: 0,
+      });
+      expect(() =>
+        validateEvalReference(rehash(rehashEvidence(record))),
+      ).toThrow("invalid, duplicate, or unevidenced");
+    }
+
+    for (const invalidValue of [[], 7, true, null]) {
+      for (const boundary of boundaryMutations) {
+        const record = remeasuredCandidateReference();
+        const summary = caseScore(record, boundary.id).evidence.summary;
+        boundary.set(summary, invalidValue);
+        expect(
+          await score(record, boundary.id),
+          `${boundary.name} ${String(invalidValue)}`,
+        ).toEqual({ direct: 0, registered: 0 });
+        expect(() =>
+          validateEvalReference(rehash(rehashEvidence(record))),
+        ).toThrow("invalid, duplicate, or unevidenced");
+      }
+    }
+
+    for (const prototype of [
+      class EvidenceRecord {},
+      { inherited: "not-json" },
+    ]) {
+      for (const boundary of boundaryMutations) {
+        const record = remeasuredCandidateReference();
+        const summary = caseScore(record, boundary.id).evidence.summary;
+        boundary.set(
+          summary,
+          cloneAsRecordWithPrototype(boundary.get(summary), prototype),
+        );
+        expect(
+          await score(record, boundary.id),
+          `${boundary.name} prototype`,
+        ).toEqual({
+          direct: 0,
+          registered: 0,
+        });
+        expect(() =>
+          validateEvalReference(rehash(rehashEvidence(record))),
+        ).toThrow("invalid, duplicate, or unevidenced");
+      }
+    }
+
+    const futureOrder = remeasuredCandidateReference();
+    const futureOrderSummary = caseScore(futureOrder, "lookup-before-refund")
+      .evidence.summary;
+    for (const index of [1, 3])
+      (
+        futureOrderSummary.toolCalls as Array<{
+          result: { order: { placedAt: string } };
+        }>
+      )[index].result.order.placedAt = "2026-08-01T14:00:02.000Z";
+    expect(await score(futureOrder, "lookup-before-refund")).toEqual({
+      direct: 0,
+      registered: 0,
+    });
+    expect(() =>
+      validateEvalReference(rehash(rehashEvidence(futureOrder))),
+    ).toThrow("invalid, duplicate, or unevidenced");
+  });
+
+  it("keeps JSON parsing only for the explicit top-level model-output contract", () => {
+    expect(
+      scoreDraftResolutionFields('{"draftResponse":"top-level model text"}'),
+    ).toMatchObject({ hasDraftResponse: true });
   });
 });

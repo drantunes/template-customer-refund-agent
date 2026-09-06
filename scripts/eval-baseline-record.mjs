@@ -92,7 +92,9 @@ function validScore(value) {
 }
 
 function plainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function nonEmptyString(value) {
@@ -118,12 +120,33 @@ function validExecutionSummary(axis, summary, expectedCase, measuredScore) {
     return false;
   if (!plainObject(summary.assertions) || !plainObject(expectedCase.assertions))
     return false;
-  const toolCalls = Array.isArray(summary.toolCalls) ? summary.toolCalls : [];
+  const optionalRecord = (value) => value === undefined || plainObject(value);
+  const optionalStrings = (value) =>
+    value === undefined ||
+    (Array.isArray(value) && value.every((item) => typeof item === "string"));
+  const optionalRecords = (value) =>
+    value === undefined ||
+    (Array.isArray(value) && value.every((item) => plainObject(item)));
+  if (
+    !optionalRecord(summary.workflow) ||
+    !optionalRecord(summary.authorization) ||
+    !optionalRecord(summary.financial) ||
+    !optionalRecord(summary.refundEffects) ||
+    !optionalRecord(summary.order) ||
+    !optionalRecord(summary.modelOutputs.triage) ||
+    !optionalRecord(summary.modelOutputs.draft) ||
+    !optionalStrings(summary.modelOutputs.answers) ||
+    !optionalRecords(summary.modelOutputs.turns)
+  )
+    return false;
+  if (!Array.isArray(summary.toolCalls)) return false;
+  const toolCalls = summary.toolCalls;
   const validCall = (call) =>
     plainObject(call) &&
     nonEmptyString(call.name) &&
     plainObject(call.input) &&
     Object.hasOwn(call, "result") &&
+    plainObject(call.result) &&
     typeof call.rawResultHash === "string" &&
     sha256.test(call.rawResultHash) &&
     call.rawResultHash ===
@@ -181,7 +204,7 @@ function aggregateEvidenceHash(perCaseScores) {
 
 /** Validates measurement evidence, not a claimed human approval. */
 export function validateEvalReference(reference, { initial = false } = {}) {
-  if (!reference || typeof reference !== "object")
+  if (!plainObject(reference))
     throw new Error("eval reference is not an object");
   if (!requiredReportFields.every((field) => reference[field] !== undefined))
     throw new Error(
@@ -204,16 +227,14 @@ export function validateEvalReference(reference, { initial = false } = {}) {
   )
     throw new Error("eval reference runner provenance is malformed");
   if (
-    !reference.scorerSourceHashes ||
-    typeof reference.scorerSourceHashes !== "object" ||
+    !plainObject(reference.scorerSourceHashes) ||
     !Object.values(reference.scorerSourceHashes).every(
       (value) => typeof value === "string" && sha256.test(value),
     )
   )
     throw new Error("eval reference scorer provenance is malformed");
   if (
-    !reference.datasetHashes ||
-    typeof reference.datasetHashes !== "object" ||
+    !plainObject(reference.datasetHashes) ||
     Object.keys(reference.datasetHashes).length !== REQUIRED_AXES.length ||
     !Object.values(reference.datasetHashes).every(
       (value) => typeof value === "string" && sha256.test(value),
@@ -221,8 +242,7 @@ export function validateEvalReference(reference, { initial = false } = {}) {
   )
     throw new Error("eval reference dataset identities are malformed");
   if (
-    !reference.sixAxisScores ||
-    typeof reference.sixAxisScores !== "object" ||
+    !plainObject(reference.sixAxisScores) ||
     REQUIRED_AXES.some((axis) => !validScore(reference.sixAxisScores[axis]))
   )
     throw new Error(
@@ -244,15 +264,14 @@ export function validateEvalReference(reference, { initial = false } = {}) {
   );
   for (const item of reference.perCaseScores) {
     if (
-      !item ||
+      !plainObject(item) ||
       typeof item.id !== "string" ||
       !item.id ||
       ids.has(item.id) ||
       !REQUIRED_AXES.includes(item.axis) ||
       typeof item.critical !== "boolean" ||
       !validScore(item.score) ||
-      !item.evidence ||
-      typeof item.evidence !== "object" ||
+      !plainObject(item.evidence) ||
       !sha256.test(item.evidence.evidenceHash) ||
       item.evidence.evidenceHash !==
         createHash("sha256")

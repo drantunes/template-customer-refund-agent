@@ -8,18 +8,29 @@ import { scoreAxis } from "./deterministic-semantics.js";
  */
 type EvalOutput = Record<string, unknown>;
 
-function object(value: unknown): EvalOutput {
-  if (value && typeof value === "object" && !Array.isArray(value))
+function plainRecord(value: unknown): EvalOutput {
+  if (
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (Object.getPrototypeOf(value) === Object.prototype ||
+      Object.getPrototypeOf(value) === null)
+  )
     return value as EvalOutput;
-  if (typeof value !== "string") return {};
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as EvalOutput)
-      : {};
-  } catch {
-    return {};
+  return {};
+}
+
+/** Parse only Mastra's explicit top-level model-output text boundary. */
+function topLevelModelOutput(value: unknown): EvalOutput {
+  if (plainRecord(value) !== value) {
+    if (typeof value !== "string") return {};
+    try {
+      return plainRecord(JSON.parse(value));
+    } catch {
+      return {};
+    }
   }
+  return value as EvalOutput;
 }
 function deterministicScorer(
   id: string,
@@ -33,8 +44,8 @@ function deterministicScorer(
     type: "agent",
   })
     .preprocess(({ run }) => ({
-      output: object(run.output),
-      truth: object(run.groundTruth),
+      output: topLevelModelOutput(run.output),
+      truth: plainRecord(run.groundTruth),
     }))
     .generateScore(({ results }) =>
       score
@@ -95,8 +106,8 @@ export const supportEvalScorers: MastraScorers = {
   routingAccuracy: { scorer: routingAccuracyScorer },
 };
 
-export function scoreDraftResolutionFields(output: string | undefined) {
-  const parsed = object(output),
+export function scoreDraftResolutionFields(output: unknown) {
+  const parsed = topLevelModelOutput(output),
     citedSources = Array.isArray(parsed.citedSources)
       ? parsed.citedSources.filter(
           (source): source is string => typeof source === "string",
@@ -115,8 +126,7 @@ export function scoreDraftResolutionFields(output: string | undefined) {
 export const responseStructureSanityScorer = deterministicScorer(
   "response-structure-sanity",
   "Response Structure Sanity",
-  (output) =>
-    scoreDraftResolutionFields(JSON.stringify(output)).hasDraftResponse ? 1 : 0,
+  (output) => (scoreDraftResolutionFields(output).hasDraftResponse ? 1 : 0),
 );
 export const conversationCoverageScorer = deterministicScorer(
   "conversation-coverage",

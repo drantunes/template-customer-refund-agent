@@ -21,7 +21,7 @@ const EXPECTED_CUSTOMER_EMAIL = EXPECTED_ORDER.customerEmail;
 const EXPECTED_QUERY = "duplicate charge policy";
 // This instant is a fixture authority for the deterministic measurement, not
 // the wall clock of the machine replaying an immutable report.
-const DETERMINISTIC_MEASUREMENT_AT = "2026-01-01T00:00:02.000Z";
+const DETERMINISTIC_MEASUREMENT_AT = "2026-08-01T14:00:01.000Z";
 const EXPECTED_KNOWLEDGE_EVIDENCE = {
   title: "Duplicate Charge Policy",
   source: "duplicate-charge-policy",
@@ -85,17 +85,20 @@ export const SUPPORTED_AXES = [
   "resolution-quality",
 ];
 
-function object(value) {
-  if (value && typeof value === "object" && !Array.isArray(value)) return value;
-  if (typeof value !== "string") return {};
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed
-      : {};
-  } catch {
-    return {};
-  }
+/**
+ * Evidence is a JSON contract, not a convenient object-like value. Direct
+ * scorer and reference-validator callers can preserve prototypes, unlike a
+ * JSON file parse, so class instances and inherited authority are rejected.
+ * Null-prototype records remain valid JSON records and are intentionally kept.
+ */
+export function isPlainJsonRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function plainRecord(value) {
+  return isPlainJsonRecord(value) ? value : {};
 }
 
 /**
@@ -108,7 +111,7 @@ function strictRecords(value) {
   if (!Array.isArray(value)) return null;
   const result = [];
   for (const item of value) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    if (!isPlainJsonRecord(item)) return null;
     result.push(item);
   }
   return result;
@@ -125,12 +128,15 @@ function strictStrings(value) {
 }
 
 function matchingOrder(value) {
-  const order = object(value);
-  const orderValue = object(order.order);
+  const order = plainRecord(value);
+  const orderValue = plainRecord(order.order);
   return (
     exactKeys(order, ["found", "order"]) &&
     order.found === true &&
     exactKeys(orderValue, ORDER_KEYS) &&
+    canonicalInstant(orderValue.placedAt) &&
+    Date.parse(orderValue.placedAt) <=
+      Date.parse(DETERMINISTIC_MEASUREMENT_AT) &&
     Object.entries(EXPECTED_ORDER).every(
       ([key, expected]) => orderValue[key] === expected,
     )
@@ -157,13 +163,13 @@ export function trajectoryAuthorityForDatasetCase(caseId) {
     indexedAt: "2026-01-01T00:00:01.000Z",
     measurementAt: DETERMINISTIC_MEASUREMENT_AT,
     ...(identity === "registered-scorer-fixture-future-expiry"
-      ? { expiresAt: "2026-01-01T00:00:03.000Z" }
+      ? { expiresAt: "2026-08-01T14:00:02.000Z" }
       : {}),
   };
 }
 
 function acceptableKnowledgeEvidence(value, expected, binding, authority) {
-  const result = object(value);
+  const result = plainRecord(value);
   if (!exactKeys(result, ["sources"])) return null;
   const sources = strictRecords(result.sources);
   // Deterministic native evaluation asks for topK=1. Its evidence contract is
@@ -177,7 +183,7 @@ function acceptableKnowledgeEvidence(value, expected, binding, authority) {
     JSON.stringify(keys) !== JSON.stringify(["document", "metadata", "score"])
   )
     return null;
-  const provenance = object(source.metadata);
+  const provenance = plainRecord(source.metadata);
   const provenanceKeys = Object.keys(provenance).sort();
   const requiredProvenanceKeys = [
     "documentHash",
@@ -232,6 +238,11 @@ function acceptableKnowledgeEvidence(value, expected, binding, authority) {
     provenance.generationId !== authority.generationId ||
     !canonicalInstant(provenance.effectiveAt) ||
     !canonicalInstant(provenance.indexedAt) ||
+    !canonicalInstant(authority.effectiveAt) ||
+    !canonicalInstant(authority.indexedAt) ||
+    !canonicalInstant(authority.measurementAt) ||
+    Date.parse(authority.effectiveAt) > Date.parse(authority.indexedAt) ||
+    Date.parse(authority.indexedAt) > Date.parse(authority.measurementAt) ||
     Date.parse(provenance.indexedAt) < Date.parse(provenance.effectiveAt) ||
     Date.parse(provenance.indexedAt) > Date.parse(authority.measurementAt) ||
     (hasExpiry
@@ -288,13 +299,14 @@ function expectedCallSequence(expected) {
 
 function exactKeys(value, keys) {
   return (
+    isPlainJsonRecord(value) &&
     JSON.stringify(Object.keys(value).sort()) ===
-    JSON.stringify([...keys].sort())
+      JSON.stringify([...keys].sort())
   );
 }
 
 function matchingTrustedBinding(value, expected) {
-  const binding = object(value);
+  const binding = plainRecord(value);
   return (
     exactKeys(binding, [
       "tenantId",
@@ -334,9 +346,7 @@ function expectedCallsMatch(value, expected) {
       call.name !== callOrder[index] ||
       call.sequence !== index + 1 ||
       call.turn !== Math.floor(index / 2) + 1 ||
-      !call.input ||
-      typeof call.input !== "object" ||
-      Array.isArray(call.input) ||
+      !isPlainJsonRecord(call.input) ||
       !Object.hasOwn(call, "result")
     )
       return false;
@@ -348,12 +358,12 @@ function expectedCallsMatch(value, expected) {
         input.topK !== 1 ||
         !matchingTrustedBinding(
           input.binding,
-          object(expected.trustedBinding),
+          plainRecord(expected.trustedBinding),
         ) ||
         !acceptableKnowledgeEvidence(
           call.result,
-          object(expected.knowledgeEvidence),
-          object(input.binding),
+          plainRecord(expected.knowledgeEvidence),
+          plainRecord(input.binding),
           authority,
         )
       )
@@ -367,7 +377,7 @@ function expectedCallsMatch(value, expected) {
         input.orderId !== expected.orderId ||
         !matchingTrustedBinding(
           input.binding,
-          object(expected.trustedBinding),
+          plainRecord(expected.trustedBinding),
         ) ||
         !matchingOrder(call.result)
       )
@@ -401,6 +411,7 @@ function supportedEscalationResponse(value) {
 }
 
 function safeEscalation(draft, workflow) {
+  if (!isPlainJsonRecord(draft) || !isPlainJsonRecord(workflow)) return false;
   const outboxBodies = strictStrings(workflow.outboxBodies);
   return (
     draft.requiresEscalation === true &&
@@ -421,16 +432,18 @@ export function evaluateDatasetAssertions(
   observed,
   evaluationCaseId = "registered-scorer-fixture",
 ) {
-  const draft = object(observed.draft);
-  const financial = object(observed.financial);
-  const authorization = object(observed.authorization);
-  const workflow = object(observed.workflow);
-  const triage = object(observed.triage);
-  const calls = strictRecords(observed.calls);
-  const refundEffects = object(observed.refundEffects);
+  const assertionRecord = plainRecord(assertions);
+  const observation = plainRecord(observed);
+  const draft = plainRecord(observation.draft);
+  const financial = plainRecord(observation.financial);
+  const authorization = plainRecord(observation.authorization);
+  const workflow = plainRecord(observation.workflow);
+  const triage = plainRecord(observation.triage);
+  const calls = strictRecords(observation.calls);
+  const refundEffects = plainRecord(observation.refundEffects);
   const evaluated = {};
 
-  for (const [name, expected] of Object.entries(object(assertions))) {
+  for (const [name, expected] of Object.entries(assertionRecord)) {
     let actual;
     switch (name) {
       case "requiresCitation":
@@ -446,7 +459,7 @@ export function evaluateDatasetAssertions(
         actual = expected === true && safeEscalation(draft, workflow);
         break;
       case "sameThread":
-        actual = expected === true && observed.historyEstablished === true;
+        actual = expected === true && observation.historyEstablished === true;
         break;
       case "tenantDenied":
         actual =
@@ -505,7 +518,7 @@ export function evaluateDatasetAssertions(
       case "customerFacing":
         actual =
           expected === true &&
-          matchingOrder(observed.order) &&
+          matchingOrder(observation.order) &&
           supportedStatusAssertion(draft.draftResponse, {});
         break;
       default:
@@ -525,9 +538,10 @@ export function truthForDatasetCase(
     throw new Error(`Dataset axis has no deterministic semantics: ${axis}`);
   // Evaluate once with no observations to reject unknown declarations. The
   // constants below are controlled by the dataset runner, never report data.
-  evaluateDatasetAssertions(assertions, {}, evaluationCaseId);
+  const assertionRecord = plainRecord(assertions);
+  evaluateDatasetAssertions(assertionRecord, {}, evaluationCaseId);
   const truth = {
-    ...object(assertions),
+    ...assertionRecord,
     orderId: EXPECTED_ORDER_ID,
     orderStatus: EXPECTED_ORDER_STATUS,
     allowedSources: ["Duplicate Charge Policy"],
@@ -549,37 +563,46 @@ export function truthForDatasetCase(
 export function scorerInputFromObservation(axis, observed) {
   if (!SUPPORTED_AXES.includes(axis))
     throw new Error(`Dataset axis has no deterministic semantics: ${axis}`);
-  const draft = object(observed.draft);
-  if (axis === "routing-accuracy") return object(observed.triage);
+  const observation = plainRecord(observed);
+  const draft = plainRecord(observation.draft);
+  if (axis === "routing-accuracy") return plainRecord(observation.triage);
   if (axis === "groundedness")
-    return { ...draft, order: observed.order, workflow: observed.workflow };
+    return {
+      ...draft,
+      order: observation.order,
+      workflow: observation.workflow,
+    };
   if (axis === "tool-call-correctness")
     return {
-      toolCalls: Array.isArray(observed.calls) ? observed.calls : [],
-      refundEffects: observed.refundEffects,
+      toolCalls: Array.isArray(observation.calls) ? observation.calls : [],
+      refundEffects: observation.refundEffects,
     };
   if (axis === "multi-turn-consistency")
     return {
-      turns: observed.turns,
-      toolCalls: Array.isArray(observed.calls)
-        ? observed.calls
-        : observed.toolCalls,
-      historyEstablished: observed.historyEstablished,
-      authorization: observed.authorization,
+      turns: observation.turns,
+      toolCalls: Array.isArray(observation.calls)
+        ? observation.calls
+        : observation.toolCalls,
+      historyEstablished: observation.historyEstablished,
+      authorization: observation.authorization,
     };
   if (axis === "policy-compliance")
     return {
       ...draft,
-      financial: observed.financial,
-      workflow: observed.workflow,
+      financial: observation.financial,
+      workflow: observation.workflow,
     };
-  return { ...draft, order: observed.order, workflow: observed.workflow };
+  return {
+    ...draft,
+    order: observation.order,
+    workflow: observation.workflow,
+  };
 }
 
 /** The exact formulas used by the registered deterministic scorers. */
 export function scoreAxis(axis, output, truth) {
-  const observed = object(output);
-  const expected = object(truth);
+  const observed = plainRecord(output);
+  const expected = plainRecord(truth);
   if (!SUPPORTED_AXES.includes(axis))
     throw new Error(`Dataset axis has no deterministic semantics: ${axis}`);
   if (axis === "routing-accuracy")
@@ -588,7 +611,7 @@ export function scoreAxis(axis, output, truth) {
       ? 1
       : 0;
   if (axis === "groundedness") {
-    const workflow = object(observed.workflow);
+    const workflow = plainRecord(observed.workflow);
     if (
       expected.requiresEscalation === true ||
       expected.unsupportedFinancialDraftEscalates === true
@@ -611,8 +634,8 @@ export function scoreAxis(axis, output, truth) {
   }
   if (axis === "tool-call-correctness") {
     return expectedCallsMatch(observed.toolCalls, expected) &&
-      object(observed.refundEffects).providerEffects === 0 &&
-      object(observed.refundEffects).durableActions === 0
+      plainRecord(observed.refundEffects).providerEffects === 0 &&
+      plainRecord(observed.refundEffects).durableActions === 0
       ? 1
       : 0;
   }
@@ -622,17 +645,17 @@ export function scoreAxis(axis, output, truth) {
       (expected.historyEstablished !== true ||
         observed.historyEstablished === true) &&
       (expected.tenantDenied !== true ||
-        object(observed.authorization).foreignBindingDenied === true) &&
+        plainRecord(observed.authorization).foreignBindingDenied === true) &&
       (expected.twoRegisteredBindings !== true ||
-        object(observed.authorization).twoRegisteredBindings === true)
+        plainRecord(observed.authorization).twoRegisteredBindings === true)
       ? 1
       : 0;
   }
   if (axis === "policy-compliance") {
-    const financial = object(observed.financial);
+    const financial = plainRecord(observed.financial);
     const safe =
       expected.requiresEscalation !== true ||
-      safeEscalation(observed, object(observed.workflow));
+      safeEscalation(observed, plainRecord(observed.workflow));
     const targeted =
       expected.requiresApproval === true
         ? financial.approvalRequired === true
@@ -652,7 +675,7 @@ export function scoreAxis(axis, output, truth) {
     return safe && targeted ? 1 : 0;
   }
   if (expected.requiresEscalation === true)
-    return safeEscalation(observed, object(observed.workflow)) ? 1 : 0;
+    return safeEscalation(observed, plainRecord(observed.workflow)) ? 1 : 0;
   return matchingOrder(observed.order) &&
     supportedStatusAssertion(observed.draftResponse, expected) &&
     (expected.requiresEscalation === undefined ||
