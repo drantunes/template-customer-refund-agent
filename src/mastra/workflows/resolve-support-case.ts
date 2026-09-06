@@ -35,6 +35,43 @@ import { traceOperationalPort } from "../lib/operational-spans";
 
 const caseIdSchema = z.object({ caseId: z.string(), turnId: z.string() });
 
+/** Serialize only the authoritative identities already selected by the
+ * grounded draft. This durable action is later read by the provider write
+ * transaction; it intentionally does not consult a newer case draft. */
+function parsedDraftEvidence(supportCase: SupportCase, citations: string[]) {
+  return citations.map((citation) => {
+    const match = (supportCase.policyMatches ?? []).find(
+      (entry) => entry.title === citation || entry.source === citation,
+    );
+    if (
+      !match?.source ||
+      !match.title ||
+      !match.documentHash ||
+      !match.generationId ||
+      !match.version ||
+      !match.effectiveAt ||
+      !match.indexedAt ||
+      !match.providerKind ||
+      !match.providerAccountId
+    )
+      throw new Error(
+        "Refund approval requires complete authoritative policy evidence.",
+      );
+    return {
+      title: match.title,
+      source: match.source,
+      documentHash: match.documentHash,
+      generationId: match.generationId,
+      version: match.version,
+      effectiveAt: match.effectiveAt,
+      indexedAt: match.indexedAt,
+      expiresAt: match.expiresAt,
+      providerKind: match.providerKind,
+      providerAccountId: match.providerAccountId,
+    };
+  });
+}
+
 async function getCaseOrThrow(caseId: string, turnId: string) {
   const supportCase = await caseStore.get(caseId);
   if (!supportCase) throw new Error(`Support case not found: ${caseId}`);
@@ -697,14 +734,42 @@ const requestApprovalStep = createStep({
         ...immutableCommand,
         fingerprint: command.fingerprint,
       };
-      await providerRegistry(binding)
-        .transactions(binding)
-        .quoteRefund(approvedCommand);
+      // Tool.execute does not create a Mastra span when this trusted workflow
+      // invokes a deterministic provider port directly.  Quote is a real
+      // financial-provider boundary even though it has no effect, so include
+      // it in the workflow's tenant/turn trace before native suspension.
+      await traceOperationalPort({
+        mastra,
+        tracingContext,
+        kind: "provider",
+        operation: "transactions.quote_refund",
+        run: () =>
+          providerRegistry(binding)
+            .transactions(binding)
+            .quoteRefund(approvedCommand),
+      });
       await persistentCaseStore.saveAction(
         supportCase.id,
         "refund-command",
         command.fingerprint,
         approvedCommand,
+      );
+      // Bind the exact evidence selected for this immutable command and turn.
+      // Later case projections/drafts are mutable operational state and must
+      // never decide whether a suspended approval may create an effect.
+      await persistentCaseStore.saveAction(
+        supportCase.id,
+        "refund-policy-evidence",
+        command.fingerprint,
+        {
+          turnId,
+          binding: {
+            tenantId: bindings.knowledge.tenantId,
+            providerKind: bindings.knowledge.providerKind,
+            providerAccountId: bindings.knowledge.providerAccountId,
+          },
+          citations: parsedDraftEvidence(supportCase, draft.citedSources),
+        },
       );
       await persistentCaseStore.bindTurnCommand(
         supportCase.id,

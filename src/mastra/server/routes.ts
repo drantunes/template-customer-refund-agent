@@ -11,6 +11,7 @@ import {
 } from "../lib/dispatch-lease-scope";
 import { resumeApprovedNativeTool } from "../providers/native-execution";
 import { reconcileApprovedRefundEffect } from "../runtime/local-runtime";
+import { isRefundPolicyEvidenceError } from "../lib/refund-policy-evidence";
 import { REQUEST_APPROVAL_STEP_ID } from "../workflows/resolve-support-case";
 import { bindingsForCase } from "../providers/contracts";
 import { withTrustedCaseReadScope } from "../lib/trusted-run-scope";
@@ -848,11 +849,24 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
     );
     nativeResumed = true;
   } catch (error) {
-    // The decision remains durable. Requeue its fenced dispatch for native
-    // recovery instead of recording a second decision or a failed effect.
-    await caseStore
-      .completeDispatch(dispatch.id, "suspended", error, dispatch.leaseToken)
-      .catch(() => undefined);
+    // Expired/replaced command evidence is a deterministic safety decision,
+    // not a transient native snapshot failure. Leave a durable staff-review
+    // outcome with no new provider effect; only transport/snapshot failures
+    // remain recoverable.
+    if (isRefundPolicyEvidenceError(error))
+      await caseStore
+        .failDispatchAndCase(
+          dispatch.id,
+          caseId,
+          error,
+          dispatch.leaseToken,
+          "escalated",
+        )
+        .catch(() => undefined);
+    else
+      await caseStore
+        .completeDispatch(dispatch.id, "suspended", error, dispatch.leaseToken)
+        .catch(() => undefined);
     lease.stop();
     return c.json(
       errorResponseSchema.parse({

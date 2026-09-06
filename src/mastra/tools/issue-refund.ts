@@ -16,6 +16,7 @@ import {
 import { withNativeRefundExecutionAuthorization } from "../providers/native-execution";
 import { activePrincipalHasRole } from "../server/auth";
 import { traceOperationalPort } from "../lib/operational-spans";
+import { isRefundPolicyEvidenceError } from "../lib/refund-policy-evidence";
 
 export const MAX_AUTO_APPROVABLE_REFUND = 1000;
 /**
@@ -181,14 +182,23 @@ export const issueRefundTool = createTool({
       // permanently report a financial failure when it already exists.
       const durable = await caseStore.idempotency(command.idempotencyKey);
       if (!durable) {
+        const policyEvidenceRejected = isRefundPolicyEvidenceError(error);
         const confirmed = isConfirmedRefundFailure(error);
         await caseStore.saveAction(
           input.caseId,
-          confirmed ? "refund-failure" : "refund-uncertain",
+          policyEvidenceRejected
+            ? "refund-policy-evidence-rejected"
+            : confirmed
+              ? "refund-failure"
+              : "refund-uncertain",
           command.fingerprint,
           {
-            category: "provider",
-            classification: confirmed ? "confirmed-failed" : "uncertain",
+            category: policyEvidenceRejected ? "policy" : "provider",
+            classification: policyEvidenceRejected
+              ? "requires-review"
+              : confirmed
+                ? "confirmed-failed"
+                : "uncertain",
             failedAt: new Date().toISOString(),
           },
         );

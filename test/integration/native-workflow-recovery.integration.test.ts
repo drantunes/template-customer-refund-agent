@@ -181,6 +181,9 @@ async function setup(
     responseBeforeGenerate?: () => Promise<void>;
     responseModel?: LanguageModelV2;
     executionBeforeGenerate?: () => Promise<void>;
+    quoteDelayMs?: number;
+    quoteFailure?: boolean;
+    allowInitialWorkflowFailure?: boolean;
   },
 ) {
   const path = `/private/tmp/phase003-native-workflow-${crypto.randomUUID()}.db`;
@@ -217,6 +220,21 @@ async function setup(
     supportCaseFollowUpRoute,
     supportInboundRoute,
   } = await import("../../src/mastra/server/routes");
+
+  if (options?.quoteDelayMs || options?.quoteFailure) {
+    const quoteRefund = localRuntime.quoteRefund.bind(localRuntime);
+    vi.spyOn(localRuntime, "quoteRefund").mockImplementation(
+      async (...args) => {
+        if (options.quoteDelayMs)
+          await new Promise<void>((resolve) =>
+            setTimeout(resolve, options.quoteDelayMs),
+          );
+        if (options.quoteFailure)
+          throw new Error("injected quote provider failure");
+        return quoteRefund(...args);
+      },
+    );
+  }
 
   // These spies replace only the provider transport. The registered Agents,
   // native approval snapshot, tool execution, workflow suspension and resume
@@ -393,6 +411,16 @@ async function setup(
     dispatch.leaseToken,
   );
   const supportCase = await caseStore.get(caseId);
+  if (options?.allowInitialWorkflowFailure)
+    return {
+      binding,
+      caseStore,
+      mastra,
+      app,
+      selectExecutionCase,
+      purgeExpiredWorkflowSnapshots,
+      recoverApprovedNativeDecisions,
+    };
   if (refund && refund.amount > 1000)
     return {
       binding,
@@ -1542,6 +1570,15 @@ describe("native approval workflow recovery", () => {
     expect(await localRefundCount(caseStore)).toBe(1);
 
     expect((await caseStore.get(caseId))?.refundResult).toBeUndefined();
+    // The provider effect is already durable. A later expiry must not turn
+    // recovery into a rejection or permit a duplicate effect.
+    await caseStore.getClientForTests().execute({
+      sql: "UPDATE support_knowledge_documents SET expires_at = ? WHERE generation_id = (SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?)",
+      args: [
+        "2000-01-01T00:00:00.000Z",
+        `${(await caseStore.get(caseId))!.metadata.providerBinding.tenantId}\u0000local\u0000${(await caseStore.get(caseId))!.metadata.providerBinding.providerAccountId}`,
+      ],
+    });
 
     expect(
       await recoverApprovedNativeDecisions(mastra, caseStore, {
@@ -1617,6 +1654,153 @@ describe("native approval workflow recovery", () => {
     expect(await localRefundCount(caseStore)).toBe(0);
     expect((await caseStore.get(caseId))?.refundResult).toBeUndefined();
   });
+
+  it("escalates an authenticated approval when its bound policy expires during native suspension", async () => {
+    const caseId = `policy-expired-approval-${crypto.randomUUID()}`;
+    const { app, binding, caseStore, native } = await setup(caseId);
+    await caseStore.getClientForTests().execute({
+      sql: "UPDATE support_knowledge_documents SET expires_at = ? WHERE generation_id = (SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?)",
+      args: [
+        "2000-01-01T00:00:00.000Z",
+        `${binding.tenantId}\u0000${binding.providerKind}\u0000${binding.providerAccountId}`,
+      ],
+    });
+
+    const response = await app.request(
+      `http://support.test/support/cases/${caseId}/approve`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${issueLocalSession({ id: "approver-demo" })}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ commandFingerprint: native.fingerprint }),
+      },
+    );
+
+    expect(response.status).toBe(500);
+    expect(await localRefundCount(caseStore)).toBe(0);
+    expect(await caseStore.get(caseId)).toMatchObject({
+      status: "escalated",
+    });
+    const rejected = await caseStore.getClientForTests().execute({
+      sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = 'refund-policy-evidence-rejected' AND fingerprint = ?",
+      args: [caseId, native.fingerprint],
+    });
+    expect(JSON.parse(String(rejected.rows[0]?.data))).toMatchObject({
+      category: "policy",
+      classification: "requires-review",
+    });
+  });
+
+  it("escalates recovery without an effect when publication generation changes after suspension", async () => {
+    const caseId = `policy-replaced-recovery-${crypto.randomUUID()}`;
+    const {
+      binding,
+      caseStore,
+      mastra,
+      native,
+      recoverApprovedNativeDecisions,
+    } = await setup(caseId);
+    const { publishKnowledge } =
+      await import("../../src/mastra/lib/publish-knowledge");
+    const originalGeneration = (
+      await caseStore.getClientForTests().execute({
+        sql: "SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?",
+        args: [
+          `${binding.tenantId}\u0000${binding.providerKind}\u0000${binding.providerAccountId}`,
+        ],
+      })
+    ).rows[0]?.generation_id;
+    const replacement = await publishKnowledge(binding);
+    expect(replacement.generationId).not.toBe(originalGeneration);
+    await caseStore.recordApprovalDecision({
+      caseId,
+      turnId: native.turnId,
+      commandFingerprint: native.fingerprint,
+      principalId: "approver-demo",
+      approved: true,
+      nativeRunId: native.runId,
+      nativeToolCallId: native.toolCallId,
+    });
+
+    expect(
+      await recoverApprovedNativeDecisions(mastra, caseStore, {
+        disableScorers: true,
+      }),
+    ).toBe(0);
+    expect(await localRefundCount(caseStore)).toBe(0);
+    expect(await caseStore.get(caseId)).toMatchObject({
+      status: "escalated",
+    });
+  });
+
+  it("exports the actual request-approval refund quote provider span on its workflow trace", async () => {
+    const caseId = `refund-quote-span-${crypto.randomUUID()}`;
+    const { caseStore, mastra } = await setup(caseId);
+    const supportCase = await caseStore.get(caseId);
+    expect(supportCase?.traceId).toEqual(expect.any(String));
+    await mastra.observability.flush();
+    const observability = await mastra.getStorage()?.getStore("observability");
+    const trace = await observability?.getTrace({
+      traceId: supportCase!.traceId!,
+    });
+    const quote = trace?.spans.find(
+      (span) => span.name === "transactions.quote_refund",
+    );
+    expect(quote).toMatchObject({
+      metadata: {
+        operationalKind: "provider",
+        operation: "transactions.quote_refund",
+      },
+      attributes: { success: true },
+    });
+  });
+
+  it("records slow and failed actual refund quotes as provider health and alert evidence", async () => {
+    const slowCaseId = `slow-refund-quote-${crypto.randomUUID()}`;
+    const slow = await setup(slowCaseId, undefined, undefined, undefined, {
+      quoteDelayMs: 5_010,
+    });
+    const { computeMonitoringSummary } =
+      await import("../../src/mastra/lib/monitoring");
+    await slow.mastra.observability.flush();
+    const slowSummary = await computeMonitoringSummary(
+      slow.mastra,
+      slow.binding.tenantId,
+    );
+    expect(
+      slowSummary.telemetry.providerCalls.find(
+        (entry) => entry.operation === "transactions.quote_refund",
+      ),
+    ).toMatchObject({ calls: 1, errorRate: 0, p95Ms: expect.any(Number) });
+    expect(
+      slowSummary.telemetry.providerCalls.find(
+        (entry) => entry.operation === "transactions.quote_refund",
+      )?.p95Ms,
+    ).toBeGreaterThan(5_000);
+    expect(slowSummary.telemetry.alerts).toContain("p95-latency");
+
+    const failedCaseId = `failed-refund-quote-${crypto.randomUUID()}`;
+    const failed = await setup(failedCaseId, undefined, undefined, undefined, {
+      quoteFailure: true,
+      allowInitialWorkflowFailure: true,
+    });
+    const { computeMonitoringSummary: computeFailedMonitoringSummary } =
+      await import("../../src/mastra/lib/monitoring");
+    await failed.mastra.observability.flush();
+    const failedSummary = await computeFailedMonitoringSummary(
+      failed.mastra,
+      failed.binding.tenantId,
+    );
+    expect(
+      failedSummary.telemetry.providerCalls.find(
+        (entry) => entry.operation === "transactions.quote_refund",
+      ),
+    ).toMatchObject({ calls: 1, errorRate: 1 });
+    expect(failedSummary.telemetry.alerts).toContain("error-rate");
+    expect(await localRefundCount(failed.caseStore)).toBe(0);
+  }, 15_000);
 
   it("rechecks an escalation policy changed after native suspension before any provider effect", async () => {
     const caseId = `policy-change-${crypto.randomUUID()}`;

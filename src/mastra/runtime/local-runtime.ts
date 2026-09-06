@@ -41,6 +41,10 @@ import {
 import { activePrincipalHasRole, ownerIdForCustomer } from "../server/auth";
 import { traceOperationalPort } from "../lib/operational-spans";
 import { retryOrEscalateOperationalFailure } from "../lib/operational-alerts";
+import {
+  isRefundPolicyEvidenceError,
+  refundPolicyEvidenceError,
+} from "../lib/refund-policy-evidence";
 
 // Keep this runtime boundary independent of the workflow module: the workflow
 // itself uses LocalRuntime through providers and importing it here would create
@@ -61,6 +65,136 @@ export const defaultLocalBinding = (
   externalConversationId,
 });
 const text = (value: unknown) => String(value ?? "");
+type LocalTransaction = Awaited<ReturnType<Client["transaction"]>>;
+
+type RefundPolicyEvidence = {
+  title: string;
+  source: string;
+  documentHash: string;
+  generationId: string;
+  version: string;
+  effectiveAt: string;
+  indexedAt: string;
+  expiresAt?: string;
+  providerKind: string;
+  providerAccountId: string;
+};
+
+function isRefundPolicyEvidence(value: unknown): value is RefundPolicyEvidence {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Record<string, unknown>;
+  return (
+    [
+      "title",
+      "source",
+      "documentHash",
+      "generationId",
+      "version",
+      "effectiveAt",
+      "indexedAt",
+      "providerKind",
+      "providerAccountId",
+    ].every((key) => typeof entry[key] === "string") &&
+    (entry.expiresAt === undefined || typeof entry.expiresAt === "string")
+  );
+}
+
+/** Revalidate the command's immutable evidence in the same write transaction
+ * as its first possible provider effect. Idempotency replay happens before
+ * this boundary so an already committed matching effect remains reconcilable
+ * after a later policy expiry. */
+async function assertRefundPolicyEvidenceAtFirstEffect(
+  tx: LocalTransaction,
+  command: RefundCommand,
+  nativeTurnId: string,
+) {
+  const action = await tx.execute({
+    sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = 'refund-policy-evidence' AND fingerprint = ?",
+    args: [command.approvalCaseId, command.fingerprint],
+  });
+  // The production workflow always persists both immutable command and
+  // evidence actions before native suspension. Keep the provider-neutral
+  // native-tool characterization path usable for callers that never created
+  // a workflow command at all; it cannot impersonate a suspended command.
+  if (!action.rows[0]) {
+    const commandAction = await tx.execute({
+      sql: "SELECT id FROM support_actions WHERE case_id = ? AND kind = 'refund-command' AND fingerprint = ?",
+      args: [command.approvalCaseId, command.fingerprint],
+    });
+    if (!commandAction.rows[0]) return;
+  }
+  let stored: {
+    turnId?: unknown;
+    binding?: Record<string, unknown>;
+    citations?: unknown;
+  };
+  try {
+    stored = JSON.parse(text(action.rows[0]?.data)) as typeof stored;
+  } catch {
+    throw refundPolicyEvidenceError(
+      "the approved command has no parseable evidence binding",
+    );
+  }
+  const citations = Array.isArray(stored.citations) ? stored.citations : [];
+  const binding = stored.binding;
+  if (
+    stored.turnId !== nativeTurnId ||
+    !binding ||
+    binding.tenantId !== command.binding.tenantId ||
+    binding.providerKind !== command.binding.providerKind ||
+    binding.providerAccountId !== command.binding.providerAccountId ||
+    citations.length === 0 ||
+    !citations.every(isRefundPolicyEvidence)
+  )
+    throw refundPolicyEvidenceError(
+      "the approved command is not bound to complete originating policy evidence",
+    );
+
+  const accountKey = `${command.binding.tenantId}\u0000${command.binding.providerKind}\u0000${command.binding.providerAccountId}`;
+  const publication = await tx.execute({
+    sql: "SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?",
+    args: [accountKey],
+  });
+  const activeGeneration = publication.rows[0]?.generation_id;
+  const now = Date.now();
+  for (const citation of citations) {
+    if (activeGeneration !== citation.generationId)
+      throw refundPolicyEvidenceError(
+        "the cited policy generation is no longer the active publication",
+      );
+    const authoritative = await tx.execute({
+      sql: "SELECT d.*, g.account_key, g.state FROM support_knowledge_documents d JOIN support_knowledge_generations g ON g.id = d.generation_id WHERE d.generation_id = ? AND d.source = ? AND d.document_hash = ?",
+      args: [citation.generationId, citation.source, citation.documentHash],
+    });
+    const row = authoritative.rows[0] as Record<string, unknown> | undefined;
+    const effectiveAt = Date.parse(text(row?.effective_at));
+    const expiresAt = row?.expires_at
+      ? Date.parse(text(row.expires_at))
+      : undefined;
+    if (
+      !row ||
+      row.state !== "active" ||
+      text(row.title) !== citation.title ||
+      text(row.version) !== citation.version ||
+      text(row.effective_at) !== citation.effectiveAt ||
+      text(row.indexed_at) !== citation.indexedAt ||
+      (row.expires_at ? text(row.expires_at) : undefined) !==
+        citation.expiresAt ||
+      text(row.provider_kind) !== citation.providerKind ||
+      text(row.provider_account_id) !== citation.providerAccountId ||
+      citation.providerKind !== command.binding.providerKind ||
+      citation.providerAccountId !== command.binding.providerAccountId ||
+      !Number.isFinite(effectiveAt) ||
+      effectiveAt > now ||
+      (expiresAt !== undefined &&
+        (!Number.isFinite(expiresAt) || expiresAt <= now))
+    ) {
+      throw refundPolicyEvidenceError(
+        "the cited policy is missing, altered, inactive, or outside its applicability window",
+      );
+    }
+  }
+}
 
 /** Compare the persisted authorization command structurally. JSON text is not
  * an authority format: equivalent objects may have a different key order. */
@@ -517,6 +651,11 @@ export class LocalRuntime
         await tx.rollback();
         return { ...effect, replayed: true };
       }
+      // This is deliberately below exact idempotency reconciliation and above
+      // every provider-effect insert. A completed command can always be
+      // projected once; a new effect cannot rely on evidence that expired or
+      // was superseded while native approval was suspended.
+      await assertRefundPolicyEvidenceAtFirstEffect(tx, command, native.turnId);
       const orderRows = await tx.execute({
         sql: "SELECT * FROM local_orders WHERE tenant_id = ? AND provider_account_id = ? AND order_id = ?",
         args: [
@@ -1394,7 +1533,10 @@ export async function recoverApprovedNativeDecisions(
       // The native snapshot may be temporarily unavailable after a process
       // crash. Return its lease to the suspended queue so a later bounded
       // sweep can reconcile it; never invent an approval or effect.
-      if (/does not match the immutable approved command/.test(String(error)))
+      if (
+        /does not match the immutable approved command/.test(String(error)) ||
+        isRefundPolicyEvidenceError(error)
+      )
         await store
           .failDispatchAndCase(
             dispatch.id,
