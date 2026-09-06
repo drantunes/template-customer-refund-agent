@@ -2,6 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
+import {
+  budgetedLanguageModel,
+  createValidationBudgetExecution,
+} from "../../src/mastra/lib/eval-budget";
 import { deterministicJsonModel } from "../fixtures/deterministic-language-model";
 
 type Dataset = {
@@ -22,6 +26,7 @@ type Result = {
 };
 const results: Result[] = [],
   datasets: Dataset[] = [];
+const ciEvaluationBudget = createValidationBudgetExecution("ci-eval");
 const scorerKey: Record<string, string> = {
   "policy-compliance": "policyCompliance",
   "routing-accuracy": "routingAccuracy",
@@ -130,7 +135,13 @@ async function scopedEvidence(input: string) {
     await import("../../src/mastra/domain/support-case");
   const triageResult = await triage.generate(
     [{ role: "user", content: input }],
-    { structuredOutput: { schema: triageResultSchema } },
+    {
+      structuredOutput: { schema: triageResultSchema },
+      model: budgetedLanguageModel(
+        (await triage.getModel()) as never,
+        ciEvaluationBudget,
+      ),
+    },
   );
   const draftResult = await response.generate(
     [
@@ -139,7 +150,13 @@ async function scopedEvidence(input: string) {
         content: JSON.stringify({ input, sources: sources.sources, order }),
       },
     ],
-    { structuredOutput: { schema: draftResolutionSchema } },
+    {
+      structuredOutput: { schema: draftResolutionSchema },
+      model: budgetedLanguageModel(
+        (await response.getModel()) as never,
+        ciEvaluationBudget,
+      ),
+    },
   );
   const financial = mastra.getTool("issueRefundTool");
   await expect(
@@ -397,13 +414,17 @@ afterAll(async () => {
     perCaseScores,
     sixAxisScores,
     costMicros: 0,
-    pricing: "not-applicable-deterministic-transport",
+    pricing: "validated-zero-cost-deterministic-transport",
     evidenceHash: createHash("sha256")
       .update(JSON.stringify(perCaseScores))
       .digest("hex"),
   };
   await mkdir(dirname(process.env.SUPPORT_EVAL_REPORT_PATH), {
     recursive: true,
+  });
+  expect(ciEvaluationBudget.ledger.snapshot()).toMatchObject({
+    actualMicros: 0n,
+    reservedMicros: 0n,
   });
   await writeFile(process.env.SUPPORT_EVAL_REPORT_PATH, JSON.stringify(report));
   vi.restoreAllMocks();

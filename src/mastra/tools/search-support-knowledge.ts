@@ -7,6 +7,7 @@ import { caseStore } from "../lib/case-store";
 import { bindingsForCase } from "../providers/contracts";
 import { requireTrustedCaseReadScope } from "../lib/trusted-run-scope";
 import { traceOperationalPort } from "../lib/operational-spans";
+import { validationExecutionFromRequestContext } from "../lib/eval-budget";
 
 const bindingSchema = z.object({
   tenantId: z.string(),
@@ -89,7 +90,13 @@ export const searchSupportKnowledgeTool = createTool({
             kind: "provider",
             operation: "knowledge.vector_search",
             run: () =>
-              searchPublishedVector(configured, generationId, queryText, topK),
+              searchPublishedVector(
+                configured,
+                generationId,
+                queryText,
+                topK,
+                validationExecutionFromRequestContext(context?.requestContext),
+              ),
           })
         : lexicalEvidence;
     return {

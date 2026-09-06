@@ -9,6 +9,7 @@ import { knowledgePublicationStore } from "./knowledge-publications";
 import type { MastraUnion } from "@mastra/core/tools";
 import type { TracingContext } from "@mastra/core/observability";
 import { traceOperationalPort } from "./operational-spans";
+import type { ValidationBudgetExecution } from "./eval-budget";
 
 /** Build a complete replacement outside the serving pointer, then publish it
  * only against the revision observed before provider reads. */
@@ -18,6 +19,7 @@ export async function publishKnowledge(
     onlyIfMissing?: boolean;
     mastra?: MastraUnion;
     tracingContext?: TracingContext;
+    validationExecution?: ValidationBudgetExecution;
   } = {},
 ) {
   const binding = resolveConfiguredBinding(requestedBinding);
@@ -59,6 +61,7 @@ export async function publishKnowledge(
       binding,
       candidate.generationId,
       documents,
+      options.validationExecution,
     );
   try {
     await knowledgePublicationStore.activate(

@@ -3,10 +3,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const databaseFiles: string[] = [];
 let invalidEmbedding = false;
+let embeddingCalls = 0;
 
 afterEach(async () => {
   delete process.env.SUPPORT_KNOWLEDGE_RETRIEVAL;
   invalidEmbedding = false;
+  embeddingCalls = 0;
   vi.doUnmock("@mastra/core/llm");
   await Promise.all(
     databaseFiles.splice(0).map((path) => rm(path, { force: true })),
@@ -30,10 +32,12 @@ describe("support knowledge index", () => {
         ...actual,
         ModelRouterEmbeddingModel: class DeterministicEmbeddingModel {
           async doEmbed({ values }: { values: string[] }) {
+            embeddingCalls += 1;
             return {
               embeddings: values.map(() =>
                 invalidEmbedding ? [1] : [1, ...Array(1535).fill(0)],
               ),
+              usage: { tokens: values.length },
             };
           }
         },
@@ -102,6 +106,7 @@ describe("support knowledge index", () => {
           providerAccountId: "local-demo",
           externalConversationId: "index-characterization",
         },
+        validation: { mode: "sandbox" },
       },
     });
     expect(indexed).toMatchObject({
@@ -151,6 +156,8 @@ describe("support knowledge index", () => {
     const publishedGeneration = results.sources[0]!.metadata.generationId;
     const { searchPublishedVector, vectorStore } =
       await import("../../src/mastra/lib/vector-store");
+    const { createValidationBudgetExecution } =
+      await import("../../src/mastra/lib/eval-budget");
     const originalQuery = vectorStore.query.bind(vectorStore);
     let generatedMetadata: Record<string, unknown> | undefined;
     const query = vi
@@ -168,6 +175,33 @@ describe("support knowledge index", () => {
         1,
       ),
     ).resolves.toHaveLength(1);
+    const validationQuery = createValidationBudgetExecution("sandbox");
+    await expect(
+      searchPublishedVector(
+        readBinding,
+        publishedGeneration,
+        "duplicate charge refund policy",
+        1,
+        validationQuery,
+      ),
+    ).resolves.toHaveLength(1);
+    expect(embeddingCalls).toBeGreaterThanOrEqual(3);
+    expect(validationQuery.ledger.snapshot()).toMatchObject({
+      reservedMicros: 0n,
+    });
+    const exhaustedQuery = createValidationBudgetExecution("sandbox");
+    exhaustedQuery.ledger.reserve(9_999_999n);
+    const callsBeforeExhaustion = embeddingCalls;
+    await expect(
+      searchPublishedVector(
+        readBinding,
+        publishedGeneration,
+        "duplicate charge refund policy",
+        1,
+        exhaustedQuery,
+      ),
+    ).rejects.toThrow("budget exhausted");
+    expect(embeddingCalls).toBe(callsBeforeExhaustion);
     expect(generatedMetadata).toMatchObject({
       chunkId: expect.any(String),
       chunkIndex: expect.any(Number),

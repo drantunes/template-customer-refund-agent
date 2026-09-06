@@ -11,6 +11,11 @@ import { bindingsForCase } from "../providers/contracts";
 import { withTrustedCaseReadScope } from "../lib/trusted-run-scope";
 import { resourceIdForOwner, threadIdForCase } from "../domain/support-case";
 import { computeMonitoringSummary } from "../lib/monitoring";
+import {
+  budgetedLanguageModel,
+  createValidationBudgetExecution,
+  validationBudgetRequestContextKey,
+} from "../lib/eval-budget";
 import type { CaseFeedback, SupportCase } from "../domain/support-case";
 import {
   approvalRequestSchema,
@@ -22,6 +27,7 @@ import {
   monitoringSummarySchema,
   mockEmailPayloadSchema,
   reindexResponseSchema,
+  reindexRequestSchema,
   supervisorExecutionRequestSchema,
   supervisorExecutionResponseSchema,
   supportOpenApiDocument,
@@ -523,6 +529,19 @@ export const supportCaseSupervisorRoute = registerApiRoute(
           409,
         );
       const binding = bindingsForCase(supportCase).support;
+      const validation = parsed.data.validation
+        ? createValidationBudgetExecution(parsed.data.validation.mode)
+        : undefined;
+      const requestContext = c.get("requestContext");
+      if (validation)
+        requestContext.setRaw(validationBudgetRequestContextKey, validation);
+      const supervisor = c.get("mastra").getAgent("supportSupervisorAgent");
+      const model = validation
+        ? budgetedLanguageModel(
+            (await supervisor.getModel({ requestContext })) as never,
+            validation,
+          )
+        : undefined;
       // Mastra's final aggregate omits failed tool calls after the model
       // recovers with a text response. Capture the supported native iteration
       // result so the authenticated staff response reports both successful
@@ -532,6 +551,7 @@ export const supportCaseSupervisorRoute = registerApiRoute(
         result: unknown;
         error?: Error;
       }> = [];
+      let validationError: Error | undefined;
       const result = await withTrustedCaseReadScope(
         { caseId: supportCase.id, ownerId, tenantId: binding.tenantId },
         () =>
@@ -550,13 +570,40 @@ export const supportCaseSupervisorRoute = registerApiRoute(
                   thread: threadIdForCase(supportCase.id, binding.tenantId),
                   resource: resourceIdForOwner(ownerId, binding.tenantId),
                 },
-                requestContext: c.get("requestContext"),
+                requestContext,
+                ...(model
+                  ? {
+                      model,
+                      // Delegated specialists own independent model instances.
+                      // Validation blocks those routes rather than letting a
+                      // child bypass this execution's ledger.
+                      delegation: {
+                        onDelegationStart: () => ({
+                          proceed: false,
+                          rejectionReason:
+                            "Budgeted supervisor validation does not permit delegated model calls.",
+                        }),
+                      },
+                    }
+                  : {}),
                 onIterationComplete: ({ toolResults }) => {
                   observedToolResults.push(...toolResults);
                 },
               },
             ),
-      );
+      ).catch((error) => {
+        if (!validation) throw error;
+        validationError =
+          error instanceof Error ? error : new Error(String(error));
+        return undefined;
+      });
+      if (!result)
+        return c.json(
+          errorResponseSchema.parse({
+            error: `Validation budget blocked: ${validationError?.message ?? "unknown error"}`,
+          }),
+          422,
+        );
       const toolResults = observedToolResults.map((entry) => ({
         toolName: entry.name,
         result: entry.error ? { error: entry.error.message } : entry.result,
@@ -1097,6 +1144,14 @@ export const supportKnowledgeReindexRoute = registerApiRoute(
     handler: async (c) => {
       const current = requireRole(c, "admin");
       if (current instanceof Response) return current;
+      const reindexInput = reindexRequestSchema.safeParse(
+        await c.req.json().catch(() => ({})),
+      );
+      if (!reindexInput.success)
+        return c.json(
+          errorResponseSchema.parse({ error: "Invalid reindex request." }),
+          400,
+        );
       const mastra = c.get("mastra");
       const workflow = mastra.getWorkflow("indexSupportKnowledgeWorkflow");
       const run = await workflow.createRun();
@@ -1108,6 +1163,9 @@ export const supportKnowledgeReindexRoute = registerApiRoute(
             providerAccountId: "local-demo",
             externalConversationId: `reindex:${current.id}`,
           },
+          ...(reindexInput.data.validation
+            ? { validation: reindexInput.data.validation }
+            : {}),
         },
         requestContext: c.get("requestContext"),
       });

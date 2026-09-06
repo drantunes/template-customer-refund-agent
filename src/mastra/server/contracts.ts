@@ -54,8 +54,17 @@ export const errorResponseSchema = z.object({ error: z.string() });
 export const reindexResponseSchema = z.object({
   indexed: z.number().int().nonnegative(),
 });
+export const validationRequestSchema = z.object({
+  // This is intentionally an explicit alternate execution mode. Ordinary
+  // application requests do not inherit validation accounting.
+  mode: z.literal("sandbox"),
+});
 export const supervisorExecutionRequestSchema = z.object({
   message: z.string().min(1).max(10_000),
+  validation: validationRequestSchema.optional(),
+});
+export const reindexRequestSchema = z.object({
+  validation: validationRequestSchema.optional(),
 });
 export const supervisorExecutionResponseSchema = z.object({
   text: z.string(),
@@ -367,6 +376,12 @@ export const supportOpenApiDocument = {
     },
     "/support/knowledge/reindex": {
       post: {
+        requestBody: {
+          required: false,
+          content: {
+            "application/json": { schema: jsonSchema(reindexRequestSchema) },
+          },
+        },
         responses: {
           "200": {
             description: "Knowledge indexed",

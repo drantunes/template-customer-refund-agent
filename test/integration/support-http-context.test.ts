@@ -999,6 +999,104 @@ describe("support workflow HTTP context propagation", () => {
     expect(denied.status).toBe(403);
   });
 
+  it("runs the registered supervisor's actual validation transport through the sandbox ledger", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      mastra,
+    } = await loadDeterministicRuntime();
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `budgeted-supervisor-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Budgeted supervisor validation",
+        body: "Please inspect my order.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe(
+        "waiting_approval",
+      ),
+    );
+    const transport = vi.fn(async () => ({
+      content: [
+        {
+          type: "text" as const,
+          text: "I completed a read-only budgeted validation.",
+        },
+      ],
+      finishReason: "stop" as const,
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      warnings: [],
+    }));
+    mastra.getAgent("supportSupervisorAgent").__updateModel({
+      model: {
+        specificationVersion: "v2",
+        provider: "phase004-test",
+        modelId: "budgeted-supervisor",
+        supportedUrls: {},
+        doGenerate: transport,
+        async doStream() {
+          throw new Error("deterministic validation only supports generate");
+        },
+      } as never,
+    });
+    const response = await app.request(
+      `http://support.test/support/cases/${caseId}/supervisor`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...supportAgentHeaders },
+        body: JSON.stringify({
+          message: "Perform the validation.",
+          validation: { mode: "sandbox" },
+        }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      text: "I completed a read-only budgeted validation.",
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+
+    const unpricedTransport = vi.fn(async () => ({
+      content: [{ type: "text" as const, text: "must not run" }],
+      finishReason: "stop" as const,
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      warnings: [],
+    }));
+    mastra.getAgent("supportSupervisorAgent").__updateModel({
+      model: {
+        specificationVersion: "v2",
+        provider: "unpriced-validation-provider",
+        modelId: "unknown-price",
+        supportedUrls: {},
+        doGenerate: unpricedTransport,
+        async doStream() {
+          throw new Error("must not stream");
+        },
+      } as never,
+    });
+    const blocked = await app.request(
+      `http://support.test/support/cases/${caseId}/supervisor`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...supportAgentHeaders },
+        body: JSON.stringify({
+          message: "Attempt an unpriced validation.",
+          validation: { mode: "sandbox" },
+        }),
+      },
+    );
+    expect(blocked.status).toBe(422);
+    await expect(blocked.json()).resolves.toMatchObject({
+      error: expect.stringContaining("unknown model price"),
+    });
+    expect(unpricedTransport).not.toHaveBeenCalled();
+  });
+
   it("replaces unsupported refund prose before finalization and outbox delivery", async () => {
     const {
       app,

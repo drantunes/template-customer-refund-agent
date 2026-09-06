@@ -8,6 +8,10 @@ import type {
 import type { PublishedEvidence } from "./knowledge-publications";
 import { knowledgePublicationStore } from "./knowledge-publications";
 import { createHash } from "node:crypto";
+import {
+  budgetedEmbedding,
+  type ValidationBudgetExecution,
+} from "./eval-budget";
 
 function resolveLibsqlConfig() {
   return {
@@ -61,6 +65,7 @@ export async function buildPublishedVectorCandidate(
   binding: ProviderBinding,
   generationId: string,
   documents: KnowledgeEvidence[],
+  validationExecution?: ValidationBudgetExecution,
 ) {
   const indexName = indexNameForGeneration(generationId);
   await vectorStore.createIndex({
@@ -126,8 +131,14 @@ export async function buildPublishedVectorCandidate(
   if (chunks.length === 0)
     throw new Error("Knowledge vector candidate has no chunks.");
   const model = new ModelRouterEmbeddingModel(EMBEDDING_MODEL);
-  const { embeddings } = await model.doEmbed({
+  const { embeddings } = await budgetedEmbedding({
+    execution: validationExecution,
+    model: EMBEDDING_MODEL,
     values: chunks.map((chunk) => chunk.text),
+    execute: () =>
+      model.doEmbed({
+        values: chunks.map((chunk) => chunk.text),
+      }),
   });
   if (
     embeddings.length !== chunks.length ||
@@ -154,9 +165,15 @@ export async function searchPublishedVector(
   generationId: string,
   query: string,
   topK: number,
+  validationExecution?: ValidationBudgetExecution,
 ): Promise<PublishedEvidence[]> {
   const model = new ModelRouterEmbeddingModel(EMBEDDING_MODEL);
-  const { embeddings } = await model.doEmbed({ values: [query] });
+  const { embeddings } = await budgetedEmbedding({
+    execution: validationExecution,
+    model: EMBEDDING_MODEL,
+    values: [query],
+    execute: () => model.doEmbed({ values: [query] }),
+  });
   if (
     embeddings.length !== 1 ||
     embeddings[0]?.length !== EMBEDDING_DIMENSION ||

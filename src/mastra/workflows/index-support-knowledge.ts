@@ -1,6 +1,9 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import { publishKnowledge } from "../lib/publish-knowledge";
+import { createValidationBudgetExecution } from "../lib/eval-budget";
+
+const validationSchema = z.object({ mode: z.literal("sandbox") });
 
 const chunkAndEmbedStep = createStep({
   id: "chunk-and-embed-docs",
@@ -13,6 +16,7 @@ const chunkAndEmbedStep = createStep({
       providerAccountId: z.string().min(1),
       externalConversationId: z.string().min(1),
     }),
+    validation: validationSchema.optional(),
   }),
   outputSchema: z.object({ indexed: z.number(), generationId: z.string() }),
   execute: async ({ inputData, mastra, tracingContext }) => {
@@ -23,6 +27,9 @@ const chunkAndEmbedStep = createStep({
     const candidate = await publishKnowledge(inputData.binding, {
       mastra,
       tracingContext,
+      validationExecution: inputData.validation
+        ? createValidationBudgetExecution(inputData.validation.mode)
+        : undefined,
     });
     return candidate;
   },
@@ -39,6 +46,7 @@ export const indexSupportKnowledgeWorkflow = createWorkflow({
       providerAccountId: z.string().min(1),
       externalConversationId: z.string().min(1),
     }),
+    validation: validationSchema.optional(),
   }),
   outputSchema: z.object({ indexed: z.number(), generationId: z.string() }),
 })
