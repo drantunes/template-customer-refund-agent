@@ -633,34 +633,37 @@ describe("Phase 004 deterministic native evaluation", () => {
         // Preserve the native boundary's exact inputs and a hash of its raw
         // result. The semantic result remains visible without duplicating each
         // full policy document in every per-case immutable reference record.
-        const toolCalls = evidence.calls.map((call) => ({
-          sequence: call.sequence,
-          name: call.name,
-          input: call.input,
-          result:
-            call.name === "lookup_order"
-              ? call.result
-              : {
-                  sources: (
-                    call.result as {
-                      sources?: Array<{
-                        metadata: {
-                          title: string;
-                          source: string;
-                          documentHash: string;
-                        };
-                      }>;
-                    }
-                  ).sources?.map((source) => ({
-                    title: source.metadata.title,
-                    source: source.metadata.source,
-                    documentHash: source.metadata.documentHash,
-                  })),
-                },
-          rawResultHash: createHash("sha256")
-            .update(JSON.stringify(call.result))
-            .digest("hex"),
-        }));
+        const toolCalls =
+          dataset.axis === "tool-call-correctness"
+            ? evidence.calls.map((call) => ({
+                sequence: call.sequence,
+                name: call.name,
+                input: call.input,
+                result:
+                  call.name === "lookup_order"
+                    ? call.result
+                    : {
+                        sources: (
+                          call.result as {
+                            sources?: Array<{
+                              metadata: {
+                                title: string;
+                                source: string;
+                                documentHash: string;
+                              };
+                            }>;
+                          }
+                        ).sources?.map((source) => ({
+                          title: source.metadata.title,
+                          source: source.metadata.source,
+                          documentHash: source.metadata.documentHash,
+                        })),
+                      },
+                rawResultHash: createHash("sha256")
+                  .update(JSON.stringify(call.result))
+                  .digest("hex"),
+              }))
+            : [];
         const axisEvidence =
           dataset.axis === "routing-accuracy"
             ? { modelOutputs: { triage: evidence.triage } }
