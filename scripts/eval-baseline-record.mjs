@@ -179,9 +179,12 @@ function validExecutionSummary(axis, summary, expectedCase, measuredScore) {
       summary.modelOutputs.answers.length >= 2 &&
       summary.modelOutputs.answers.every(nonEmptyString) &&
       summary.historyEstablished === true &&
-      plainObject(summary.authorization) &&
-      summary.authorization.foreignBindingDenied === true &&
-      summary.authorization.twoRegisteredBindings === true
+      (expectedCase.assertions.tenantDenied !== true ||
+        (plainObject(summary.authorization) &&
+          summary.authorization.foreignBindingDenied === true)) &&
+      (expectedCase.assertions.twoRegisteredBindings !== true ||
+        (plainObject(summary.authorization) &&
+          summary.authorization.twoRegisteredBindings === true))
     );
   if (axis === "policy-compliance")
     if (expectedCase.assertions.requiresEscalation === true)
@@ -314,7 +317,7 @@ export function validateEvalReference(reference, { initial = false } = {}) {
           .digest("hex")
     )
       throw new Error(
-        "eval reference contains invalid, duplicate, or unevidenced case data",
+        `eval reference contains invalid, duplicate, or unevidenced case data: ${item.id}`,
       );
     const expectedCase = expected.get(item.id);
     if (
@@ -334,7 +337,7 @@ export function validateEvalReference(reference, { initial = false } = {}) {
       )
     )
       throw new Error(
-        "eval reference contains invalid, duplicate, or unevidenced case data",
+        `eval reference contains invalid, duplicate, or unevidenced case data: ${item.id}`,
       );
     if (item.critical && item.score !== 1)
       throw new Error(
