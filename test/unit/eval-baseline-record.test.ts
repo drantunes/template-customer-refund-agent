@@ -107,4 +107,65 @@ describe("immutable eval reference records", () => {
       validateEvalReference(rehash(rehashEvidence(failedAssertion))),
     ).toThrow("invalid, duplicate, or unevidenced");
   });
+
+  it("replays every declared assertion and scorer formula from rehashed observations", () => {
+    const mutate = (
+      id: string,
+      apply: (summary: Record<string, unknown>) => void,
+    ) => {
+      const record = measuredReference();
+      const item = record.perCaseScores.find(
+        (caseScore: { id: string }) => caseScore.id === id,
+      );
+      if (!item) throw new Error(`Missing fixed dataset case ${id}`);
+      apply(item.evidence.summary);
+      expect(() =>
+        validateEvalReference(rehash(rehashEvidence(record))),
+      ).toThrow("invalid, duplicate, or unevidenced");
+    };
+
+    mutate("adversarial-routing", (summary) => {
+      (
+        summary.modelOutputs as { triage: { requiresHumanReview: boolean } }
+      ).triage.requiresHumanReview = false;
+    });
+    mutate("workflow-guard-mutation", (summary) => {
+      const workflow = summary.workflow as {
+        guarded: boolean;
+        status: string;
+      };
+      workflow.guarded = false;
+      workflow.status = "resolved";
+      (
+        summary.modelOutputs as { draft: { recommendRefund: boolean } }
+      ).draft.recommendRefund = true;
+    });
+    mutate("follow-up-stays-scoped", (summary) => {
+      (summary.modelOutputs as { answers: string[] }).answers[1] =
+        "Order ORD-1001 was cancelled.";
+    });
+    mutate("no-financial-tool", (summary) => {
+      (summary.toolCalls as Array<Record<string, unknown>>).push({
+        sequence: 5,
+        name: "issue_refund",
+        input: {},
+        result: {},
+        rawResultHash: "0".repeat(64),
+      });
+    });
+    mutate("lookup-before-refund", (summary) => {
+      const calls = summary.toolCalls as Array<{
+        input: Record<string, unknown>;
+        result: { order?: { status?: string } };
+      }>;
+      calls.reverse();
+      calls.find((call) => "customerEmail" in call.input)!.input.customerEmail =
+        "mallory@example.com";
+      calls.find((call) => call.result.order)!.result.order!.status =
+        "cancelled";
+    });
+    mutate("workflow-guard-mutation", (summary) => {
+      (summary.workflow as { guarded: boolean }).guarded = false;
+    });
+  });
 });

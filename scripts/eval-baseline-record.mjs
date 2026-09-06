@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
+import {
+  evaluateDatasetAssertions,
+  scorerInputFromObservation,
+  scoreAxis,
+  truthForDatasetCase,
+} from "../src/mastra/evals/deterministic-semantics.js";
 
 export const REQUIRED_AXES = [
   "groundedness",
@@ -109,13 +115,7 @@ function validExecutionSummary(axis, summary, expectedCase, measuredScore) {
     !plainObject(summary.modelOutputs)
   )
     return false;
-  if (
-    !plainObject(summary.assertions) ||
-    !plainObject(expectedCase.assertions) ||
-    JSON.stringify(Object.keys(summary.assertions).sort()) !==
-      JSON.stringify(Object.keys(expectedCase.assertions).sort()) ||
-    !Object.values(summary.assertions).every((value) => value === true)
-  )
+  if (!plainObject(summary.assertions) || !plainObject(expectedCase.assertions))
     return false;
   const toolCalls = Array.isArray(summary.toolCalls) ? summary.toolCalls : [];
   const validCall = (call) =>
@@ -129,103 +129,40 @@ function validExecutionSummary(axis, summary, expectedCase, measuredScore) {
     Number.isInteger(call.sequence) &&
     call.sequence > 0;
   if (!toolCalls.every(validCall)) return false;
-  const order = summary.order;
-  const validOrder =
-    plainObject(order) &&
-    order.found === true &&
-    plainObject(order.order) &&
-    nonEmptyString(order.order.orderId) &&
-    nonEmptyString(order.order.status);
-  if (axis === "routing-accuracy")
-    return (
-      plainObject(summary.modelOutputs.triage) &&
-      nonEmptyString(summary.modelOutputs.triage.intent) &&
-      typeof summary.modelOutputs.triage.requiresHumanReview === "boolean"
+  try {
+    const observation = {
+      triage: summary.modelOutputs.triage,
+      draft: summary.modelOutputs.draft,
+      calls: toolCalls,
+      workflow: summary.workflow,
+      authorization: summary.authorization,
+      financial: summary.financial,
+      historyEstablished: summary.historyEstablished,
+      refundEffects: summary.refundEffects,
+      order: summary.order,
+      answers: summary.modelOutputs.answers,
+    };
+    const recomputedAssertions = evaluateDatasetAssertions(
+      expectedCase.assertions,
+      observation,
     );
-  if (axis === "groundedness")
-    if (expectedCase.assertions.requiresEscalation === true)
-      return (
-        plainObject(summary.modelOutputs.draft) &&
-        summary.modelOutputs.draft.requiresEscalation === true &&
-        summary.modelOutputs.draft.recommendRefund === false &&
-        plainObject(summary.workflow) &&
-        summary.workflow.guarded === true
-      );
-    else
-      return (
-        validOrder &&
-        plainObject(summary.modelOutputs.draft) &&
-        Array.isArray(summary.sources) &&
-        summary.sources.length > 0 &&
-        summary.sources.every(
-          (source) => plainObject(source) && nonEmptyString(source.title),
-        )
-      );
-  if (axis === "tool-call-correctness")
-    return (
-      validOrder &&
-      toolCalls.some((call) => call.name === "search_support_knowledge") &&
-      toolCalls.some((call) => call.name === "lookup_order") &&
-      plainObject(summary.refundEffects) &&
-      summary.refundEffects.providerEffects === 0 &&
-      summary.refundEffects.durableActions === 0
+    if (
+      JSON.stringify(summary.assertions) !==
+        JSON.stringify(recomputedAssertions) ||
+      !Object.values(recomputedAssertions).every((value) => value === true)
+    )
+      return false;
+    const recomputedScore = scoreAxis(
+      axis,
+      scorerInputFromObservation(axis, observation),
+      truthForDatasetCase(axis, expectedCase.assertions),
     );
-  if (axis === "multi-turn-consistency")
     return (
-      validOrder &&
-      Array.isArray(summary.modelOutputs.answers) &&
-      summary.modelOutputs.answers.length >= 2 &&
-      summary.modelOutputs.answers.every(nonEmptyString) &&
-      summary.historyEstablished === true &&
-      (expectedCase.assertions.tenantDenied !== true ||
-        (plainObject(summary.authorization) &&
-          summary.authorization.foreignBindingDenied === true)) &&
-      (expectedCase.assertions.twoRegisteredBindings !== true ||
-        (plainObject(summary.authorization) &&
-          summary.authorization.twoRegisteredBindings === true))
+      recomputedScore === summary.score && recomputedScore === measuredScore
     );
-  if (axis === "policy-compliance")
-    if (expectedCase.assertions.requiresEscalation === true)
-      return (
-        plainObject(summary.modelOutputs.draft) &&
-        summary.modelOutputs.draft.requiresEscalation === true &&
-        summary.modelOutputs.draft.recommendRefund === false &&
-        plainObject(summary.workflow) &&
-        summary.workflow.guarded === true
-      );
-    else
-      return (
-        plainObject(summary.financial) &&
-        (expectedCase.assertions.requiresApproval !== true ||
-          summary.financial.approvalRequired === true) &&
-        (expectedCase.assertions.unapprovedRefundDenied !== true ||
-          (summary.financial.unapprovedDenied === true &&
-            summary.financial.providerEffects === 0)) &&
-        (expectedCase.assertions.tamperedCommandDenied !== true ||
-          (summary.financial.approvalRecordedBeforeTamper === true &&
-            summary.financial.tamperedDenied === true &&
-            summary.financial.effectsBeforeRecovery === 0 &&
-            summary.financial.originalCommandReplayIntegrity === true)) &&
-        (expectedCase.assertions.singleDurableRefund !== true ||
-          (summary.financial.approvedReplayCount === 1 &&
-            summary.financial.concurrentRecoveries === 2 &&
-            summary.financial.providerEffects === 1))
-      );
-  if (axis === "resolution-quality")
-    if (expectedCase.assertions.requiresEscalation === true)
-      return (
-        plainObject(summary.modelOutputs.draft) &&
-        summary.modelOutputs.draft.requiresEscalation === true &&
-        plainObject(summary.workflow) &&
-        summary.workflow.guarded === true
-      );
-    else
-      return (
-        validOrder &&
-        plainObject(summary.modelOutputs.draft) &&
-        nonEmptyString(summary.modelOutputs.draft.draftResponse)
-      );
-  return false;
+  } catch {
+    return false;
+  }
 }
 
 function aggregateEvidenceHash(perCaseScores) {

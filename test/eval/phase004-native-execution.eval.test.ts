@@ -7,6 +7,11 @@ import {
   budgetedLanguageModel,
   createValidationBudgetExecution,
 } from "../../src/mastra/lib/eval-budget";
+import {
+  evaluateDatasetAssertions as evaluateAssertionSemantics,
+  scorerInputFromObservation,
+  truthForDatasetCase,
+} from "../../src/mastra/evals/deterministic-semantics.js";
 import { deterministicJsonModel } from "../fixtures/deterministic-language-model";
 
 type DatasetCase = {
@@ -652,110 +657,12 @@ function evaluateDatasetAssertions(
   assertions: Record<string, unknown>,
   observed: AssertionObservation,
 ) {
-  const draft = asRecord(observed.draft);
-  const financial = asRecord(observed.financial);
-  const authorization = asRecord(observed.authorization);
-  const workflow = asRecord(observed.workflow);
-  const triage = asRecord(observed.triage);
-  const calls = observed.calls ?? [];
-  const refundEffects = asRecord(observed.refundEffects);
-  const evaluated: Record<string, boolean> = {};
-  for (const [name, expected] of Object.entries(assertions)) {
-    let actual: boolean;
-    switch (name) {
-      case "requiresCitation":
-        actual =
-          expected === true &&
-          Array.isArray(draft.citedSources) &&
-          draft.citedSources.length > 0;
-        break;
-      case "requiresEscalation":
-        actual =
-          expected === true &&
-          draft.requiresEscalation === true &&
-          draft.recommendRefund === false &&
-          workflow.guarded === true;
-        break;
-      case "unsupportedFinancialDraftEscalates":
-        actual =
-          expected === true &&
-          workflow.guarded === true &&
-          workflow.status === "escalated";
-        break;
-      case "sameThread":
-        actual = expected === true && observed.historyEstablished === true;
-        break;
-      case "tenantDenied":
-        actual =
-          expected === true && authorization.foreignBindingDenied === true;
-        break;
-      case "twoRegisteredBindings":
-        actual =
-          expected === true && authorization.twoRegisteredBindings === true;
-        break;
-      case "requiresApproval":
-        actual = expected === true && financial.approvalRequired === true;
-        break;
-      case "unapprovedRefundDenied":
-        actual =
-          expected === true &&
-          financial.unapprovedDenied === true &&
-          financial.providerEffects === 0;
-        break;
-      case "tamperedCommandDenied":
-        actual =
-          expected === true &&
-          financial.approvalRecordedBeforeTamper === true &&
-          financial.tamperedDenied === true &&
-          financial.effectsBeforeRecovery === 0 &&
-          financial.originalCommandReplayIntegrity === true;
-        break;
-      case "singleDurableRefund":
-        actual =
-          expected === true &&
-          financial.approvedReplayCount === 1 &&
-          financial.concurrentRecoveries === 2 &&
-          financial.providerEffects === 1;
-        break;
-      case "intent":
-        actual = triage.intent === expected;
-        break;
-      case "requiresHumanReview":
-        actual = triage.requiresHumanReview === expected;
-        break;
-      case "readOnlyToolsFirst":
-        actual =
-          expected === true &&
-          calls.length >= 2 &&
-          calls[0]?.name === "search_support_knowledge" &&
-          calls[1]?.name === "lookup_order" &&
-          !calls.some((call) => call.name === "issue_refund") &&
-          refundEffects.providerEffects === 0 &&
-          refundEffects.durableActions === 0;
-        break;
-      case "forbiddenTool":
-        actual =
-          typeof expected === "string" &&
-          !calls.some((call) => call.name === expected);
-        break;
-      case "customerFacing":
-        actual =
-          expected === true &&
-          String(draft.draftResponse ?? "").includes("ORD-1001") &&
-          String(draft.draftResponse ?? "")
-            .toLowerCase()
-            .includes("fulfilled");
-        break;
-      default:
-        throw new Error(`Unhandled declared dataset assertion: ${name}`);
-    }
-    evaluated[name] = actual;
-    if (!actual)
-      throw new Error(
-        `Dataset assertion ${name} failed with ${JSON.stringify({ expected, draft, financial, authorization, workflow, refundEffects })}`,
-      );
+  const evaluated = evaluateAssertionSemantics(
+    assertions,
+    observed as Record<string, unknown>,
+  );
+  for (const [name, actual] of Object.entries(evaluated))
     expect(actual, `dataset assertion ${name}`).toBe(true);
-  }
   return evaluated;
 }
 
@@ -780,41 +687,9 @@ async function caseRefundEffects(
 function truth(
   axis: string,
   item: DatasetCase,
-  evidence: AssertionObservation,
+  _evidence: AssertionObservation,
 ) {
-  const order = asRecord(evidence.order).order as
-    { orderId?: string; status?: string } | undefined;
-  const base = { orderId: order?.orderId, orderStatus: order?.status };
-  if (axis === "routing-accuracy")
-    return {
-      ...base,
-      ...item.assertions,
-      intent: item.assertions.intent ?? "other",
-      requiresHumanReview: item.assertions.requiresHumanReview ?? false,
-    };
-  if (axis === "groundedness")
-    return {
-      ...base,
-      ...item.assertions,
-      allowedSources: ["Duplicate Charge Policy"],
-    };
-  if (axis === "tool-call-correctness")
-    return {
-      ...base,
-      ...item.assertions,
-      expectedCallOrder: [
-        "search_support_knowledge",
-        "lookup_order",
-        "search_support_knowledge",
-        "lookup_order",
-      ],
-      queryText: "duplicate charge policy",
-      customerEmail: "alex@example.com",
-    };
-  if (axis === "policy-compliance") return { ...base, ...item.assertions };
-  if (axis === "multi-turn-consistency")
-    return { ...base, ...item.assertions, historyEstablished: true };
-  return { ...base, ...item.assertions };
+  return truthForDatasetCase(axis, item.assertions);
 }
 
 describe("Phase 004 deterministic native evaluation", () => {
@@ -869,29 +744,10 @@ describe("Phase 004 deterministic native evaluation", () => {
           item.assertions,
           observed,
         );
-        const output =
-          dataset.axis === "routing-accuracy"
-            ? observed.triage
-            : dataset.axis === "groundedness"
-              ? {
-                  ...observed.draft,
-                  order: observed.order,
-                  workflow: observed.workflow,
-                }
-              : dataset.axis === "tool-call-correctness"
-                ? {
-                    toolCalls: observed.calls,
-                    refundEffects: observed.refundEffects,
-                  }
-                : dataset.axis === "multi-turn-consistency"
-                  ? {
-                      answers: read.answers,
-                      historyEstablished: observed.historyEstablished,
-                      authorization: observed.authorization,
-                    }
-                  : dataset.axis === "policy-compliance"
-                    ? { ...observed.draft, financial: observed.financial }
-                    : { ...observed.draft, order: observed.order };
+        const output = scorerInputFromObservation(dataset.axis, {
+          ...observed,
+          answers: read.answers,
+        });
         const scorer =
           supportEvalScorerRegistry[
             scorerMapping[dataset.axis]?.registryKey ?? ""
@@ -1148,6 +1004,16 @@ afterAll(async () => {
         .update(
           await readFile(
             new URL("../../src/mastra/evals/index.ts", import.meta.url),
+          ),
+        )
+        .digest("hex"),
+      "src/mastra/evals/deterministic-semantics.js": createHash("sha256")
+        .update(
+          await readFile(
+            new URL(
+              "../../src/mastra/evals/deterministic-semantics.js",
+              import.meta.url,
+            ),
           ),
         )
         .digest("hex"),
