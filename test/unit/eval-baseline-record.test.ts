@@ -51,4 +51,22 @@ describe("immutable eval reference records", () => {
       "aggregates",
     );
   });
+
+  it("rejects rehashed placeholder execution summaries and recomputed aggregate hashes", () => {
+    const placeholder = measuredReference();
+    for (const item of placeholder.perCaseScores) {
+      item.evidence.summary = { placeholder: true };
+      item.evidence.evidenceHash = "0".repeat(64);
+    }
+    placeholder.evidenceHash = "0".repeat(64);
+    expect(() => validateEvalReference(rehash(placeholder))).toThrow(
+      "invalid, duplicate, or unevidenced",
+    );
+
+    const aggregate = measuredReference();
+    aggregate.evidenceHash = "0".repeat(64);
+    expect(() => validateEvalReference(rehash(aggregate))).toThrow(
+      "usage or execution evidence",
+    );
+  });
 });

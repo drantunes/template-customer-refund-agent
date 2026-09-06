@@ -630,6 +630,62 @@ describe("Phase 004 deterministic native evaluation", () => {
           groundTruth: truth(dataset.axis, item, evidence),
         });
         expect(scored.score, `${dataset.axis}/${item.id}`).toBe(1);
+        // Preserve the native boundary's exact inputs and a hash of its raw
+        // result. The semantic result remains visible without duplicating each
+        // full policy document in every per-case immutable reference record.
+        const toolCalls = evidence.calls.map((call) => ({
+          sequence: call.sequence,
+          name: call.name,
+          input: call.input,
+          result:
+            call.name === "lookup_order"
+              ? call.result
+              : {
+                  sources: (
+                    call.result as {
+                      sources?: Array<{
+                        metadata: {
+                          title: string;
+                          source: string;
+                          documentHash: string;
+                        };
+                      }>;
+                    }
+                  ).sources?.map((source) => ({
+                    title: source.metadata.title,
+                    source: source.metadata.source,
+                    documentHash: source.metadata.documentHash,
+                  })),
+                },
+          rawResultHash: createHash("sha256")
+            .update(JSON.stringify(call.result))
+            .digest("hex"),
+        }));
+        const axisEvidence =
+          dataset.axis === "routing-accuracy"
+            ? { modelOutputs: { triage: evidence.triage } }
+            : dataset.axis === "groundedness"
+              ? {
+                  modelOutputs: { draft: evidence.draft },
+                  order: evidence.order,
+                  sources: evidence.sources.map((source) => ({
+                    title: source.metadata.title,
+                  })),
+                }
+              : dataset.axis === "tool-call-correctness"
+                ? { order: evidence.order, workflow }
+                : dataset.axis === "multi-turn-consistency"
+                  ? {
+                      modelOutputs: { answers: evidence.answers },
+                      order: evidence.order,
+                      authorization,
+                    }
+                  : dataset.axis === "policy-compliance"
+                    ? { financial }
+                    : {
+                        modelOutputs: { draft: evidence.draft },
+                        order: evidence.order,
+                      };
         results.push({
           id: item.id,
           axis: dataset.axis,
@@ -640,19 +696,9 @@ describe("Phase 004 deterministic native evaluation", () => {
             caseId: evidence.caseId,
             scorerId: scorer.id,
             score: scored.score,
-            modelOutputs: {
-              triage: evidence.triage,
-              draft: evidence.draft,
-              answers: evidence.answers,
-            },
-            toolCalls: evidence.calls,
-            order: evidence.order,
-            sources: evidence.sources.map((source) => ({
-              title: source.metadata.title,
-            })),
-            authorization,
-            financial,
-            workflow,
+            modelOutputs: {},
+            toolCalls,
+            ...axisEvidence,
           },
         });
       }

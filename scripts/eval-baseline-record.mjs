@@ -107,6 +107,8 @@ function validExecutionSummary(axis, summary) {
     nonEmptyString(call.name) &&
     plainObject(call.input) &&
     Object.hasOwn(call, "result") &&
+    typeof call.rawResultHash === "string" &&
+    sha256.test(call.rawResultHash) &&
     typeof call.sequence === "number" &&
     Number.isInteger(call.sequence) &&
     call.sequence > 0;
