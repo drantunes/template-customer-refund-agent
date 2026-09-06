@@ -2,10 +2,11 @@
   "kind": "support-eval-initial-reference",
   "runner": "deterministic-native-observed-runtime-v4",
   "executionMode": "deterministic-scripted-transport-no-paid-routes",
-  "implementationSha": "7b71e5e97836668849fdbbed3ea679c2eecc8667",
-  "runnerSourceHash": "76cf17475dd56ce4b55684745236eca274558fcb6f67a34d11fe832099da18e6",
+  "implementationSha": "9bb1ffe4eb5611973d98b121855c959aad2d3c44",
+  "runnerSourceHash": "deb6a3347c2dab28757f403dd2bab133c62ec24444d2e0d7f44ff5f9c22dec1c",
   "scorerSourceHashes": {
-    "src/mastra/evals/index.ts": "44b9d2e7ba23ea5dff324e52b7f8dce25d650f307018f2ef2e0704c56617fc8e"
+    "src/mastra/evals/index.ts": "f472b34cb45e82943d7932409ea30bfb6da45446ef740add5556e79e20e2cc23",
+    "src/mastra/evals/deterministic-semantics.js": "c628f976df6089480cb863b69977a798c1ffc34ba260a2c61586ffdbc73e1368"
   },
   "datasetHashes": {
     "groundedness.v1.json": "204385f1588c7846c631afd6233400950a632cb0f285d21562e564249d6d1dfc",
@@ -22,10 +23,10 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "6cfdad6639fc58187b612f7aa575c90d96215e2ed820c8d1295d393306d242bd",
+        "evidenceHash": "d938431560ebc01c6d07a7406b47cf030935672b0718215cbbd7e25df284353b",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-eb8b9bc2-531b-43ab-80dd-4e7aa9280efe",
+          "caseId": "phase004-eval-5aade780-10db-45ff-ae68-04e0d70341f4",
           "scorerId": "groundedness",
           "score": 1,
           "assertions": {
@@ -67,10 +68,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "52779a9d708e40f5c3b960abae313dae88faf92b48c9a3506b0841054a2f6d4a",
+        "evidenceHash": "5d03211ced132b9f1d9373a83909d6e0bf6f51f6ca3a920b922f22eddf0521a9",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-426ee357-7525-4d29-9782-6d30cbf2bb43",
+          "caseId": "phase004-eval-52143208-1335-4fc1-bf2a-18115b8e3877",
           "scorerId": "groundedness",
           "score": 1,
           "assertions": {
@@ -140,10 +141,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "f3ed2ab85023f91f7538c9851978b94256f2f64efc213c851216bea7c54ac476",
+        "evidenceHash": "7cfff4d922bd2f055a457431c93c78c31445b307765b496d4d73b1147400bffc",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-0d65aa9d-8cbe-4e06-a685-ad7caabea9e8",
+          "caseId": "phase004-eval-30d251ee-decd-44dd-9ec9-b293f9a206ad",
           "scorerId": "groundedness",
           "score": 1,
           "assertions": {
@@ -213,10 +214,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "ba7cebdccefd0d94d37ee111b03865d97cfe63ffde7183f84ec72ba177876fed",
+        "evidenceHash": "0e4ab6eb109aa97f0460435603a0a37d5edc5e2ad384175180d25b3453d3d0e0",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-562dfee8-6f8f-4add-aaab-56ce0de387e4",
+          "caseId": "phase004-eval-59bb1f49-a37b-44af-b994-2bb7648db08d",
           "scorerId": "multi-turn-consistency",
           "score": 1,
           "assertions": {
@@ -252,10 +253,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "ca9427bed4cffc0ee1dfa8052ecd2f8264e81bb8ebb69a88ace059b84f0f46d3",
+        "evidenceHash": "12d39f85c85dd7ae3be936dae5076e2b594b75e78867f5094340a108cd2ef58b",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-f8638761-5b3b-496d-99d9-3a24bfc72eda",
+          "caseId": "phase004-eval-f8574b84-799d-40e0-aaf4-7c86d791a7b7",
           "scorerId": "multi-turn-consistency",
           "score": 1,
           "assertions": {
@@ -297,10 +298,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "b32e63876a79b29189c96e3e48138c2af0f6d9be5086efaee8d12d513bcdf559",
+        "evidenceHash": "9bb6dabe25691eb02a6ccce3c6ccd0e6f2f59b384dd0f605883fd054cc7cd1f7",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-0f861aea-e6cf-4ff6-ae52-cd3197cc1112",
+          "caseId": "phase004-eval-a39fc893-95f8-48d0-b643-066f7b761f38",
           "scorerId": "policy-compliance",
           "score": 1,
           "assertions": {
@@ -340,10 +341,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "3b8fe38e9892def82e8aefee10acd5d0ef69eb2f18eda3c44d4981541526af56",
+        "evidenceHash": "0c2d5aaf624300fc02bd46a4a69ea18d86e93d9188a074927d3a6089a6eb1d4b",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-14445447-4fc6-45a0-be40-f534103e762d",
+          "caseId": "phase004-eval-c1e40c72-40de-446f-bee9-1180faefda79",
           "scorerId": "policy-compliance",
           "score": 1,
           "assertions": {
@@ -395,10 +396,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "8b85c86d7dff1be9a3e4e02747490d5de98999ba9711df5fc49a8459178a9999",
+        "evidenceHash": "b08591376603dac6371e43696de452ffaa3ae9611370ff551150c147af65b0ba",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-592f29bc-8e4a-4fcd-9ee0-1a6d417e4989",
+          "caseId": "phase004-eval-3160efba-3d24-470c-99d8-320551adf36b",
           "scorerId": "policy-compliance",
           "score": 1,
           "assertions": {
@@ -438,10 +439,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "66950822ca5e8c929aa1a7521c06e668985d184e7c17cf7a957622347e539756",
+        "evidenceHash": "872704408d7afb27430db55e0a441bb91e0826a711edba879606da5a8f46f21b",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-daefb120-87ea-4e13-b987-376fb4f88b1d",
+          "caseId": "phase004-eval-91d974cd-a4c0-48fc-9418-dcdecc308d9c",
           "scorerId": "policy-compliance",
           "score": 1,
           "assertions": {
@@ -481,10 +482,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "1cd6046cf395afb13473a54e363056b56d3e89dd45caa3629b1ad5e62f7686dc",
+        "evidenceHash": "95648ed73d05ce9f6de83ba7ffda103bd97165ca52ac16adc453867546df3fb0",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-370825d6-6fec-4067-a129-0f4c3595b509",
+          "caseId": "phase004-eval-272fce1c-78f3-4470-bdc6-1671c2565340",
           "scorerId": "policy-compliance",
           "score": 1,
           "assertions": {
@@ -524,10 +525,10 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "df91c8e0d26293766db6d119332a4dc56c3019d274d2f8d5529f7be9f2dd9dd9",
+        "evidenceHash": "40ce153626338a0889aa7a772122d2ad4a074aa8ffcbbc5b907ca67749c14f03",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-e3740df4-546e-40a2-af2b-f139ea7cfa28",
+          "caseId": "phase004-eval-1bbefe9d-51b4-44c8-91d1-9aad9814cb7c",
           "scorerId": "resolution-quality",
           "score": 1,
           "assertions": {
@@ -564,10 +565,10 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "36443bc2cf7c1682b6f7e74129b5594711007658b0feecd9e1840292b8240d21",
+        "evidenceHash": "114cce81054d070c0dc04b452619ceee9fef0bc191661df7ef96e0e7fd264faa",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-ab0d2c40-054d-46c7-aea0-9486705927ff",
+          "caseId": "phase004-eval-d1b6f5a8-b3cd-40cd-a00c-11600c74594e",
           "scorerId": "resolution-quality",
           "score": 1,
           "assertions": {
@@ -632,10 +633,10 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "891adb1a7c5dd30eeff2765b3e2c5d91ba7886225ccb6959d09158ad16f35ba3",
+        "evidenceHash": "dcd973753b892b95acd4131fa082b5a3d715ab593ad852d4d57d987c2632a03d",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-952e4389-ff19-403b-bfda-8d84c979096c",
+          "caseId": "phase004-eval-d44eeba5-401e-4ee1-ab7b-40c4b06e3b4f",
           "scorerId": "routing-accuracy",
           "score": 1,
           "assertions": {
@@ -661,10 +662,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "3b4d53f38413539dc0ee331dcfeabcc691ba5087e10b643e492892745fc1d8e1",
+        "evidenceHash": "cc81044977180ea7b0fcebe2dfbf2835546942cc275a197a57bfa0c62a84bbe9",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-0880e449-1715-4e47-91d9-024896ab10cb",
+          "caseId": "phase004-eval-635d0d6f-5ebb-47c8-a3e5-00a66cbf617c",
           "scorerId": "routing-accuracy",
           "score": 1,
           "assertions": {
@@ -690,10 +691,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "e33285205792970099ccf9b55cc306111537f82e0bf8785765f6e1847f9c986f",
+        "evidenceHash": "c8bf831485fd3a7f447e0d21d3749b0b7daf8406cca6e93548f3dc06d85e9ec3",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-826fd8af-f3b9-487d-8fc3-75da3867e093",
+          "caseId": "phase004-eval-8219bbb3-57b9-4ef8-80ff-dfc6fd1f869a",
           "scorerId": "tool-call-correctness",
           "score": 1,
           "assertions": {
@@ -717,7 +718,7 @@
                   }
                 ]
               },
-              "rawResultHash": "db264ea4d31ffb5cb82df6348e722f8ef42aab46693f06f0843120a76b507fe8"
+              "rawResultHash": "16d52ff6661cc7b76b1498e95672fc2dd0ad59a5b5aa9dfb8c2ecd3d2d6e52b3"
             },
             {
               "sequence": 2,
@@ -757,7 +758,7 @@
                   }
                 ]
               },
-              "rawResultHash": "db264ea4d31ffb5cb82df6348e722f8ef42aab46693f06f0843120a76b507fe8"
+              "rawResultHash": "16d52ff6661cc7b76b1498e95672fc2dd0ad59a5b5aa9dfb8c2ecd3d2d6e52b3"
             },
             {
               "sequence": 4,
@@ -808,10 +809,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "5a0a63ee0ea0057c3dd519e686ebf77ea4f684fad4435e8236db82883d781834",
+        "evidenceHash": "a09c644ab1f05e86167714350c44533a8eb22b4ad8ef9627b1af61a32c6508a4",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-a76a83d0-8f8a-428a-9108-1f3f6b973202",
+          "caseId": "phase004-eval-52d89d54-2389-4177-86aa-c9b9e986675d",
           "scorerId": "tool-call-correctness",
           "score": 1,
           "assertions": {
@@ -835,7 +836,7 @@
                   }
                 ]
               },
-              "rawResultHash": "629be4a84baa6b4b4a94618c3b8e442d2192e2feb90bf0e6e924cc1f92c305a0"
+              "rawResultHash": "0c0529a66e9235b0f8e8c76c85688f8680bbdd2f7fcc1e2ecbb51b96dfa10d34"
             },
             {
               "sequence": 2,
@@ -875,7 +876,7 @@
                   }
                 ]
               },
-              "rawResultHash": "629be4a84baa6b4b4a94618c3b8e442d2192e2feb90bf0e6e924cc1f92c305a0"
+              "rawResultHash": "0c0529a66e9235b0f8e8c76c85688f8680bbdd2f7fcc1e2ecbb51b96dfa10d34"
             },
             {
               "sequence": 4,
@@ -931,9 +932,9 @@
   },
   "costMicros": 0,
   "pricing": "not-applicable-deterministic-transport",
-  "evidenceHash": "def4c6a7fa309b936978b6e3738b4971be481d147822251324d214e09f5c9acf",
-  "regression": "initial-reference-measured-native-observed-runtime-no-prior-history",
-  "reportHash": "c0aa0741b44d6a1549b3bfcbb9a766acaa386bc8849cdc6a55021a8499d68e9d",
+  "evidenceHash": "b5a0c2b97dd91544de70ecc51c42cf028c166448bc8c9555b145f3bd07d24fdf",
+  "regression": "not-applicable-initial-reference",
   "initialReference": true,
-  "historicalComparison": null
+  "historicalComparison": null,
+  "reportHash": "29a73a06709202cca009eee262f3e9ae5a22792281ce9fa0c912fb5f6ed18b88"
 }
