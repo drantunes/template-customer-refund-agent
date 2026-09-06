@@ -6,6 +6,7 @@ import { searchPublishedVector } from "../lib/vector-store";
 import { caseStore } from "../lib/case-store";
 import { bindingsForCase } from "../providers/contracts";
 import { requireTrustedCaseReadScope } from "../lib/trusted-run-scope";
+import { traceOperationalPort } from "../lib/operational-spans";
 
 const bindingSchema = z.object({
   tenantId: z.string(),
@@ -45,7 +46,7 @@ export const searchSupportKnowledgeTool = createTool({
       }),
     ),
   }),
-  execute: async ({ queryText, topK, binding }) => {
+  execute: async ({ queryText, topK, binding }, context) => {
     const scope = requireTrustedCaseReadScope();
     const supportCase = await caseStore.get(scope.caseId);
     if (!supportCase)
@@ -71,16 +72,25 @@ export const searchSupportKnowledgeTool = createTool({
     // Search is never an initialization path. Publication/fixture changes are
     // explicit trusted operations, and an unpublished account is insufficient
     // evidence rather than a reason for an ordinary read to mutate state.
-    const lexicalEvidence = await knowledgePublicationStore.search(
-      configured,
-      queryText,
-      topK,
-    );
+    const lexicalEvidence = await traceOperationalPort({
+      mastra: context?.mastra,
+      tracingContext: context?.tracingContext,
+      kind: "provider",
+      operation: "knowledge.search",
+      run: () => knowledgePublicationStore.search(configured, queryText, topK),
+    });
     const generationId =
       await knowledgePublicationStore.activeGeneration(configured);
     const evidence =
       process.env.SUPPORT_KNOWLEDGE_RETRIEVAL === "vector" && generationId
-        ? await searchPublishedVector(configured, generationId, queryText, topK)
+        ? await traceOperationalPort({
+            mastra: context?.mastra,
+            tracingContext: context?.tracingContext,
+            kind: "provider",
+            operation: "knowledge.vector_search",
+            run: () =>
+              searchPublishedVector(configured, generationId, queryText, topK),
+          })
         : lexicalEvidence;
     return {
       sources: evidence.map((entry) => ({

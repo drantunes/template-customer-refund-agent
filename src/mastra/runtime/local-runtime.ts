@@ -1,6 +1,7 @@
 import type { Client } from "@libsql/client";
 import type { LanguageModelV2 } from "@ai-sdk/provider";
 import type { Mastra } from "@mastra/core/mastra";
+import type { TracingContext } from "@mastra/core/observability";
 import { createHash } from "node:crypto";
 import { caseStore, type CaseStore } from "../lib/case-store";
 import {
@@ -38,6 +39,8 @@ import {
   type NativeRefundExecutionAuthorization,
 } from "../providers/native-execution";
 import { activePrincipalHasRole, ownerIdForCustomer } from "../server/auth";
+import { traceOperationalPort } from "../lib/operational-spans";
+import { classifyFailure } from "../lib/operational-alerts";
 
 // Keep this runtime boundary independent of the workflow module: the workflow
 // itself uses LocalRuntime through providers and importing it here would create
@@ -811,6 +814,7 @@ export async function deliverOutbox(
   registry?: ProviderRegistry,
   limit = 10,
   store: CaseStore = caseStore,
+  observability?: { mastra?: Mastra; tracingContext?: TracingContext },
 ) {
   const attempted = new Set<string>();
   let claimed = 0;
@@ -842,9 +846,16 @@ export async function deliverOutbox(
       if (lostOwnership) break;
       heartbeat = setInterval(() => void renew(), 10_000);
       heartbeat.unref();
-      const receipt = await selected
-        .support(item.binding)
-        .deliver(item.binding, item.body, item.status, item.id);
+      const receipt = await traceOperationalPort({
+        mastra: observability?.mastra,
+        tracingContext: observability?.tracingContext,
+        kind: "provider",
+        operation: "support.deliver",
+        run: () =>
+          selected
+            .support(item.binding)
+            .deliver(item.binding, item.body, item.status, item.id),
+      });
       if (lostOwnership) break;
       await store.completeOutbox(item.id, receipt, item.leaseToken);
     } catch (error) {
@@ -874,6 +885,28 @@ export async function recoverLocalWorkflows(
   limit = 10,
   store: CaseStore = caseStore,
 ) {
+  const retryOperationalFailure = async (
+    dispatch: DispatchRecord,
+    error: unknown,
+  ) => {
+    // This is the operational recovery path, not a dashboard-only
+    // classification. Attempts are durably bounded by CaseStore at three.
+    const disposition = classifyFailure({
+      providerOrTool: "resolve-support-case",
+      occurredAt: new Date(),
+      durationMs: 0,
+      failed: true,
+    });
+    return (
+      disposition === "retry" &&
+      (await store.retryDispatch(
+        dispatch.id,
+        dispatch.caseId,
+        error,
+        dispatch.leaseToken,
+      ))
+    );
+  };
   let claimed = 0;
   while (claimed < limit) {
     // Workflow restarts are sequential; claiming ahead would let a waiting
@@ -996,14 +1029,16 @@ export async function recoverLocalWorkflows(
               }),
       );
       if (lostOwnership) break;
-      if (result.status === "failed")
+      if (result.status === "failed") {
+        if (await retryOperationalFailure(dispatch, "Workflow restart failed."))
+          continue;
         await store.failDispatchAndCase(
           dispatch.id,
           dispatch.caseId,
           "Workflow restart failed.",
           dispatch.leaseToken,
         );
-      else
+      } else
         await store.completeDispatch(
           dispatch.id,
           result.status === "suspended" ? "suspended" : "completed",
@@ -1011,15 +1046,20 @@ export async function recoverLocalWorkflows(
           dispatch.leaseToken,
         );
     } catch (error) {
-      if (!lostOwnership)
-        await store
-          .failDispatchAndCase(
-            dispatch.id,
-            dispatch.caseId,
-            error,
-            dispatch.leaseToken,
-          )
-          .catch(() => undefined);
+      if (!lostOwnership) {
+        const retried = await retryOperationalFailure(dispatch, error).catch(
+          () => false,
+        );
+        if (!retried)
+          await store
+            .failDispatchAndCase(
+              dispatch.id,
+              dispatch.caseId,
+              error,
+              dispatch.leaseToken,
+            )
+            .catch(() => undefined);
+      }
     } finally {
       if (heartbeat) clearInterval(heartbeat);
     }

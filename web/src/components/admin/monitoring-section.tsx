@@ -48,6 +48,36 @@ function formatMinutes(value: number | null): string {
   return `${(value / 60).toFixed(1)} hr`;
 }
 
+function OperationHealth({
+  title,
+  entries,
+}: {
+  title: string;
+  entries: MonitoringSummary["telemetry"]["workflowStages"];
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <p className="font-medium">{title}</p>
+      {entries.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Unavailable — no retained spans.
+        </p>
+      ) : (
+        entries.map((entry) => (
+          <p
+            key={`${title}-${entry.operation}`}
+            className="text-xs text-muted-foreground"
+          >
+            {entry.operation}: {entry.calls} calls · errors{" "}
+            {formatPercent(entry.errorRate)} · p95{" "}
+            {entry.p95Ms === null ? "—" : `${entry.p95Ms.toFixed(0)} ms`}
+          </p>
+        ))
+      )}
+    </div>
+  );
+}
+
 function RateCard({
   icon: Icon,
   title,
@@ -401,6 +431,18 @@ export function MonitoringSection({ session }: { session: SupportSession }) {
                     : `${model.estimatedCostMicrosUsd} μUSD`}
                 </p>
               ))}
+              <OperationHealth
+                title="Workflow stages"
+                entries={summary.telemetry.workflowStages}
+              />
+              <OperationHealth
+                title="Provider operations"
+                entries={summary.telemetry.providerCalls}
+              />
+              <OperationHealth
+                title="Tool operations"
+                entries={summary.telemetry.toolCalls}
+              />
               {summary.telemetry.alerts.length > 0 && (
                 <p className="text-destructive">
                   Alerts: {summary.telemetry.alerts.join(", ")}

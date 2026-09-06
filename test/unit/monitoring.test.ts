@@ -68,7 +68,9 @@ describe("monitoring aggregates", () => {
       approved: 1,
       rejected: 1,
       executed: 2,
-      failed: 1,
+      // A successful financial provider effect remains executed even if a
+      // later workflow/delivery stage fails.
+      failed: 0,
       autoEscalated: 0,
       approvalRate: 0.5,
       executedTotals: [

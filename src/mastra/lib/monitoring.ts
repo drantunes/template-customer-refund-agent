@@ -9,8 +9,10 @@ type Availability<T> = T | null;
 type StoredSpan = {
   name: string;
   spanType: string;
-  startedAt: Date;
+  startedAt?: Date;
   endedAt?: Date | null;
+  startTime?: Date;
+  endTime?: Date | null;
   error?: unknown;
   attributes?: unknown;
 };
@@ -113,9 +115,11 @@ function percentile95(values: number[]): Availability<number> {
   const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
   return sorted.length ? sorted[Math.ceil(sorted.length * 0.95) - 1]! : null;
 }
-function durationMs(span: Pick<StoredSpan, "startedAt" | "endedAt">) {
-  return span.endedAt
-    ? Math.max(0, span.endedAt.getTime() - span.startedAt.getTime())
+function durationMs(span: StoredSpan) {
+  const startedAt = span.startedAt ?? span.startTime;
+  const endedAt = span.endedAt ?? span.endTime;
+  return startedAt && endedAt
+    ? Math.max(0, endedAt.getTime() - startedAt.getTime())
     : undefined;
 }
 function operationMetrics(spans: StoredSpan[]): OperationMetrics[] {
@@ -167,15 +171,23 @@ async function readTrustedSpanMetrics(mastra: Mastra, cases: SupportCase[]) {
       unavailable: ["observability-storage"],
       alerts: [],
     };
-  const traces = await Promise.all(
+  const traceResults = await Promise.allSettled(
     [...traceIds].map((traceId) => observability.getTrace({ traceId })),
   );
-  const spans = traces.flatMap((trace) => trace?.spans ?? []) as StoredSpan[];
-  const operational = spans.filter((span) =>
-    ["tool_call", "provider_tool_call", "model_inference"].includes(
-      span.spanType,
-    ),
+  const traces = traceResults.flatMap((result) =>
+    result.status === "fulfilled" && result.value ? [result.value] : [],
   );
+  const traceReadFailures = traceResults.filter(
+    (result) => result.status === "rejected",
+  ).length;
+  const spans = traces.flatMap((trace) => trace.spans ?? []) as StoredSpan[];
+  const operational = spans.filter((span) => {
+    const metadata = recordAt((span as { metadata?: unknown }).metadata);
+    return (
+      metadata?.operationalKind === "provider" ||
+      metadata?.operationalKind === "tool"
+    );
+  });
   const models = spans.filter((span) => span.spanType === "model_generation");
   const modelUsage = new Map<string, ModelUsageMetrics>();
   for (const span of models) {
@@ -189,9 +201,19 @@ async function readTrustedSpanMetrics(mastra: Mastra, cases: SupportCase[]) {
     const usage = recordAt(attributes?.usage);
     const inputTokens = numberAt(usage?.inputTokens);
     const outputTokens = numberAt(usage?.outputTokens);
-    const cost = numberAt(
-      recordAt(attributes?.costContext)?.estimatedCostMicrosUsd,
-    );
+    const costContext = recordAt(attributes?.costContext);
+    const estimatedCost = numberAt(costContext?.estimatedCost);
+    const costUnit =
+      typeof costContext?.costUnit === "string"
+        ? costContext.costUnit.toUpperCase()
+        : undefined;
+    // Native Mastra pricing emits a currency-unit estimate. Monitoring's API
+    // intentionally exposes micro-USD; never invent a conversion for an
+    // unknown unit/currency.
+    const cost =
+      estimatedCost !== undefined && (!costUnit || costUnit === "USD")
+        ? Math.round(estimatedCost * 1_000_000)
+        : undefined;
     if (inputTokens === undefined || outputTokens === undefined) continue;
     const current = modelUsage.get(model) ?? {
       model,
@@ -227,28 +249,48 @@ async function readTrustedSpanMetrics(mastra: Mastra, cases: SupportCase[]) {
       spans.filter((span) => span.spanType === "workflow_step"),
     ),
     providerCalls: operationMetrics(
-      spans.filter((span) =>
-        ["provider_tool_call", "model_inference"].includes(span.spanType),
+      spans.filter(
+        (span) =>
+          recordAt((span as { metadata?: unknown }).metadata)
+            ?.operationalKind === "provider",
       ),
     ),
     toolCalls: operationMetrics(
-      spans.filter((span) => span.spanType === "tool_call"),
+      spans.filter(
+        (span) =>
+          recordAt((span as { metadata?: unknown }).metadata)
+            ?.operationalKind === "tool",
+      ),
     ),
     unavailable: [
       ...(traceIds.size === 0 ? ["trace-correlation"] : []),
+      ...(traceReadFailures > 0 ? ["partial-trace-read"] : []),
       ...(models.length === 0 ? ["model-usage"] : []),
-      ...(models.some(
-        (span) =>
-          numberAt(recordAt(recordAt(span.attributes)?.usage)?.inputTokens) ===
-          undefined,
-      )
+      ...(models.some((span) => {
+        const usage = recordAt(recordAt(span.attributes)?.usage);
+        return (
+          numberAt(usage?.inputTokens) === undefined ||
+          numberAt(usage?.outputTokens) === undefined
+        );
+      })
         ? ["partial-model-usage"]
+        : []),
+      ...(models.some((span) => {
+        const costContext = recordAt(recordAt(span.attributes)?.costContext);
+        const estimatedCost = numberAt(costContext?.estimatedCost);
+        const unit =
+          typeof costContext?.costUnit === "string"
+            ? costContext.costUnit.toUpperCase()
+            : undefined;
+        return estimatedCost === undefined || Boolean(unit && unit !== "USD");
+      })
+        ? ["partial-model-cost"]
         : []),
     ],
     alerts: alertReasons(
       operational.map((span) => ({
         providerOrTool: span.name,
-        occurredAt: span.startedAt,
+        occurredAt: span.startedAt ?? span.startTime ?? new Date(0),
         durationMs: durationMs(span) ?? 0,
         failed: span.error !== undefined && span.error !== null,
       })),
@@ -312,14 +354,17 @@ export async function computeRefundApprovalMetrics(
 ): Promise<RefundApprovalMetrics> {
   let recommended = 0,
     autoEscalated = 0,
-    executed = 0,
-    failed = 0;
+    executed = 0;
   const totals = new Map<string, number>();
   const effectKeys = new Set<string>();
   for (const supportCase of cases) {
     const turns = await caseStore.turns(supportCase.id);
     for (const turn of turns) {
-      const draft = recordAt(turn.outcome?.draft);
+      const activeTurnId = (supportCase.metadata as Record<string, unknown>)
+        .activeTurnId;
+      const draft =
+        recordAt(turn.outcome?.draft) ??
+        (activeTurnId === turn.id ? recordAt(supportCase.draft) : undefined);
       if (draft?.recommendRefund === true) recommended += 1;
       if (
         turn.outcome?.status === "escalated" &&
@@ -339,8 +384,6 @@ export async function computeRefundApprovalMetrics(
           );
         }
       }
-      if (turn.state === "failed" && draft?.recommendRefund === true)
-        failed += 1;
     }
     const effects = recordAt(
       (supportCase.metadata as Record<string, unknown>).refundEffects,
@@ -369,7 +412,9 @@ export async function computeRefundApprovalMetrics(
     approved,
     rejected,
     executed,
-    failed,
+    failed: await caseStore.monitoringFinancialFailures(
+      cases.map((item) => item.id),
+    ),
     autoEscalated,
     approvalRate: approved + rejected ? approved / (approved + rejected) : null,
     executedTotals: [...totals]
@@ -377,35 +422,56 @@ export async function computeRefundApprovalMetrics(
       .map(([currency, minor]) => ({ currency, minor })),
   };
 }
-export function computeFeedbackMetrics(cases: SupportCase[]): FeedbackMetrics {
-  const feedback = cases.filter(
-    (
-      item,
-    ): item is SupportCase & {
-      feedback: NonNullable<SupportCase["feedback"]>;
-    } => !!item.feedback,
-  );
-  const up = feedback.filter((item) => item.feedback.rating === "up").length;
+function feedbackMetrics(
+  feedback: Array<{
+    supportCase: SupportCase;
+    value: NonNullable<SupportCase["feedback"]>;
+  }>,
+): FeedbackMetrics {
+  const up = feedback.filter((item) => item.value.rating === "up").length;
   return {
     totalResponses: feedback.length,
     up,
     down: feedback.length - up,
     satisfactionRate: feedback.length ? up / feedback.length : null,
-    recent: [...feedback]
-      .sort((a, b) =>
-        a.feedback.submittedAt < b.feedback.submittedAt ? 1 : -1,
-      )
+    recent: feedback
+      .sort((a, b) => (a.value.submittedAt < b.value.submittedAt ? 1 : -1))
       .slice(0, 10)
       .map((item) => ({
-        caseId: item.id,
-        subject: item.subject,
-        rating: item.feedback.rating,
-        submittedAt: item.feedback.submittedAt,
-        turnId: item.feedback.turnId,
-        runId: item.feedback.runId,
-        traceId: item.feedback.traceId,
+        caseId: item.supportCase.id,
+        subject: item.supportCase.subject,
+        rating: item.value.rating,
+        submittedAt: item.value.submittedAt,
+        turnId: item.value.turnId,
+        runId: item.value.runId,
+        traceId: item.value.traceId,
       })),
   };
+}
+/** Legacy projection helper retained for direct callers. Monitoring itself
+ * reads the durable turn-bound feedback table below. */
+export function computeFeedbackMetrics(cases: SupportCase[]): FeedbackMetrics {
+  return feedbackMetrics(
+    cases.flatMap((supportCase) =>
+      supportCase.feedback
+        ? [{ supportCase, value: supportCase.feedback }]
+        : [],
+    ),
+  );
+}
+async function computeHistoricalFeedbackMetrics(
+  cases: SupportCase[],
+): Promise<FeedbackMetrics> {
+  const byCase = new Map(cases.map((item) => [item.id, item]));
+  const records = await caseStore.feedback(cases.map((item) => item.id));
+  return records.length
+    ? feedbackMetrics(
+        records.map((record) => ({
+          supportCase: byCase.get(record.caseId)!,
+          value: record.feedback,
+        })),
+      )
+    : computeFeedbackMetrics(cases);
 }
 export async function computeMonitoringSummary(
   mastra: Mastra,
@@ -425,7 +491,7 @@ export async function computeMonitoringSummary(
     casesConsidered: cases.length,
     funnel: computeCaseFunnelMetrics(cases),
     refunds: await computeRefundApprovalMetrics(cases),
-    feedback: computeFeedbackMetrics(cases),
+    feedback: await computeHistoricalFeedbackMetrics(cases),
     telemetry,
     failures,
   };

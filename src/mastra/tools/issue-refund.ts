@@ -15,6 +15,7 @@ import {
 } from "../providers/registry";
 import { withNativeRefundExecutionAuthorization } from "../providers/native-execution";
 import { activePrincipalHasRole } from "../server/auth";
+import { traceOperationalPort } from "../lib/operational-spans";
 
 export const MAX_AUTO_APPROVABLE_REFUND = 1000;
 const commandSchema = z.object({
@@ -136,24 +137,45 @@ export const issueRefundTool = createTool({
       throw new Error("The persisted refund command fingerprint is invalid.");
     const binding = resolveConfiguredBinding(bindings.transactions);
     await ensureProviderFixtures(binding);
-    const effect = await withNativeRefundExecutionAuthorization(
-      context,
-      native,
-      command.fingerprint,
-      (authorization) =>
-        providerRegistry(binding).transactions(binding).issueRefund(
-          {
-            binding,
-            approvalCaseId: input.caseId,
-            orderId: command.orderId,
-            amount,
-            reason: command.reason,
-            idempotencyKey: command.idempotencyKey,
-            fingerprint: command.fingerprint,
-          },
-          authorization,
-        ),
-    );
+    let effect;
+    try {
+      effect = await withNativeRefundExecutionAuthorization(
+        context,
+        native,
+        command.fingerprint,
+        (authorization) =>
+          traceOperationalPort({
+            mastra: context?.mastra,
+            tracingContext: context?.tracingContext,
+            kind: "provider",
+            operation: "transactions.issue_refund",
+            run: () =>
+              providerRegistry(binding).transactions(binding).issueRefund(
+                {
+                  binding,
+                  approvalCaseId: input.caseId,
+                  orderId: command.orderId,
+                  amount,
+                  reason: command.reason,
+                  idempotencyKey: command.idempotencyKey,
+                  fingerprint: command.fingerprint,
+                },
+                authorization,
+              ),
+          }),
+      );
+    } catch (error) {
+      await caseStore.saveAction(
+        input.caseId,
+        "refund-failure",
+        command.fingerprint,
+        {
+          category: "provider",
+          failedAt: new Date().toISOString(),
+        },
+      );
+      throw error;
+    }
     const result = {
       refundId: effect.refundId,
       orderId: effect.orderId,

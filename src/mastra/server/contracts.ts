@@ -44,10 +44,12 @@ export const loginResponseSchema = z.object({
     roles: z.array(z.enum(["customer", "support-agent", "approver", "admin"])),
   }),
 });
-export const feedbackRequestSchema = caseFeedbackSchema.pick({
-  rating: true,
-  comment: true,
-});
+export const feedbackRequestSchema = caseFeedbackSchema
+  .pick({
+    rating: true,
+    comment: true,
+  })
+  .extend({ responseMessageId: z.string().min(1) });
 export const errorResponseSchema = z.object({ error: z.string() });
 export const reindexResponseSchema = z.object({
   indexed: z.number().int().nonnegative(),

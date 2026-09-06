@@ -161,6 +161,7 @@ export function reindexKnowledge(
 export function submitCaseFeedback(
   caseId: string,
   rating: "up" | "down",
+  responseMessageId: string,
   comment?: string,
   session?: SupportSession,
 ): Promise<SupportCase> {
@@ -168,7 +169,7 @@ export function submitCaseFeedback(
     `/support/cases/${caseId}/feedback`,
     {
       method: "POST",
-      body: JSON.stringify({ rating, comment }),
+      body: JSON.stringify({ rating, responseMessageId, comment }),
     },
     session,
   );

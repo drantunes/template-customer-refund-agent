@@ -945,7 +945,11 @@ export const supportCaseFeedbackRoute = registerApiRoute(
           410,
         );
 
-      let body: { rating?: string; comment?: string } = {};
+      let body: {
+        rating?: string;
+        comment?: string;
+        responseMessageId?: string;
+      } = {};
       try {
         body = await c.req.json();
       } catch {
@@ -965,33 +969,48 @@ export const supportCaseFeedbackRoute = registerApiRoute(
         );
       }
 
-      const activeTurnId = (supportCase.metadata as Record<string, unknown>)
-        .activeTurnId;
-      const activeTurn =
-        typeof activeTurnId === "string"
-          ? await caseStore.turn(caseId, activeTurnId)
-          : undefined;
+      const ratedTurn = (await caseStore.turns(caseId)).find(
+        (turn) =>
+          `msg_${caseId}_${turn.id}_final` === parsed.data.responseMessageId,
+      );
+      if (!ratedTurn)
+        return c.json(
+          errorResponseSchema.parse({
+            error: "Feedback response was not found.",
+          }),
+          404,
+        );
       const telemetry =
-        activeTurn?.outcome?.telemetry &&
-        typeof activeTurn.outcome.telemetry === "object"
-          ? (activeTurn.outcome.telemetry as { traceId?: string })
+        ratedTurn.outcome?.telemetry &&
+        typeof ratedTurn.outcome.telemetry === "object"
+          ? (ratedTurn.outcome.telemetry as { traceId?: string })
           : undefined;
       const feedback: CaseFeedback = {
         rating: parsed.data.rating,
         comment: parsed.data.comment,
         submittedAt: new Date().toISOString(),
         actorId: current.id,
-        turnId: typeof activeTurnId === "string" ? activeTurnId : undefined,
-        runId: activeTurn?.runId ?? supportCase.workflowRunId,
-        traceId: telemetry?.traceId ?? supportCase.traceId,
+        turnId: ratedTurn.id,
+        runId: ratedTurn.runId,
+        traceId: telemetry?.traceId,
       };
-      const updated = await caseStore.update(caseId, { feedback });
+      const persistedFeedback = await caseStore.recordFeedback({
+        caseId,
+        turnId: ratedTurn.id,
+        actorId: current.id,
+        feedback,
+      });
+      const updated =
+        (supportCase.metadata as Record<string, unknown>).activeTurnId ===
+        ratedTurn.id
+          ? await caseStore.update(caseId, { feedback: persistedFeedback })
+          : supportCase;
 
       const mastra = c.get("mastra");
-      if (supportCase.traceId && mastra.observability.addFeedback) {
+      if (persistedFeedback.traceId && mastra.observability.addFeedback) {
         try {
           await mastra.observability.addFeedback({
-            traceId: supportCase.traceId,
+            traceId: persistedFeedback.traceId,
             feedback: {
               feedbackSource: "user",
               feedbackType: "thumbs",

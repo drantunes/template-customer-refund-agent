@@ -31,6 +31,7 @@ import {
 import { knowledgePublicationStore } from "../lib/knowledge-publications";
 import { withTrustedCaseReadScope } from "../lib/trusted-run-scope";
 import { publishKnowledge } from "../lib/publish-knowledge";
+import { traceOperationalPort } from "../lib/operational-spans";
 
 const caseIdSchema = z.object({ caseId: z.string(), turnId: z.string() });
 
@@ -152,14 +153,21 @@ const retrievePolicyStep = createStep({
         tenantId: bindings.knowledge.tenantId,
       },
       () =>
-        searchTool.execute!(
-          {
-            queryText,
-            topK: 5,
-            binding: resolveConfiguredBinding(bindings.knowledge),
-          },
-          { mastra, requestContext, tracingContext },
-        ),
+        traceOperationalPort({
+          mastra,
+          tracingContext,
+          kind: "tool",
+          operation: "tool.search_support_knowledge",
+          run: () =>
+            searchTool.execute!(
+              {
+                queryText,
+                topK: 5,
+                binding: resolveConfiguredBinding(bindings.knowledge),
+              },
+              { mastra, requestContext, tracingContext },
+            ),
+        }),
     );
     const sources: Array<{
       metadata?: Record<string, unknown>;
@@ -261,34 +269,55 @@ const inspectOrderStep = createStep({
       },
       async () => {
         const orderLookup = orderLookupSchema.parse(
-          await executeOrder(
-            {
-              customerEmail: supportCase.customer.email,
-              binding: resolveConfiguredBinding(bindings.commerce),
-            },
-            { mastra, requestContext, tracingContext },
-          ),
-        );
-
-        const subscriptionLookup = subscriptionLookupSchema.parse(
-          await executeSubscription(
-            {
-              customerEmail: supportCase.customer.email,
-              binding: resolveConfiguredBinding(bindings.commerce),
-            },
-            { mastra, requestContext, tracingContext },
-          ),
-        );
-
-        const refundHistory = orderLookup.found
-          ? refundHistorySchema.parse(
-              await executeRefundHistory(
+          await traceOperationalPort({
+            mastra,
+            tracingContext,
+            kind: "tool",
+            operation: "tool.lookup_order",
+            run: () =>
+              executeOrder(
                 {
-                  orderId: orderLookup.order?.orderId ?? "",
+                  customerEmail: supportCase.customer.email,
                   binding: resolveConfiguredBinding(bindings.commerce),
                 },
                 { mastra, requestContext, tracingContext },
               ),
+          }),
+        );
+
+        const subscriptionLookup = subscriptionLookupSchema.parse(
+          await traceOperationalPort({
+            mastra,
+            tracingContext,
+            kind: "tool",
+            operation: "tool.lookup_subscription",
+            run: () =>
+              executeSubscription(
+                {
+                  customerEmail: supportCase.customer.email,
+                  binding: resolveConfiguredBinding(bindings.commerce),
+                },
+                { mastra, requestContext, tracingContext },
+              ),
+          }),
+        );
+
+        const refundHistory = orderLookup.found
+          ? refundHistorySchema.parse(
+              await traceOperationalPort({
+                mastra,
+                tracingContext,
+                kind: "tool",
+                operation: "tool.lookup_customer_refund_history",
+                run: () =>
+                  executeRefundHistory(
+                    {
+                      orderId: orderLookup.order?.orderId ?? "",
+                      binding: resolveConfiguredBinding(bindings.commerce),
+                    },
+                    { mastra, requestContext, tracingContext },
+                  ),
+              }),
             )
           : { refunds: [] };
 
@@ -792,7 +821,7 @@ const resolveCaseStep = createStep({
     turnId: z.string(),
     status: z.enum(["resolved", "escalated"]),
   }),
-  execute: async ({ inputData, mastra }) => {
+  execute: async ({ inputData, mastra, tracingContext }) => {
     const { supportCase } = await getCaseOrThrow(
       inputData.caseId,
       inputData.turnId,
@@ -862,7 +891,10 @@ const resolveCaseStep = createStep({
         status,
       },
     });
-    await deliverOutbox().catch((error) =>
+    await deliverOutbox(undefined, 10, caseStore, {
+      mastra,
+      tracingContext,
+    }).catch((error) =>
       mastra
         ?.getLogger()
         ?.warn("Local outbox delivery failed; recovery will retry it.", {

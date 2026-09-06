@@ -50,6 +50,9 @@ export function CaseFeedback({
       const updated = await submitCaseFeedback(
         supportCase.id,
         rating,
+        supportCase.messages
+          .filter((message) => message.author === "agent")
+          .at(-1)?.id ?? "",
         comment || undefined,
         session,
       );
