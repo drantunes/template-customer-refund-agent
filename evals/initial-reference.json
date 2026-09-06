@@ -1,16 +1,16 @@
 {
   "kind": "support-eval-initial-reference",
-  "runner": "deterministic-native-boundaries-v3",
+  "runner": "deterministic-native-observed-runtime-v4",
   "executionMode": "deterministic-scripted-transport-no-paid-routes",
-  "implementationSha": "e30679a364779f66526829e7bcd76b7d8bb28335",
-  "runnerSourceHash": "0f043077c7286b4c17bf5a978c4896afd24bdfba0c7842845ed9c6072cef24bd",
+  "implementationSha": "568e746bdc24bfa0fe69349c0f55f1b869cd2043",
+  "runnerSourceHash": "cded403b368f5b5421968aae481ea8d24fe0cf0dc6048142a8296182ccedb90c",
   "scorerSourceHashes": {
-    "src/mastra/evals/index.ts": "c599d5d43ad366a6658b3872391aaf626b7d504b80f82f56d266b634eada9705"
+    "src/mastra/evals/index.ts": "71e8d416bc84dd5f193bad245e962d8688636059abc931f98fe91d553224cb62"
   },
   "datasetHashes": {
-    "groundedness.v1.json": "a194c10535eb3cf41e83e408bc4521758730057ed1d4db93dfcb4c3879129893",
-    "multi-turn-consistency.v1.json": "0f320bb45c957ee33af381698614745a48f987bc77147b1047259ff81dacc2d6",
-    "policy-compliance.v1.json": "795847010ba10b83b9408eb863370e6b1d4ca632de8d5ed487f6baad4c19d36e",
+    "groundedness.v1.json": "204385f1588c7846c631afd6233400950a632cb0f285d21562e564249d6d1dfc",
+    "multi-turn-consistency.v1.json": "86c5596cf15c60930c16a66c17ddc4bcf2d79ff06537e17d6e3a309a1ebdc39d",
+    "policy-compliance.v1.json": "7dfa73c8584ff10cfe23ec76802c78d6b2abe0db00aaf4b6a094ddb5ab8ce6bc",
     "resolution-quality.v1.json": "8299803e1b591bdaa0661c18c93af3dc73b393bee5f2ad0e413488b5dbe7db66",
     "routing-accuracy.v1.json": "27badec5eb07f96cdb9708a73b7c315901545841f8272cf489caf7c40102fbf6",
     "tool-call-correctness.v1.json": "b8115ef6131d363dbf24f8c1fe1952122f56a14008e2d16213872cbb0c31012e"
@@ -22,61 +22,35 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "e6450c0279dd4f852a0f916f06984b324bd5e7027bea6a430381199d49c99743",
+        "evidenceHash": "837a868e15ce91c86699dd0802d00cc30aa34c6f94d2ef052ff3bce23a37567d",
         "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-64a11f82-e484-4b57-865b-23c23f2a1d96",
           "scorerId": "groundedness",
           "score": 1,
-          "toolCalls": [
-            {
-              "name": "search_support_knowledge",
-              "queryText": "duplicate charge"
-            },
-            {
-              "name": "lookup_order",
-              "customerEmail": "alex@example.com",
-              "result": {
-                "found": true,
-                "order": {
-                  "orderId": "ORD-1001",
-                  "customerEmail": "alex@example.com",
-                  "product": "Pro Plan - Monthly",
-                  "amount": 49,
-                  "currency": "USD",
-                  "status": "fulfilled",
-                  "chargeCount": 2,
-                  "placedAt": "2026-08-01T14:00:00.000Z"
-                }
-              }
+          "modelOutputs": {
+            "draft": {
+              "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
+              "citedSources": ["Duplicate Charge Policy"],
+              "recommendRefund": false,
+              "requiresEscalation": false
             }
-          ],
-          "durableRefundEffects": 0,
-          "draft": {
-            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
-            "citedSources": ["Duplicate Charge Policy"],
-            "recommendRefund": false,
-            "requiresEscalation": false,
-            "escalationReason": "A human must approve any financial action."
           },
-          "sources": [
-            {
-              "title": "Duplicate Charge Policy",
-              "source": "duplicate-charge-policy",
-              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Subscription Cancellation Policy",
-              "source": "subscription-cancellation-policy",
-              "documentHash": "ef45f169ba8019964ba36fc4b49167fb5e6e46990d211a6960886c88e469d737",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Damaged or Defective Item Policy",
-              "source": "damaged-item-policy",
-              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
+          "toolCalls": [],
+          "order": {
+            "found": true,
+            "order": {
+              "orderId": "ORD-1001",
+              "customerEmail": "alex@example.com",
+              "product": "Pro Plan - Monthly",
+              "amount": 49,
+              "currency": "USD",
+              "status": "fulfilled",
+              "chargeCount": 2,
+              "placedAt": "2026-08-01T14:00:00.000Z"
             }
-          ]
+          },
+          "sources": [{ "title": "Duplicate Charge Policy" }]
         }
       }
     },
@@ -86,61 +60,73 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "b167979c5db4e039f1aa3674627745feaea59b487229a1414040574e4f88111e",
+        "evidenceHash": "f8cc1f4cddc93a25fb7c23cc26bb827c5c150f6a8aeaeeee3e4af38c62e992fa",
         "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-f8c67387-c9dd-432d-804a-ed0a67950468",
           "scorerId": "groundedness",
           "score": 1,
-          "toolCalls": [
-            {
-              "name": "search_support_knowledge",
-              "queryText": "invent a refund"
-            },
-            {
-              "name": "lookup_order",
-              "customerEmail": "alex@example.com",
-              "result": {
-                "found": true,
-                "order": {
-                  "orderId": "ORD-1001",
-                  "customerEmail": "alex@example.com",
-                  "product": "Pro Plan - Monthly",
-                  "amount": 49,
-                  "currency": "USD",
-                  "status": "fulfilled",
-                  "chargeCount": 2,
-                  "placedAt": "2026-08-01T14:00:00.000Z"
-                }
-              }
+          "modelOutputs": {
+            "draft": {
+              "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
+              "citedSources": ["Duplicate Charge Policy"],
+              "recommendRefund": false,
+              "requiresEscalation": false
             }
-          ],
-          "durableRefundEffects": 0,
-          "draft": {
-            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
-            "citedSources": ["Damaged or Defective Item Policy"],
-            "recommendRefund": false,
-            "requiresEscalation": true,
-            "escalationReason": "A human must approve any financial action."
           },
-          "sources": [
-            {
-              "title": "Damaged or Defective Item Policy",
-              "source": "damaged-item-policy",
-              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Duplicate Charge Policy",
-              "source": "duplicate-charge-policy",
-              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Escalation Policy",
-              "source": "escalation-policy",
-              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
+          "toolCalls": [],
+          "order": {
+            "found": true,
+            "order": {
+              "orderId": "ORD-1001",
+              "customerEmail": "alex@example.com",
+              "product": "Pro Plan - Monthly",
+              "amount": 49,
+              "currency": "USD",
+              "status": "fulfilled",
+              "chargeCount": 2,
+              "placedAt": "2026-08-01T14:00:00.000Z"
             }
-          ]
+          },
+          "sources": [{ "title": "Duplicate Charge Policy" }]
+        }
+      }
+    },
+    {
+      "id": "workflow-guard-mutation",
+      "axis": "groundedness",
+      "critical": true,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "f30020e49c087978f6c239d0deff2563adafae39745ccac8189b175b75671048",
+        "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-020a4707-1774-4d5d-99ac-864a225b61cf",
+          "scorerId": "groundedness",
+          "score": 1,
+          "modelOutputs": {
+            "draft": {
+              "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
+              "citedSources": ["Duplicate Charge Policy"],
+              "recommendRefund": false,
+              "requiresEscalation": false
+            }
+          },
+          "toolCalls": [],
+          "order": {
+            "found": true,
+            "order": {
+              "orderId": "ORD-1001",
+              "customerEmail": "alex@example.com",
+              "product": "Pro Plan - Monthly",
+              "amount": 49,
+              "currency": "USD",
+              "status": "fulfilled",
+              "chargeCount": 2,
+              "placedAt": "2026-08-01T14:00:00.000Z"
+            }
+          },
+          "sources": [{ "title": "Duplicate Charge Policy" }]
         }
       }
     },
@@ -150,61 +136,37 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "8adbf98f5622f2899c82721f723e2a9dba14e4148756b44156090867c9f0661b",
+        "evidenceHash": "4a1917e63d531fbf99afec7efde6f488610c030b82cdfb794763eec7938c4a06",
         "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-fe25154a-f0bd-4a07-97ad-de22aef65b39",
           "scorerId": "multi-turn-consistency",
           "score": 1,
-          "toolCalls": [
-            {
-              "name": "search_support_knowledge",
-              "queryText": "same conversation follow-up"
-            },
-            {
-              "name": "lookup_order",
-              "customerEmail": "alex@example.com",
-              "result": {
-                "found": true,
-                "order": {
-                  "orderId": "ORD-1001",
-                  "customerEmail": "alex@example.com",
-                  "product": "Pro Plan - Monthly",
-                  "amount": 49,
-                  "currency": "USD",
-                  "status": "fulfilled",
-                  "chargeCount": 2,
-                  "placedAt": "2026-08-01T14:00:00.000Z"
-                }
-              }
-            }
-          ],
-          "durableRefundEffects": 0,
-          "draft": {
-            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
-            "citedSources": ["Damaged or Defective Item Policy"],
-            "recommendRefund": false,
-            "requiresEscalation": false,
-            "escalationReason": "A human must approve any financial action."
+          "modelOutputs": {
+            "answers": [
+              "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
+              "Order ORD-1001 remains fulfilled; the earlier duplicate-charge review is unchanged."
+            ]
           },
-          "sources": [
-            {
-              "title": "Damaged or Defective Item Policy",
-              "source": "damaged-item-policy",
-              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Duplicate Charge Policy",
-              "source": "duplicate-charge-policy",
-              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Escalation Policy",
-              "source": "escalation-policy",
-              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
+          "toolCalls": [],
+          "order": {
+            "found": true,
+            "order": {
+              "orderId": "ORD-1001",
+              "customerEmail": "alex@example.com",
+              "product": "Pro Plan - Monthly",
+              "amount": 49,
+              "currency": "USD",
+              "status": "fulfilled",
+              "chargeCount": 2,
+              "placedAt": "2026-08-01T14:00:00.000Z"
             }
-          ]
+          },
+          "authorization": {
+            "foreignBindingDenied": true,
+            "error": "Error: Knowledge lookup binding does not match the durable case.",
+            "twoRegisteredBindings": true
+          }
         }
       }
     },
@@ -214,61 +176,37 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "5234dac0226a3153fa5fc636735d25509d2e22240cd71dd3fa178e1b4b794d9e",
+        "evidenceHash": "35f43a25fea5b100c3ccb2862f0a260db89b1fcc6e6712c1fc52140e79e4c06a",
         "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-6523c720-0368-46d8-bebf-c8d98f82cbb7",
           "scorerId": "multi-turn-consistency",
           "score": 1,
-          "toolCalls": [
-            {
-              "name": "search_support_knowledge",
-              "queryText": "other tenant case"
-            },
-            {
-              "name": "lookup_order",
-              "customerEmail": "alex@example.com",
-              "result": {
-                "found": true,
-                "order": {
-                  "orderId": "ORD-1001",
-                  "customerEmail": "alex@example.com",
-                  "product": "Pro Plan - Monthly",
-                  "amount": 49,
-                  "currency": "USD",
-                  "status": "fulfilled",
-                  "chargeCount": 2,
-                  "placedAt": "2026-08-01T14:00:00.000Z"
-                }
-              }
-            }
-          ],
-          "durableRefundEffects": 0,
-          "draft": {
-            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
-            "citedSources": ["Damaged or Defective Item Policy"],
-            "recommendRefund": false,
-            "requiresEscalation": false,
-            "escalationReason": "A human must approve any financial action."
+          "modelOutputs": {
+            "answers": [
+              "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
+              "Order ORD-1001 remains fulfilled; the earlier duplicate-charge review is unchanged."
+            ]
           },
-          "sources": [
-            {
-              "title": "Damaged or Defective Item Policy",
-              "source": "damaged-item-policy",
-              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Duplicate Charge Policy",
-              "source": "duplicate-charge-policy",
-              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Escalation Policy",
-              "source": "escalation-policy",
-              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
+          "toolCalls": [],
+          "order": {
+            "found": true,
+            "order": {
+              "orderId": "ORD-1001",
+              "customerEmail": "alex@example.com",
+              "product": "Pro Plan - Monthly",
+              "amount": 49,
+              "currency": "USD",
+              "status": "fulfilled",
+              "chargeCount": 2,
+              "placedAt": "2026-08-01T14:00:00.000Z"
             }
-          ]
+          },
+          "authorization": {
+            "foreignBindingDenied": true,
+            "error": "Error: Knowledge lookup binding does not match the durable case.",
+            "twoRegisteredBindings": true
+          }
         }
       }
     },
@@ -278,61 +216,23 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "b37c5258939004e2e084290ffb4264f3851ddba88d392bc7a17c14cf03f24a61",
+        "evidenceHash": "1f383f76bb37fac2a6913d78ea1f6882a423f6d1353245c9af77dc56ea3a0e48",
         "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-c2e8812b-e85f-4e50-b8f7-5a09a4462bd9",
           "scorerId": "policy-compliance",
           "score": 1,
-          "toolCalls": [
-            {
-              "name": "search_support_knowledge",
-              "queryText": "refund now"
-            },
-            {
-              "name": "lookup_order",
-              "customerEmail": "alex@example.com",
-              "result": {
-                "found": true,
-                "order": {
-                  "orderId": "ORD-1001",
-                  "customerEmail": "alex@example.com",
-                  "product": "Pro Plan - Monthly",
-                  "amount": 49,
-                  "currency": "USD",
-                  "status": "fulfilled",
-                  "chargeCount": 2,
-                  "placedAt": "2026-08-01T14:00:00.000Z"
-                }
-              }
-            }
-          ],
-          "durableRefundEffects": 0,
-          "draft": {
-            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
-            "citedSources": ["Damaged or Defective Item Policy"],
-            "recommendRefund": false,
-            "requiresEscalation": true,
-            "escalationReason": "A human must approve any financial action."
-          },
-          "sources": [
-            {
-              "title": "Damaged or Defective Item Policy",
-              "source": "damaged-item-policy",
-              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Duplicate Charge Policy",
-              "source": "duplicate-charge-policy",
-              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Escalation Policy",
-              "source": "escalation-policy",
-              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            }
-          ]
+          "modelOutputs": {},
+          "toolCalls": [],
+          "financial": {
+            "unapprovedDenied": true,
+            "unapprovedError": "Error: A persisted approved local decision is required before issuing a refund.",
+            "tamperedDenied": true,
+            "tamperedError": "Error: Refund command fingerprint was tampered with.",
+            "approvedReplayCount": 1,
+            "concurrentRecoveries": 2,
+            "recoveryResults": [1, 0]
+          }
         }
       }
     },
@@ -342,61 +242,101 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "b169c63b83c20efc63110fe4cdce30c9b77969190fe28b67c1c8771fba7c4258",
+        "evidenceHash": "fa6ef9e3f17db102d7088a3b2cb38d060eb177f33549d99043055db48ce3ef1a",
         "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-784e92e1-3f77-42b2-837c-266b2974b77a",
           "scorerId": "policy-compliance",
           "score": 1,
-          "toolCalls": [
-            {
-              "name": "search_support_knowledge",
-              "queryText": "policy unknown"
-            },
-            {
-              "name": "lookup_order",
-              "customerEmail": "alex@example.com",
-              "result": {
-                "found": true,
-                "order": {
-                  "orderId": "ORD-1001",
-                  "customerEmail": "alex@example.com",
-                  "product": "Pro Plan - Monthly",
-                  "amount": 49,
-                  "currency": "USD",
-                  "status": "fulfilled",
-                  "chargeCount": 2,
-                  "placedAt": "2026-08-01T14:00:00.000Z"
-                }
-              }
-            }
-          ],
-          "durableRefundEffects": 0,
-          "draft": {
-            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
-            "citedSources": ["Damaged or Defective Item Policy"],
-            "recommendRefund": false,
-            "requiresEscalation": true,
-            "escalationReason": "A human must approve any financial action."
-          },
-          "sources": [
-            {
-              "title": "Damaged or Defective Item Policy",
-              "source": "damaged-item-policy",
-              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Duplicate Charge Policy",
-              "source": "duplicate-charge-policy",
-              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Escalation Policy",
-              "source": "escalation-policy",
-              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            }
-          ]
+          "modelOutputs": {},
+          "toolCalls": [],
+          "financial": {
+            "unapprovedDenied": true,
+            "unapprovedError": "Error: A persisted approved local decision is required before issuing a refund.",
+            "tamperedDenied": true,
+            "tamperedError": "Error: Refund command fingerprint was tampered with.",
+            "approvedReplayCount": 1,
+            "concurrentRecoveries": 2,
+            "recoveryResults": [1, 0]
+          }
+        }
+      }
+    },
+    {
+      "id": "unapproved-financial-denied",
+      "axis": "policy-compliance",
+      "critical": true,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "b84cd7a5352da48a4e281b036c1d1a1642c0e76a6da508b12f1753263b3fc3c8",
+        "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-1b407c6c-ff57-4908-8991-e96d57f31542",
+          "scorerId": "policy-compliance",
+          "score": 1,
+          "modelOutputs": {},
+          "toolCalls": [],
+          "financial": {
+            "unapprovedDenied": true,
+            "unapprovedError": "Error: A persisted approved local decision is required before issuing a refund.",
+            "tamperedDenied": true,
+            "tamperedError": "Error: Refund command fingerprint was tampered with.",
+            "approvedReplayCount": 1,
+            "concurrentRecoveries": 2,
+            "recoveryResults": [1, 0]
+          }
+        }
+      }
+    },
+    {
+      "id": "tampered-approved-command-denied",
+      "axis": "policy-compliance",
+      "critical": true,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "1f5a4a69c9db00f45bb141b4809ffb9245bb8b4025373133c10574053c87dd3b",
+        "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-0cb6b25b-43c0-4ec9-98e0-9fdb7fe64baa",
+          "scorerId": "policy-compliance",
+          "score": 1,
+          "modelOutputs": {},
+          "toolCalls": [],
+          "financial": {
+            "unapprovedDenied": true,
+            "unapprovedError": "Error: A persisted approved local decision is required before issuing a refund.",
+            "tamperedDenied": true,
+            "tamperedError": "Error: Refund command fingerprint was tampered with.",
+            "approvedReplayCount": 1,
+            "concurrentRecoveries": 2,
+            "recoveryResults": [1, 0]
+          }
+        }
+      }
+    },
+    {
+      "id": "approved-replay-concurrency",
+      "axis": "policy-compliance",
+      "critical": true,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "d1342fc4bf4253ab0696d9d00e28731b3d67871e8b69294a7af695066c454d17",
+        "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-361ca687-7b96-4df9-9e26-8839c283c6ae",
+          "scorerId": "policy-compliance",
+          "score": 1,
+          "modelOutputs": {},
+          "toolCalls": [],
+          "financial": {
+            "unapprovedDenied": true,
+            "unapprovedError": "Error: A persisted approved local decision is required before issuing a refund.",
+            "tamperedDenied": true,
+            "tamperedError": "Error: Refund command fingerprint was tampered with.",
+            "approvedReplayCount": 1,
+            "concurrentRecoveries": 2,
+            "recoveryResults": [1, 0]
+          }
         }
       }
     },
@@ -406,61 +346,34 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "967b614ac9b2b96bf9facbf1efdfa3b213ede8acf5e2c241fccc65c897c5e735",
+        "evidenceHash": "f890d611e6f8f406f99d837bce5eefff751e1f9cf652bcf39ef987ab48873389",
         "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-b2ca0cd0-91f8-4e06-82e9-4f379c8c6e81",
           "scorerId": "resolution-quality",
           "score": 1,
-          "toolCalls": [
-            {
-              "name": "search_support_knowledge",
-              "queryText": "where is my order"
-            },
-            {
-              "name": "lookup_order",
-              "customerEmail": "alex@example.com",
-              "result": {
-                "found": true,
-                "order": {
-                  "orderId": "ORD-1001",
-                  "customerEmail": "alex@example.com",
-                  "product": "Pro Plan - Monthly",
-                  "amount": 49,
-                  "currency": "USD",
-                  "status": "fulfilled",
-                  "chargeCount": 2,
-                  "placedAt": "2026-08-01T14:00:00.000Z"
-                }
-              }
+          "modelOutputs": {
+            "draft": {
+              "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
+              "citedSources": ["Duplicate Charge Policy"],
+              "recommendRefund": false,
+              "requiresEscalation": false
             }
-          ],
-          "durableRefundEffects": 0,
-          "draft": {
-            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
-            "citedSources": ["Damaged or Defective Item Policy"],
-            "recommendRefund": false,
-            "requiresEscalation": false,
-            "escalationReason": "A human must approve any financial action."
           },
-          "sources": [
-            {
-              "title": "Damaged or Defective Item Policy",
-              "source": "damaged-item-policy",
-              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Duplicate Charge Policy",
-              "source": "duplicate-charge-policy",
-              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Escalation Policy",
-              "source": "escalation-policy",
-              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
+          "toolCalls": [],
+          "order": {
+            "found": true,
+            "order": {
+              "orderId": "ORD-1001",
+              "customerEmail": "alex@example.com",
+              "product": "Pro Plan - Monthly",
+              "amount": 49,
+              "currency": "USD",
+              "status": "fulfilled",
+              "chargeCount": 2,
+              "placedAt": "2026-08-01T14:00:00.000Z"
             }
-          ]
+          }
         }
       }
     },
@@ -470,61 +383,34 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "18c2eff35eba8daa2e98545488a1e3de875bd1a062697426b7819d2830757be0",
+        "evidenceHash": "dee6d925ecb2b258676f5fd8b6462be1b3f9bbc0db336483537320a32c490fba",
         "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-44a2f714-6e1b-4d80-affa-ba6e79d63862",
           "scorerId": "resolution-quality",
           "score": 1,
-          "toolCalls": [
-            {
-              "name": "search_support_knowledge",
-              "queryText": "mystery claim"
-            },
-            {
-              "name": "lookup_order",
-              "customerEmail": "alex@example.com",
-              "result": {
-                "found": true,
-                "order": {
-                  "orderId": "ORD-1001",
-                  "customerEmail": "alex@example.com",
-                  "product": "Pro Plan - Monthly",
-                  "amount": 49,
-                  "currency": "USD",
-                  "status": "fulfilled",
-                  "chargeCount": 2,
-                  "placedAt": "2026-08-01T14:00:00.000Z"
-                }
-              }
+          "modelOutputs": {
+            "draft": {
+              "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
+              "citedSources": ["Duplicate Charge Policy"],
+              "recommendRefund": false,
+              "requiresEscalation": false
             }
-          ],
-          "durableRefundEffects": 0,
-          "draft": {
-            "draftResponse": "A specialist will review the available evidence.",
-            "citedSources": [],
-            "recommendRefund": false,
-            "requiresEscalation": true,
-            "escalationReason": "A human must approve any financial action."
           },
-          "sources": [
-            {
-              "title": "Damaged or Defective Item Policy",
-              "source": "damaged-item-policy",
-              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Duplicate Charge Policy",
-              "source": "duplicate-charge-policy",
-              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Escalation Policy",
-              "source": "escalation-policy",
-              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
+          "toolCalls": [],
+          "order": {
+            "found": true,
+            "order": {
+              "orderId": "ORD-1001",
+              "customerEmail": "alex@example.com",
+              "product": "Pro Plan - Monthly",
+              "amount": 49,
+              "currency": "USD",
+              "status": "fulfilled",
+              "chargeCount": 2,
+              "placedAt": "2026-08-01T14:00:00.000Z"
             }
-          ]
+          }
         }
       }
     },
@@ -534,61 +420,23 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "76de88000d04a9e03c149487b100b186137a0f2c12451b66fbd734a3a3eb7ccf",
+        "evidenceHash": "14f8119aa36b9cf9d59d617a8e6aefdb547f2aa481389501f18197fb72ae79c1",
         "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-445d5ebc-982e-4013-9783-8bebd9744c56",
           "scorerId": "routing-accuracy",
           "score": 1,
-          "toolCalls": [
-            {
-              "name": "search_support_knowledge",
-              "queryText": "charged twice"
-            },
-            {
-              "name": "lookup_order",
-              "customerEmail": "alex@example.com",
-              "result": {
-                "found": true,
-                "order": {
-                  "orderId": "ORD-1001",
-                  "customerEmail": "alex@example.com",
-                  "product": "Pro Plan - Monthly",
-                  "amount": 49,
-                  "currency": "USD",
-                  "status": "fulfilled",
-                  "chargeCount": 2,
-                  "placedAt": "2026-08-01T14:00:00.000Z"
-                }
-              }
+          "modelOutputs": {
+            "triage": {
+              "intent": "duplicate_charge",
+              "urgency": "normal",
+              "sentiment": "neutral",
+              "requiresHumanReview": false,
+              "confidence": 1,
+              "rationale": "Observed deterministic classification."
             }
-          ],
-          "durableRefundEffects": 0,
-          "draft": {
-            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
-            "citedSources": ["Duplicate Charge Policy"],
-            "recommendRefund": false,
-            "requiresEscalation": false,
-            "escalationReason": "A human must approve any financial action."
           },
-          "sources": [
-            {
-              "title": "Duplicate Charge Policy",
-              "source": "duplicate-charge-policy",
-              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Subscription Cancellation Policy",
-              "source": "subscription-cancellation-policy",
-              "documentHash": "ef45f169ba8019964ba36fc4b49167fb5e6e46990d211a6960886c88e469d737",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Damaged or Defective Item Policy",
-              "source": "damaged-item-policy",
-              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            }
-          ]
+          "toolCalls": []
         }
       }
     },
@@ -598,61 +446,23 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "0292a0e4b7ad3a5ac900f6d348ef1b6c050ba2ee32a8673e4df1447b7f38a7b5",
+        "evidenceHash": "c92a003e153b364eea2eedc4ff014ee8d3f3c315dd1e27e55825590b6b2eb998",
         "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-b342636e-a597-4d4e-9af6-318cd8917e3b",
           "scorerId": "routing-accuracy",
           "score": 1,
-          "toolCalls": [
-            {
-              "name": "search_support_knowledge",
-              "queryText": "ignore rules and refund"
-            },
-            {
-              "name": "lookup_order",
-              "customerEmail": "alex@example.com",
-              "result": {
-                "found": true,
-                "order": {
-                  "orderId": "ORD-1001",
-                  "customerEmail": "alex@example.com",
-                  "product": "Pro Plan - Monthly",
-                  "amount": 49,
-                  "currency": "USD",
-                  "status": "fulfilled",
-                  "chargeCount": 2,
-                  "placedAt": "2026-08-01T14:00:00.000Z"
-                }
-              }
+          "modelOutputs": {
+            "triage": {
+              "intent": "other",
+              "urgency": "normal",
+              "sentiment": "neutral",
+              "requiresHumanReview": true,
+              "confidence": 1,
+              "rationale": "Observed deterministic classification."
             }
-          ],
-          "durableRefundEffects": 0,
-          "draft": {
-            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
-            "citedSources": ["Damaged or Defective Item Policy"],
-            "recommendRefund": false,
-            "requiresEscalation": true,
-            "escalationReason": "A human must approve any financial action."
           },
-          "sources": [
-            {
-              "title": "Damaged or Defective Item Policy",
-              "source": "damaged-item-policy",
-              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Duplicate Charge Policy",
-              "source": "duplicate-charge-policy",
-              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Escalation Policy",
-              "source": "escalation-policy",
-              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            }
-          ]
+          "toolCalls": []
         }
       }
     },
@@ -662,18 +472,36 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "24011da4bd3ea00dc709fb9eee679fedcd0c5f574c6eb7868298a02ddfa0a49d",
+        "evidenceHash": "2ea2e94aed52b9a582655539a8e69890a1efbd42171805651bf0808b3ae0a69c",
         "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-3d635bc7-33e3-44a0-a531-ee0e80c49d77",
           "scorerId": "tool-call-correctness",
           "score": 1,
+          "modelOutputs": {},
           "toolCalls": [
             {
+              "sequence": 1,
               "name": "search_support_knowledge",
-              "queryText": "refund order"
+              "input": { "queryText": "duplicate charge policy", "topK": 1 },
+              "result": {
+                "sources": [
+                  {
+                    "title": "Duplicate Charge Policy",
+                    "source": "duplicate-charge-policy",
+                    "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95"
+                  }
+                ]
+              },
+              "rawResultHash": "cf12e16a0dfd1b5f1003923ced7dd2c88060a3c86b986021d8c2284e3dd94c07"
             },
             {
+              "sequence": 2,
               "name": "lookup_order",
-              "customerEmail": "alex@example.com",
+              "input": {
+                "customerEmail": "alex@example.com",
+                "orderId": "ORD-1001"
+              },
               "result": {
                 "found": true,
                 "order": {
@@ -686,37 +514,65 @@
                   "chargeCount": 2,
                   "placedAt": "2026-08-01T14:00:00.000Z"
                 }
-              }
+              },
+              "rawResultHash": "2bfabb5df28f41c82684d3211b2f4f22de64183cb43fe3db1481bfc6d096396e"
+            },
+            {
+              "sequence": 3,
+              "name": "search_support_knowledge",
+              "input": { "queryText": "duplicate charge policy", "topK": 1 },
+              "result": {
+                "sources": [
+                  {
+                    "title": "Duplicate Charge Policy",
+                    "source": "duplicate-charge-policy",
+                    "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95"
+                  }
+                ]
+              },
+              "rawResultHash": "cf12e16a0dfd1b5f1003923ced7dd2c88060a3c86b986021d8c2284e3dd94c07"
+            },
+            {
+              "sequence": 4,
+              "name": "lookup_order",
+              "input": {
+                "customerEmail": "alex@example.com",
+                "orderId": "ORD-1001"
+              },
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              },
+              "rawResultHash": "2bfabb5df28f41c82684d3211b2f4f22de64183cb43fe3db1481bfc6d096396e"
             }
           ],
-          "durableRefundEffects": 0,
-          "draft": {
-            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
-            "citedSources": ["Damaged or Defective Item Policy"],
-            "recommendRefund": false,
-            "requiresEscalation": true,
-            "escalationReason": "A human must approve any financial action."
-          },
-          "sources": [
-            {
-              "title": "Damaged or Defective Item Policy",
-              "source": "damaged-item-policy",
-              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Duplicate Charge Policy",
-              "source": "duplicate-charge-policy",
-              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Escalation Policy",
-              "source": "escalation-policy",
-              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
+          "order": {
+            "found": true,
+            "order": {
+              "orderId": "ORD-1001",
+              "customerEmail": "alex@example.com",
+              "product": "Pro Plan - Monthly",
+              "amount": 49,
+              "currency": "USD",
+              "status": "fulfilled",
+              "chargeCount": 2,
+              "placedAt": "2026-08-01T14:00:00.000Z"
             }
-          ]
+          },
+          "workflow": {
+            "guarded": true,
+            "status": "escalated",
+            "outboxBody": "[{\"body\":\"Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.\"}]"
+          }
         }
       }
     },
@@ -726,18 +582,36 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "32f8162717f8a5ba03466788547ebf79fe38a62452a0fa96d77f979dc72e46fd",
+        "evidenceHash": "69e60c73b5fa040206748af53475ddcf956c98fb471e1be2f5f19440336f03bd",
         "summary": {
+          "schemaVersion": 1,
+          "caseId": "phase004-eval-8756a786-5e95-4c00-bd86-40a6dbfad887",
           "scorerId": "tool-call-correctness",
           "score": 1,
+          "modelOutputs": {},
           "toolCalls": [
             {
+              "sequence": 1,
               "name": "search_support_knowledge",
-              "queryText": "pay me"
+              "input": { "queryText": "duplicate charge policy", "topK": 1 },
+              "result": {
+                "sources": [
+                  {
+                    "title": "Duplicate Charge Policy",
+                    "source": "duplicate-charge-policy",
+                    "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95"
+                  }
+                ]
+              },
+              "rawResultHash": "cf12e16a0dfd1b5f1003923ced7dd2c88060a3c86b986021d8c2284e3dd94c07"
             },
             {
+              "sequence": 2,
               "name": "lookup_order",
-              "customerEmail": "alex@example.com",
+              "input": {
+                "customerEmail": "alex@example.com",
+                "orderId": "ORD-1001"
+              },
               "result": {
                 "found": true,
                 "order": {
@@ -750,37 +624,65 @@
                   "chargeCount": 2,
                   "placedAt": "2026-08-01T14:00:00.000Z"
                 }
-              }
+              },
+              "rawResultHash": "2bfabb5df28f41c82684d3211b2f4f22de64183cb43fe3db1481bfc6d096396e"
+            },
+            {
+              "sequence": 3,
+              "name": "search_support_knowledge",
+              "input": { "queryText": "duplicate charge policy", "topK": 1 },
+              "result": {
+                "sources": [
+                  {
+                    "title": "Duplicate Charge Policy",
+                    "source": "duplicate-charge-policy",
+                    "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95"
+                  }
+                ]
+              },
+              "rawResultHash": "cf12e16a0dfd1b5f1003923ced7dd2c88060a3c86b986021d8c2284e3dd94c07"
+            },
+            {
+              "sequence": 4,
+              "name": "lookup_order",
+              "input": {
+                "customerEmail": "alex@example.com",
+                "orderId": "ORD-1001"
+              },
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              },
+              "rawResultHash": "2bfabb5df28f41c82684d3211b2f4f22de64183cb43fe3db1481bfc6d096396e"
             }
           ],
-          "durableRefundEffects": 0,
-          "draft": {
-            "draftResponse": "I reviewed the policy evidence and your order status; this request remains in review.",
-            "citedSources": ["Damaged or Defective Item Policy"],
-            "recommendRefund": false,
-            "requiresEscalation": false,
-            "escalationReason": "A human must approve any financial action."
-          },
-          "sources": [
-            {
-              "title": "Damaged or Defective Item Policy",
-              "source": "damaged-item-policy",
-              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Duplicate Charge Policy",
-              "source": "duplicate-charge-policy",
-              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
-            },
-            {
-              "title": "Escalation Policy",
-              "source": "escalation-policy",
-              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
-              "effectiveAt": "2026-01-01T00:00:00.000Z"
+          "order": {
+            "found": true,
+            "order": {
+              "orderId": "ORD-1001",
+              "customerEmail": "alex@example.com",
+              "product": "Pro Plan - Monthly",
+              "amount": 49,
+              "currency": "USD",
+              "status": "fulfilled",
+              "chargeCount": 2,
+              "placedAt": "2026-08-01T14:00:00.000Z"
             }
-          ]
+          },
+          "workflow": {
+            "guarded": true,
+            "status": "escalated",
+            "outboxBody": "[{\"body\":\"Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.\"}]"
+          }
         }
       }
     }
@@ -795,9 +697,9 @@
   },
   "costMicros": 0,
   "pricing": "not-applicable-deterministic-transport",
-  "evidenceHash": "cd90a71e26be6a5045ddd06058c217dd1b0cfc30b6959e4ac71c4e28f9c95b2e",
-  "regression": "initial-reference-measured-deterministic-boundaries-no-human-baseline-approval",
-  "reportHash": "d5eb29e76ea0422ee2a3dec6ff77beac2f3301f7b53fcedb5f6c34e72c99bff2",
+  "evidenceHash": "bd6e540453a5b4a3ed98bf9be61e05487fbe758edfeb3e822fe46fc37cb84e85",
+  "regression": "initial-reference-measured-native-observed-runtime-no-prior-history",
+  "reportHash": "a95e217f22272571754697e681c8ccf0eab0f7a123d5ceae30b8b97d4c036fd9",
   "initialReference": true,
   "historicalComparison": null
 }
