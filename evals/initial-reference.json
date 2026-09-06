@@ -34,9 +34,7 @@
           "modelOutputs": {
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
-              "citedSources": [
-                "Duplicate Charge Policy"
-              ],
+              "citedSources": ["Duplicate Charge Policy"],
               "recommendRefund": false,
               "requiresEscalation": false
             }
@@ -81,9 +79,7 @@
           "modelOutputs": {
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
-              "citedSources": [
-                "Invented policy"
-              ],
+              "citedSources": ["Invented policy"],
               "recommendRefund": false,
               "requiresEscalation": true,
               "escalationReason": "Draft lacks applicable evidence from the active publication."
@@ -114,9 +110,7 @@
             "outboxBody": "[{\"body\":\"Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.\"}]",
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
-              "citedSources": [
-                "Invented policy"
-              ],
+              "citedSources": ["Invented policy"],
               "recommendRefund": false,
               "requiresEscalation": true,
               "escalationReason": "Draft lacks applicable evidence from the active publication."
@@ -158,9 +152,7 @@
           "modelOutputs": {
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
-              "citedSources": [
-                "Invented policy"
-              ],
+              "citedSources": ["Invented policy"],
               "recommendRefund": false,
               "requiresEscalation": true,
               "escalationReason": "Draft lacks applicable evidence from the active publication."
@@ -191,9 +183,7 @@
             "outboxBody": "[{\"body\":\"Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.\"}]",
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
-              "citedSources": [
-                "Invented policy"
-              ],
+              "citedSources": ["Invented policy"],
               "recommendRefund": false,
               "requiresEscalation": true,
               "escalationReason": "Draft lacks applicable evidence from the active publication."
@@ -319,9 +309,7 @@
           "modelOutputs": {
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
-              "citedSources": [
-                "Duplicate Charge Policy"
-              ],
+              "citedSources": ["Duplicate Charge Policy"],
               "recommendRefund": false,
               "requiresEscalation": false
             }
@@ -419,9 +407,7 @@
           "modelOutputs": {
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
-              "citedSources": [
-                "Duplicate Charge Policy"
-              ],
+              "citedSources": ["Duplicate Charge Policy"],
               "recommendRefund": false,
               "requiresEscalation": false
             }
@@ -464,9 +450,7 @@
           "modelOutputs": {
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
-              "citedSources": [
-                "Duplicate Charge Policy"
-              ],
+              "citedSources": ["Duplicate Charge Policy"],
               "recommendRefund": false,
               "requiresEscalation": false
             }
@@ -486,10 +470,7 @@
             "durableActions": 1,
             "originalCommandReplayIntegrity": true,
             "concurrentRecoveries": 2,
-            "recoveryResults": [
-              1,
-              1
-            ]
+            "recoveryResults": [1, 1]
           }
         }
       }
@@ -512,9 +493,7 @@
           "modelOutputs": {
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
-              "citedSources": [
-                "Duplicate Charge Policy"
-              ],
+              "citedSources": ["Duplicate Charge Policy"],
               "recommendRefund": false,
               "requiresEscalation": false
             }
@@ -534,10 +513,7 @@
             "durableActions": 1,
             "originalCommandReplayIntegrity": true,
             "concurrentRecoveries": 2,
-            "recoveryResults": [
-              1,
-              0
-            ]
+            "recoveryResults": [1, 0]
           }
         }
       }
@@ -560,9 +536,7 @@
           "modelOutputs": {
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
-              "citedSources": [
-                "Duplicate Charge Policy"
-              ],
+              "citedSources": ["Duplicate Charge Policy"],
               "recommendRefund": false,
               "requiresEscalation": false
             }
