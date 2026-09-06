@@ -10,6 +10,7 @@ import {
 import {
   evaluateDatasetAssertions as evaluateAssertionSemantics,
   scorerInputFromObservation,
+  trajectoryAuthorityForDatasetCase,
   truthForDatasetCase,
 } from "../../src/mastra/evals/deterministic-semantics.js";
 import { deterministicJsonModel } from "../fixtures/deterministic-language-model";
@@ -79,33 +80,38 @@ Duplicate charges happen when a payment retries due to a network error, or when 
 - Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.
 - Duplicate-charge refunds do not require the customer to return anything, since no extra product/service was fulfilled.
 - These refunds are considered clear-cut and eligible for standard approval (not automatic execution - a human must still approve every refund).`;
-const expectedKnowledgeEvidence = {
-  document: expectedKnowledgeText,
-  score: 1,
-  metadata: {
-    title: "Duplicate Charge Policy",
-    source: "duplicate-charge-policy",
-    text: expectedKnowledgeText,
-    version: "local-v1",
-    documentHash: createHash("sha256")
-      .update(
-        JSON.stringify([
-          "duplicate-charge-policy",
-          "local-v1",
-          expectedKnowledgeText,
-        ]),
-      )
-      .digest("hex"),
-    generationId: "knowledge_00000000-0000-4000-8000-000000000000",
-    effectiveAt: "2026-01-01T00:00:00.000Z",
-    indexedAt: "2026-01-01T00:00:01.000Z",
-    providerKind: "local",
-    providerAccountId: "phase004-eval-authority-registered-scorer-fixture",
-  },
+const expectedKnowledgeEvidenceForCase = (caseId: string) => {
+  const { measurementAt: _measurementAt, ...authority } =
+    trajectoryAuthorityForDatasetCase(caseId);
+  return {
+    document: expectedKnowledgeText,
+    score: 1,
+    metadata: {
+      title: "Duplicate Charge Policy",
+      source: "duplicate-charge-policy",
+      text: expectedKnowledgeText,
+      version: "local-v1",
+      documentHash: createHash("sha256")
+        .update(
+          JSON.stringify([
+            "duplicate-charge-policy",
+            "local-v1",
+            expectedKnowledgeText,
+          ]),
+        )
+        .digest("hex"),
+      ...authority,
+      providerKind: "local",
+      providerAccountId: `phase004-eval-authority-${caseId}`,
+    },
+  };
 };
+const expectedKnowledgeEvidence = expectedKnowledgeEvidenceForCase(
+  "registered-scorer-fixture",
+);
 
-function completeObservedCalls() {
-  const trustedBinding = evaluationBinding("registered-scorer-fixture");
+function completeObservedCalls(caseId = "registered-scorer-fixture") {
+  const trustedBinding = evaluationBinding(caseId);
   const search = (sequence: number, turn: number) => ({
     sequence,
     turn,
@@ -115,7 +121,9 @@ function completeObservedCalls() {
       queryText: "duplicate charge policy",
       topK: 1,
     },
-    result: { sources: [structuredClone(expectedKnowledgeEvidence)] },
+    result: {
+      sources: [structuredClone(expectedKnowledgeEvidenceForCase(caseId))],
+    },
   });
   const lookup = (sequence: number, turn: number) => ({
     sequence,
@@ -131,11 +139,48 @@ function completeObservedCalls() {
       order: {
         orderId: "ORD-1001",
         customerEmail: "alex@example.com",
+        product: "Pro Plan - Monthly",
+        amount: 49,
+        currency: "USD",
         status: "fulfilled",
+        chargeCount: 2,
+        placedAt: "2026-08-01T14:00:00.000Z",
       },
     },
   });
   return [search(1, 1), lookup(2, 1), search(3, 2), lookup(4, 2)];
+}
+
+async function pinDeterministicKnowledgeFixture(
+  configured: ReturnType<typeof evaluationBinding>,
+  authorityId: string,
+) {
+  const { caseStore } = await import("../../src/mastra/lib/case-store");
+  const { knowledgePublicationStore } =
+    await import("../../src/mastra/lib/knowledge-publications");
+  const publication = await knowledgePublicationStore.publication(configured);
+  if (!publication.generationId)
+    throw new Error("Expected active deterministic knowledge publication.");
+  const authority = trajectoryAuthorityForDatasetCase(authorityId);
+  const client = caseStore.getClientForTests();
+  await client.execute({
+    sql: "UPDATE support_knowledge_documents SET generation_id = ?, effective_at = ?, indexed_at = ?, expires_at = ? WHERE generation_id = ?",
+    args: [
+      authority.generationId,
+      authority.effectiveAt,
+      authority.indexedAt,
+      authority.expiresAt ?? null,
+      publication.generationId,
+    ],
+  });
+  await client.execute({
+    sql: "UPDATE support_knowledge_generations SET id = ? WHERE id = ?",
+    args: [authority.generationId, publication.generationId],
+  });
+  await client.execute({
+    sql: "UPDATE support_knowledge_publications SET generation_id = ? WHERE generation_id = ?",
+    args: [authority.generationId, publication.generationId],
+  });
 }
 
 function completeObservedTurns() {
@@ -294,6 +339,8 @@ async function observedReadTrajectory(
   const { id, configured } = await createCase(input, options.authorityId);
   registerProviderRegistry(localRuntime, [configured]);
   await publishKnowledge(configured, { onlyIfMissing: true });
+  if (options.authorityId)
+    await pinDeterministicKnowledgeFixture(configured, options.authorityId);
   await ensureProviderFixtures(configured);
   const search = mastra.getTool("searchSupportKnowledgeTool");
   const lookup = mastra.getTool("lookupOrderTool");
@@ -948,7 +995,9 @@ describe("Phase 004 deterministic native evaluation", () => {
           score: scored.score,
           evidence: {
             schemaVersion: 1,
-            caseId: read.caseId,
+            // Dataset identity is the authoritative scenario correlation;
+            // the runtime case UUID is deliberately not report authority.
+            caseId: item.id,
             scorerId: scorer.id,
             score: scored.score,
             assertions: assertionResults,
@@ -967,13 +1016,16 @@ describe("Phase 004 deterministic native evaluation", () => {
     const multiTurnTruth = truthForDatasetCase("multi-turn-consistency", {
       sameThread: true,
     });
-    const scoreTool = (calls: ReturnType<typeof completeObservedCalls>) =>
+    const scoreTool = (
+      calls: ReturnType<typeof completeObservedCalls>,
+      groundTruth = toolTruth,
+    ) =>
       supportEvalScorerRegistry.toolCallCorrectness.run({
         output: {
           toolCalls: calls,
           refundEffects: { providerEffects: 0, durableActions: 0 },
         },
-        groundTruth: toolTruth,
+        groundTruth,
       });
     const scoreTurns = (turns: ReturnType<typeof completeObservedTurns>) =>
       supportEvalScorerRegistry.multiTurnConsistency.run({
@@ -984,14 +1036,17 @@ describe("Phase 004 deterministic native evaluation", () => {
         },
         groundTruth: multiTurnTruth,
       });
-    const scoreTrajectory = (calls: ReturnType<typeof completeObservedCalls>) =>
+    const scoreTrajectory = (
+      calls: ReturnType<typeof completeObservedCalls>,
+      groundTruth = multiTurnTruth,
+    ) =>
       supportEvalScorerRegistry.multiTurnConsistency.run({
         output: {
           turns: completeObservedTurns(),
           toolCalls: calls,
           historyEstablished: true,
         },
-        groundTruth: multiTurnTruth,
+        groundTruth,
       });
     const factualResponse =
       "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.";
@@ -1292,6 +1347,107 @@ describe("Phase 004 deterministic native evaluation", () => {
         `trajectory mutation ${index}`,
       ).resolves.toMatchObject({ score: 0 });
     }
+    const sourceAt = (
+      calls: ReturnType<typeof completeObservedCalls>,
+      index: 0 | 2,
+    ) =>
+      (
+        calls[index].result as {
+          sources: Array<{ metadata: Record<string, unknown> }>;
+        }
+      ).sources[0].metadata;
+    const orderAt = (
+      calls: ReturnType<typeof completeObservedCalls>,
+      index: 1 | 3,
+    ) => (calls[index].result as { order: Record<string, unknown> }).order;
+    const rejectTrajectoryIntegrity = (
+      mutate: (calls: ReturnType<typeof completeObservedCalls>) => void,
+    ) => {
+      const calls = completeObservedCalls();
+      mutate(calls);
+      return Promise.all([
+        expect(scoreTool(calls)).resolves.toMatchObject({ score: 0 }),
+        expect(scoreTrajectory(calls)).resolves.toMatchObject({ score: 0 }),
+      ]);
+    };
+    // The registered scorers own their fixture authority and reject a
+    // replayer changing one observation or coordinating both observations.
+    for (const mutate of [
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        sourceAt(calls, 0).expiresAt = "2026-01-01T00:00:01.000Z";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        sourceAt(calls, 0).expiresAt = "2026-01-01T00:00:00.500Z";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        sourceAt(calls, 2).expiresAt = "2026-01-01T00:00:03.000Z";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        sourceAt(calls, 0).expiresAt = "2026-01-01T00:00:03.000Z";
+        sourceAt(calls, 2).expiresAt = "2026-01-01T00:00:04.000Z";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        sourceAt(calls, 2).indexedAt = "2026-01-01T00:00:01.500Z";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        sourceAt(calls, 0).indexedAt = "2026-01-01T00:00:03.000Z";
+        sourceAt(calls, 2).indexedAt = "2026-01-01T00:00:03.000Z";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        sourceAt(calls, 0).generationId =
+          "knowledge_11111111-1111-4111-8111-111111111111";
+        sourceAt(calls, 2).generationId =
+          "knowledge_11111111-1111-4111-8111-111111111111";
+      },
+    ])
+      await rejectTrajectoryIntegrity(mutate);
+    for (const [key, value] of [
+      ["amount", 1],
+      ["currency", "BTC"],
+      ["product", "Tampered Plan"],
+      ["chargeCount", 0],
+      ["placedAt", "2026-08-02T14:00:00.000Z"],
+    ] as const) {
+      await rejectTrajectoryIntegrity((calls) => {
+        orderAt(calls, 3)[key] = value;
+      });
+      await rejectTrajectoryIntegrity((calls) => {
+        orderAt(calls, 1)[key] = value;
+        orderAt(calls, 3)[key] = value;
+      });
+    }
+    for (const mutate of [
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        delete orderAt(calls, 3).amount;
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        orderAt(calls, 3).untrusted = true;
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        delete (calls[3].result as { found?: unknown }).found;
+      },
+    ])
+      await rejectTrajectoryIntegrity(mutate);
+    const futureExpiryId = "registered-scorer-fixture-future-expiry";
+    const futureExpiryCalls = completeObservedCalls(futureExpiryId);
+    const futureToolTruth = truthForDatasetCase(
+      "tool-call-correctness",
+      {},
+      futureExpiryId,
+    );
+    const futureMultiTurnTruth = truthForDatasetCase(
+      "multi-turn-consistency",
+      { sameThread: true },
+      futureExpiryId,
+    );
+    await expect(
+      scoreTool(futureExpiryCalls, futureToolTruth),
+    ).resolves.toMatchObject({
+      score: 1,
+    });
+    await expect(
+      scoreTrajectory(futureExpiryCalls, futureMultiTurnTruth),
+    ).resolves.toMatchObject({ score: 1 });
     const contradictoryResponses = [
       "Order ORD-1001 is fulfilled, but it was cancelled.",
       "Order ORD-1001 is fulfilled, but it is unfulfilled.",

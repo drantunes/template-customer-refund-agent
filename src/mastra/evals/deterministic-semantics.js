@@ -6,9 +6,22 @@
 import { createHash } from "node:crypto";
 
 const EXPECTED_ORDER_ID = "ORD-1001";
-const EXPECTED_ORDER_STATUS = "fulfilled";
-const EXPECTED_CUSTOMER_EMAIL = "alex@example.com";
+const EXPECTED_ORDER = Object.freeze({
+  orderId: EXPECTED_ORDER_ID,
+  customerEmail: "alex@example.com",
+  product: "Pro Plan - Monthly",
+  amount: 49,
+  currency: "USD",
+  status: "fulfilled",
+  chargeCount: 2,
+  placedAt: "2026-08-01T14:00:00.000Z",
+});
+const EXPECTED_ORDER_STATUS = EXPECTED_ORDER.status;
+const EXPECTED_CUSTOMER_EMAIL = EXPECTED_ORDER.customerEmail;
 const EXPECTED_QUERY = "duplicate charge policy";
+// This instant is a fixture authority for the deterministic measurement, not
+// the wall clock of the machine replaying an immutable report.
+const DETERMINISTIC_MEASUREMENT_AT = "2026-01-01T00:00:02.000Z";
 const EXPECTED_KNOWLEDGE_EVIDENCE = {
   title: "Duplicate Charge Policy",
   source: "duplicate-charge-policy",
@@ -55,8 +68,7 @@ const EXPECTED_INPUT_KEYS = Object.freeze({
 const EXPECTED_ESCALATION_RESPONSE =
   "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.";
 const SHA256 = /^[a-f0-9]{64}$/;
-const GENERATION_ID =
-  /^knowledge_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const ORDER_KEYS = Object.freeze(Object.keys(EXPECTED_ORDER).sort());
 
 function canonicalInstant(value) {
   if (typeof value !== "string") return false;
@@ -112,19 +124,45 @@ function strictStrings(value) {
   return result;
 }
 
-function matchingOrder(value, expected = {}) {
+function matchingOrder(value) {
   const order = object(value);
   const orderValue = object(order.order);
   return (
+    exactKeys(order, ["found", "order"]) &&
     order.found === true &&
-    orderValue.orderId === (expected.orderId ?? EXPECTED_ORDER_ID) &&
-    orderValue.status === (expected.orderStatus ?? EXPECTED_ORDER_STATUS) &&
-    orderValue.customerEmail ===
-      (expected.customerEmail ?? EXPECTED_CUSTOMER_EMAIL)
+    exactKeys(orderValue, ORDER_KEYS) &&
+    Object.entries(EXPECTED_ORDER).every(
+      ([key, expected]) => orderValue[key] === expected,
+    )
   );
 }
 
-function acceptableKnowledgeEvidence(value, expected, binding) {
+/**
+ * Own the complete local trajectory fixture here, rather than learning it
+ * from an observation or accepting an expected object carried by a report.
+ * The UUID-like generation ID is deterministic per versioned dataset case so
+ * independently seeded local accounts cannot collide while each replay has a
+ * stable authority to compare against.
+ */
+export function trajectoryAuthorityForDatasetCase(caseId) {
+  const identity = String(caseId);
+  const digest = createHash("sha256").update(identity).digest("hex");
+  const generationId = `knowledge_${digest.slice(0, 8)}-${digest.slice(
+    8,
+    12,
+  )}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+  return {
+    generationId,
+    effectiveAt: EXPECTED_KNOWLEDGE_EVIDENCE.effectiveAt,
+    indexedAt: "2026-01-01T00:00:01.000Z",
+    measurementAt: DETERMINISTIC_MEASUREMENT_AT,
+    ...(identity === "registered-scorer-fixture-future-expiry"
+      ? { expiresAt: "2026-01-01T00:00:03.000Z" }
+      : {}),
+  };
+}
+
+function acceptableKnowledgeEvidence(value, expected, binding, authority) {
   const result = object(value);
   if (!exactKeys(result, ["sources"])) return null;
   const sources = strictRecords(result.sources);
@@ -153,13 +191,20 @@ function acceptableKnowledgeEvidence(value, expected, binding) {
     "title",
     "version",
   ];
-  const optionalProvenanceKeys = [
+  const hasExpiry = Object.hasOwn(authority, "expiresAt");
+  const requiredProvenanceKeyEncoding = JSON.stringify(requiredProvenanceKeys);
+  const expectedProvenanceKeys = [
     ...requiredProvenanceKeys,
-    "expiresAt",
+    ...(hasExpiry ? ["expiresAt"] : []),
   ].sort();
   if (
-    JSON.stringify(provenanceKeys) !== JSON.stringify(requiredProvenanceKeys) &&
-    JSON.stringify(provenanceKeys) !== JSON.stringify(optionalProvenanceKeys)
+    (hasExpiry &&
+      JSON.stringify(provenanceKeys) !==
+        JSON.stringify(expectedProvenanceKeys)) ||
+    (!hasExpiry &&
+      JSON.stringify(provenanceKeys) !== requiredProvenanceKeyEncoding &&
+      JSON.stringify(provenanceKeys) !==
+        JSON.stringify([...requiredProvenanceKeys, "expiresAt"].sort()))
   )
     return null;
   const documentHash = createHash("sha256")
@@ -182,14 +227,19 @@ function acceptableKnowledgeEvidence(value, expected, binding) {
     provenance.providerKind !== expected.providerKind ||
     provenance.providerAccountId !== binding.providerAccountId ||
     provenance.effectiveAt !== expected.effectiveAt ||
+    provenance.effectiveAt !== authority.effectiveAt ||
+    provenance.indexedAt !== authority.indexedAt ||
+    provenance.generationId !== authority.generationId ||
     !canonicalInstant(provenance.effectiveAt) ||
     !canonicalInstant(provenance.indexedAt) ||
     Date.parse(provenance.indexedAt) < Date.parse(provenance.effectiveAt) ||
-    typeof provenance.generationId !== "string" ||
-    !GENERATION_ID.test(provenance.generationId) ||
-    (provenance.expiresAt !== undefined &&
-      (!canonicalInstant(provenance.expiresAt) ||
-        Date.parse(provenance.expiresAt) <= Date.parse(provenance.effectiveAt)))
+    Date.parse(provenance.indexedAt) > Date.parse(authority.measurementAt) ||
+    (hasExpiry
+      ? provenance.expiresAt !== authority.expiresAt ||
+        !canonicalInstant(provenance.expiresAt) ||
+        Date.parse(provenance.expiresAt) <= Date.parse(provenance.indexedAt) ||
+        Date.parse(provenance.expiresAt) <= Date.parse(authority.measurementAt)
+      : provenance.expiresAt !== undefined)
   )
     return null;
   return provenance;
@@ -277,7 +327,7 @@ function expectedCallsMatch(value, expected) {
   const calls = strictRecords(value);
   const callOrder = expectedCallSequence(expected);
   if (!calls || !callOrder || calls.length !== callOrder.length) return false;
-  let generationId;
+  const authority = trajectoryAuthorityForDatasetCase(expected.caseId);
   for (let index = 0; index < calls.length; index += 1) {
     const call = calls[index];
     if (
@@ -304,17 +354,10 @@ function expectedCallsMatch(value, expected) {
           call.result,
           object(expected.knowledgeEvidence),
           object(input.binding),
+          authority,
         )
       )
         return false;
-      const sourceGeneration = acceptableKnowledgeEvidence(
-        call.result,
-        object(expected.knowledgeEvidence),
-        object(input.binding),
-      ).generationId;
-      if (generationId !== undefined && sourceGeneration !== generationId)
-        return false;
-      generationId = sourceGeneration;
       continue;
     }
     if (call.name === "lookup_order") {
@@ -326,7 +369,7 @@ function expectedCallsMatch(value, expected) {
           input.binding,
           object(expected.trustedBinding),
         ) ||
-        !matchingOrder(call.result, expected)
+        !matchingOrder(call.result)
       )
         return false;
       continue;
@@ -489,6 +532,7 @@ export function truthForDatasetCase(
     orderStatus: EXPECTED_ORDER_STATUS,
     allowedSources: ["Duplicate Charge Policy"],
     knowledgeEvidence: EXPECTED_KNOWLEDGE_EVIDENCE,
+    caseId: evaluationCaseId,
     customerEmail: EXPECTED_CUSTOMER_EMAIL,
     queryText: EXPECTED_QUERY,
     expectedCallOrder: EXPECTED_CALL_ORDER,

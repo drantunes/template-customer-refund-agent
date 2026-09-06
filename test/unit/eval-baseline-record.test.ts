@@ -138,6 +138,9 @@ describe("immutable eval reference records", () => {
         summary.modelOutputs as { triage: { requiresHumanReview: boolean } }
       ).triage.requiresHumanReview = false;
     });
+    mutate("lookup-before-refund", (summary) => {
+      summary.caseId = "wrong-summary-case";
+    });
     mutate("workflow-guard-mutation", (summary) => {
       const workflow = summary.workflow as {
         guarded: boolean;
@@ -431,6 +434,73 @@ describe("immutable eval reference records", () => {
         (calls[2].result.sources as Array<Record<string, unknown>>).push(
           structuredClone(completeSource(summary)),
         );
+      },
+    ])
+      mutate("lookup-before-refund", apply);
+    const sourceAt = (summary: Record<string, unknown>, index: 0 | 2) =>
+      (
+        toolCalls(summary)[index].result.sources as Array<{
+          metadata: Record<string, unknown>;
+        }>
+      )[0].metadata;
+    const orderAt = (summary: Record<string, unknown>, index: 1 | 3) =>
+      toolCalls(summary)[index].result.order as Record<string, unknown>;
+    // Every replay probe refreshes raw result, per-case evidence, aggregate
+    // evidence, and report hashes through mutate(), proving semantic rather
+    // than stale-hash rejection for the observed review-8 families.
+    for (const apply of [
+      (summary: Record<string, unknown>) => {
+        sourceAt(summary, 0).expiresAt = "2026-01-01T00:00:01.000Z";
+      },
+      (summary: Record<string, unknown>) => {
+        sourceAt(summary, 0).expiresAt = "2026-01-01T00:00:00.500Z";
+      },
+      (summary: Record<string, unknown>) => {
+        sourceAt(summary, 2).expiresAt = "2026-01-01T00:00:03.000Z";
+      },
+      (summary: Record<string, unknown>) => {
+        sourceAt(summary, 0).expiresAt = "2026-01-01T00:00:03.000Z";
+        sourceAt(summary, 2).expiresAt = "2026-01-01T00:00:04.000Z";
+      },
+      (summary: Record<string, unknown>) => {
+        sourceAt(summary, 2).indexedAt = "2026-01-01T00:00:01.500Z";
+      },
+      (summary: Record<string, unknown>) => {
+        sourceAt(summary, 0).indexedAt = "2026-01-01T00:00:03.000Z";
+        sourceAt(summary, 2).indexedAt = "2026-01-01T00:00:03.000Z";
+      },
+      (summary: Record<string, unknown>) => {
+        sourceAt(summary, 0).generationId =
+          "knowledge_11111111-1111-4111-8111-111111111111";
+        sourceAt(summary, 2).generationId =
+          "knowledge_11111111-1111-4111-8111-111111111111";
+      },
+    ])
+      mutate("lookup-before-refund", apply);
+    for (const [key, value] of [
+      ["amount", 1],
+      ["currency", "BTC"],
+      ["product", "Tampered Plan"],
+      ["chargeCount", 0],
+      ["placedAt", "2026-08-02T14:00:00.000Z"],
+    ] as const) {
+      mutate("lookup-before-refund", (summary) => {
+        orderAt(summary, 3)[key] = value;
+      });
+      mutate("lookup-before-refund", (summary) => {
+        orderAt(summary, 1)[key] = value;
+        orderAt(summary, 3)[key] = value;
+      });
+    }
+    for (const apply of [
+      (summary: Record<string, unknown>) => {
+        delete orderAt(summary, 3).amount;
+      },
+      (summary: Record<string, unknown>) => {
+        orderAt(summary, 3).untrusted = true;
+      },
+      (summary: Record<string, unknown>) => {
+        delete (toolCalls(summary)[3].result as { found?: unknown }).found;
       },
     ])
       mutate("lookup-before-refund", apply);

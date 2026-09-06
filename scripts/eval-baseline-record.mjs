@@ -109,7 +109,7 @@ function validExecutionSummary(axis, summary, expectedCase, measuredScore) {
   if (
     !plainObject(summary) ||
     summary.schemaVersion !== 1 ||
-    !nonEmptyString(summary.caseId) ||
+    summary.caseId !== expectedCase.id ||
     summary.scorerId !== scorerMapping[axis]?.scorerId ||
     !validScore(summary.score) ||
     summary.score !== measuredScore ||
