@@ -66,6 +66,22 @@ export interface FeedbackRecord {
   feedback: CaseFeedback;
   attributionState?: "known" | "legacy-unknown";
 }
+/**
+ * An authenticated staff investigation is observability bookkeeping, not a
+ * support turn or a case-state transition.  Its identifiers are server-derived
+ * correlation keys only; request/response content is never retained here.
+ */
+export interface SupervisorExecutionRecord {
+  id: string;
+  tenantId: string;
+  caseId: string;
+  threadId: string;
+  actorId: string;
+  runId: string;
+  traceId?: string;
+  state: "completed" | "failed";
+  createdAt: string;
+}
 export const retentionDefaults = {
   rawPayloadDays: 7,
   caseDays: 90,
@@ -114,6 +130,7 @@ export interface RetentionResult {
   rawPayloadsRedacted: number;
   casesRedacted: number;
   tracesRedacted: number;
+  supervisorExecutionsDeleted: number;
   auditsDeleted: number;
   messagesDeleted: number;
   turnsRedacted: number;
@@ -209,7 +226,7 @@ export class CaseStore {
   async close() {
     if (this.ownsClient) this.client.close();
   }
-  async migrate(target = 11): Promise<void> {
+  async migrate(target = 12): Promise<void> {
     await this.client.execute(
       "CREATE TABLE IF NOT EXISTS support_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
     );
@@ -217,7 +234,7 @@ export class CaseStore {
       "SELECT version FROM support_schema_migrations ORDER BY version",
     );
     let version = Number(applied.rows.at(-1)?.version ?? 0);
-    if (!Number.isInteger(target) || target < 0 || target > 11)
+    if (!Number.isInteger(target) || target < 0 || target > 12)
       throw new Error("Unsupported support schema target version.");
     // Versions 6 through 8 introduced append-only turn, decision, and audit
     // records. Their inverse would discard or weaken durable financial/replay
@@ -293,6 +310,10 @@ export class CaseStore {
     }
     if (version === 11) {
       await this.up11();
+      return;
+    }
+    if (version === 12) {
+      await this.up12();
       return;
     }
     await this.client.execute({
@@ -774,6 +795,36 @@ export class CaseStore {
       } catch {}
       throw error;
     }
+  }
+  /**
+   * Supervisor traces are not operational workflow turns.  Store their
+   * authenticated, tenant-qualified association append-only so a later
+   * follow-up cannot overwrite the original correlation on the case record.
+   */
+  private async up12() {
+    await this.client.executeMultiple(`
+      CREATE TABLE IF NOT EXISTS support_supervisor_executions (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        case_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        trace_id TEXT,
+        state TEXT NOT NULL CHECK(state IN ('completed', 'failed')),
+        created_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS support_supervisor_executions_run
+        ON support_supervisor_executions(run_id);
+      CREATE INDEX IF NOT EXISTS support_supervisor_executions_tenant_case_created
+        ON support_supervisor_executions(tenant_id, case_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS support_supervisor_executions_trace
+        ON support_supervisor_executions(trace_id);
+    `);
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (12, ?)",
+      args: [now()],
+    });
   }
   private async down(version: number) {
     if (version === 3) {
@@ -2104,6 +2155,57 @@ export class CaseStore {
   ): Promise<SupportTurnRecord | undefined> {
     return (await this.turns(caseId)).find((turn) => turn.id === turnId);
   }
+  /**
+   * Called only after the route has authenticated the actor and read the
+   * authoritative case binding.  Do not accept model-authored metadata here.
+   */
+  async recordSupervisorExecution(
+    execution: Omit<SupervisorExecutionRecord, "id" | "createdAt">,
+  ) {
+    await this.ensured();
+    await this.client.execute({
+      sql: "INSERT INTO support_supervisor_executions(id, tenant_id, case_id, thread_id, actor_id, run_id, trace_id, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      args: [
+        `supervisor_execution_${crypto.randomUUID()}`,
+        execution.tenantId,
+        execution.caseId,
+        execution.threadId,
+        execution.actorId,
+        execution.runId,
+        execution.traceId ?? null,
+        execution.state,
+        now(),
+      ],
+    });
+  }
+  /**
+   * Monitoring joins the stored association to the durable case scope.  The
+   * association's tenant field is therefore a second consistency check, never
+   * authority by itself.
+   */
+  async supervisorExecutionsForMonitoring(tenantId: string, caseIds: string[]) {
+    await this.ensured();
+    if (!caseIds.length) return [] as SupervisorExecutionRecord[];
+    const rows = await this.client.execute({
+      sql: `SELECT e.id, e.tenant_id, e.case_id, e.thread_id, e.actor_id, e.run_id, e.trace_id, e.state, e.created_at
+        FROM support_supervisor_executions e
+        JOIN support_cases c ON c.id = e.case_id
+        WHERE e.tenant_id = ? AND c.tenant_id = ? AND e.case_id IN (${caseIds.map(() => "?").join(", ")})
+        ORDER BY e.created_at`,
+      args: [tenantId, tenantId, ...caseIds],
+    });
+    return rows.rows.map((row) => ({
+      id: String(row.id),
+      tenantId: String(row.tenant_id),
+      caseId: String(row.case_id),
+      threadId: String(row.thread_id),
+      actorId: String(row.actor_id),
+      runId: String(row.run_id),
+      traceId: row.trace_id ? String(row.trace_id) : undefined,
+      state: String(row.state) as SupervisorExecutionRecord["state"],
+      createdAt: String(row.created_at),
+    }));
+  }
   private async insertLegacyFeedback(
     tx: Pick<Client, "execute">,
     caseId: string,
@@ -2870,6 +2972,19 @@ export class CaseStore {
     const traceCutoff = cutoff(policy.traceDays);
     const caseCutoff = cutoff(policy.caseDays);
     const auditCutoff = cutoff(policy.financialAuditDays);
+    // These records contain only correlation identifiers, but their trace
+    // binding must not outlive the 30-day observability retention window.
+    // A missing table is valid only while upgrading a pre-v12 database.
+    let supervisorExecutionsDeleted = 0;
+    try {
+      const deleted = await this.client.execute({
+        sql: "DELETE FROM support_supervisor_executions WHERE created_at < ?",
+        args: [traceCutoff],
+      });
+      supervisorExecutionsDeleted = Number(deleted.rowsAffected ?? 0);
+    } catch (error) {
+      if (!String(error).includes("no such table")) throw error;
+    }
     const rows = await this.client.execute(
       "SELECT id, data, version, created_at, accepted_at FROM support_cases WHERE COALESCE(accepted_at, created_at) < ? OR updated_at < ?",
       [rawCutoff, traceCutoff],
@@ -3106,6 +3221,7 @@ export class CaseStore {
       rawPayloadsRedacted,
       casesRedacted,
       tracesRedacted,
+      supervisorExecutionsDeleted,
       auditsDeleted: Number(audits.rowsAffected ?? 0),
       messagesDeleted,
       turnsRedacted,

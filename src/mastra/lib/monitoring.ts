@@ -145,9 +145,18 @@ function operationMetrics(spans: StoredSpan[]): OperationMetrics[] {
     }));
 }
 
-async function readTrustedSpanMetrics(mastra: Mastra, cases: SupportCase[]) {
+async function readTrustedSpanMetrics(
+  mastra: Mastra,
+  tenantId: string,
+  cases: SupportCase[],
+) {
   const observability = await mastra.getStorage()?.getStore("observability");
   const traceIds = new Set<string>();
+  const supervisorExecutions =
+    await caseStore.supervisorExecutionsForMonitoring(
+      tenantId,
+      cases.map((supportCase) => supportCase.id),
+    );
   for (const supportCase of cases) {
     for (const turn of await caseStore.turns(supportCase.id)) {
       const telemetry = recordAt(turn.outcome?.telemetry);
@@ -158,6 +167,8 @@ async function readTrustedSpanMetrics(mastra: Mastra, cases: SupportCase[]) {
     // turn reference and later projections cannot overwrite it.
     if (supportCase.traceId) traceIds.add(supportCase.traceId);
   }
+  for (const execution of supervisorExecutions)
+    if (execution.traceId) traceIds.add(execution.traceId);
   if (!observability)
     return {
       observedTraces: 0,
@@ -264,6 +275,9 @@ async function readTrustedSpanMetrics(mastra: Mastra, cases: SupportCase[]) {
     ),
     unavailable: [
       ...(traceIds.size === 0 ? ["trace-correlation"] : []),
+      ...(supervisorExecutions.some((execution) => !execution.traceId)
+        ? ["partial-supervisor-trace-correlation"]
+        : []),
       ...(traceReadFailures > 0 ? ["partial-trace-read"] : []),
       ...(models.length === 0 ? ["model-usage"] : []),
       ...(models.some((span) => {
@@ -490,7 +504,7 @@ export async function computeMonitoringSummary(
   const failures = await caseStore.monitoringOperationalFailures(
     cases.map((item) => item.id),
   );
-  const telemetry = await readTrustedSpanMetrics(mastra, cases);
+  const telemetry = await readTrustedSpanMetrics(mastra, tenantId, cases);
   if (failures.financial > 0 && !telemetry.alerts.includes("refund-failure"))
     telemetry.alerts.push("refund-failure");
   return {

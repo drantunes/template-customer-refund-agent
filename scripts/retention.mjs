@@ -73,6 +73,7 @@ async function sweepCases(client, policy, current = new Date()) {
     rawPayloadsRedacted: 0,
     casesRedacted: 0,
     tracesRedacted: 0,
+    supervisorExecutionsDeleted: 0,
     auditsDeleted: 0,
     messagesDeleted: 0,
     turnsRedacted: 0,
@@ -283,6 +284,13 @@ async function sweepCases(client, policy, current = new Date()) {
     args: [auditCutoff],
   });
   result.auditsDeleted = Number(audits.rowsAffected ?? 0);
+  if (await tableExists(client, "support_supervisor_executions")) {
+    const deleted = await client.execute({
+      sql: "DELETE FROM support_supervisor_executions WHERE created_at < ?",
+      args: [traceCutoff],
+    });
+    result.supervisorExecutionsDeleted = Number(deleted.rowsAffected ?? 0);
+  }
   if (await tableExists(client, "local_refunds")) {
     const reasons = await client.execute({
       sql: "UPDATE local_refunds SET reason = '[redacted]' WHERE issued_at < ? AND reason <> '[redacted]'",
@@ -314,6 +322,7 @@ try {
     "support_decisions",
     "support_actions",
     "support_audit",
+    "support_supervisor_executions",
   ])
     if (!(await tableExists(client, table)))
       throw new Error(

@@ -212,6 +212,7 @@ describe("registered support supervisor read-only acceptance", () => {
       { publishKnowledge },
       providers,
       { localRuntime },
+      monitoring,
       auth,
       routes,
       sqlite,
@@ -222,6 +223,7 @@ describe("registered support supervisor read-only acceptance", () => {
       import("../../src/mastra/lib/publish-knowledge"),
       import("../../src/mastra/providers/registry"),
       import("../../src/mastra/runtime/local-runtime"),
+      import("../../src/mastra/lib/monitoring"),
       import("../../src/mastra/server/auth"),
       import("../../src/mastra/server/routes"),
       import("../../src/mastra/lib/sqlite-client"),
@@ -514,6 +516,182 @@ describe("registered support supervisor read-only acceptance", () => {
     });
     expect(Number(messages.rows[0]?.count)).toBeGreaterThanOrEqual(4);
     expect(JSON.stringify((await counts()).rows[0])).toBe(before);
+
+    // The authenticated supervisor is a separate native execution, not the
+    // mutable operational response turn. Flush the real storage exporter and
+    // verify that every completed investigation is discoverable through its
+    // durable tenant/case/thread/run/trace association.
+    await mastra.observability.flush();
+    const associations = await caseStore.supervisorExecutionsForMonitoring(
+      binding.tenantId,
+      [caseId, insufficientCaseId],
+    );
+    expect(associations).toHaveLength(4);
+    expect(associations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tenantId: binding.tenantId,
+          caseId,
+          threadId: supportCase.threadIdForCase(caseId, binding.tenantId),
+          actorId: "support-agent-demo",
+          runId: expect.stringMatching(/^supervisor_/),
+          traceId: expect.any(String),
+          state: "completed",
+        }),
+        expect.objectContaining({
+          caseId: insufficientCaseId,
+          traceId: expect.any(String),
+          state: "completed",
+        }),
+      ]),
+    );
+    const localMonitoring = await monitoring.computeMonitoringSummary(
+      mastra,
+      binding.tenantId,
+    );
+    expect(localMonitoring.telemetry.observedTraces).toBeGreaterThanOrEqual(4);
+    expect(localMonitoring.telemetry.observedSpans).toBeGreaterThan(0);
+    expect(
+      localMonitoring.telemetry.modelUsage.reduce(
+        (sum, item) => sum + item.inputTokens + item.outputTokens,
+        0,
+      ),
+    ).toBeGreaterThan(0);
+    expect(localMonitoring.telemetry.providerCalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          operation: "knowledge.search",
+          calls: expect.any(Number),
+        }),
+        expect.objectContaining({
+          operation: "commerce.find_order",
+          calls: expect.any(Number),
+        }),
+      ]),
+    );
+
+    // A new client proves associations survive reopening the local store and
+    // are not a request-local monitoring cache.
+    const { CaseStore } = await import("../../src/mastra/lib/case-store");
+    const reopened = new CaseStore({ url: `file:${databasePath}` });
+    closeClients.push(() => reopened.close());
+    await expect(
+      reopened.supervisorExecutionsForMonitoring(binding.tenantId, [caseId]),
+    ).resolves.toHaveLength(3);
+
+    // A real same-route investigation for the other tenant must produce its
+    // own exported trace without changing this tenant's aggregate.
+    const foreignSupervisor = await app.request(
+      `http://support.test/support/cases/${foreignBinding.externalConversationId}/supervisor`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${auth.issueLocalSession({
+            id: "other-tenant-agent",
+          })}`,
+        },
+        body: JSON.stringify({ message: "Inspect my own tenant case." }),
+      },
+    );
+    // The externally supplied conversation ID is deliberately not a case ID.
+    // The trusted route must reject it before an association can be written.
+    expect(foreignSupervisor.status).toBe(404);
+    const foreignCase = await caseStore.list();
+    const ownedForeign = foreignCase.find(
+      (item) =>
+        item.id !== caseId && item.metadata.ownerId === "other-tenant-agent",
+    );
+    expect(ownedForeign).toBeDefined();
+    const actualForeignSupervisor = await app.request(
+      `http://support.test/support/cases/${ownedForeign!.id}/supervisor`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${auth.issueLocalSession({
+            id: "other-tenant-agent",
+          })}`,
+        },
+        body: JSON.stringify({ message: "Inspect my own tenant case." }),
+      },
+    );
+    expect(actualForeignSupervisor.status).toBe(200);
+    await mastra.observability.flush();
+    const localAfterForeign = await monitoring.computeMonitoringSummary(
+      mastra,
+      binding.tenantId,
+    );
+    expect(localAfterForeign.telemetry).toMatchObject({
+      observedTraces: localMonitoring.telemetry.observedTraces,
+      modelUsage: localMonitoring.telemetry.modelUsage,
+      providerCalls: localMonitoring.telemetry.providerCalls,
+    });
+    expect(
+      (
+        await monitoring.computeMonitoringSummary(
+          mastra,
+          foreignBinding.tenantId,
+        )
+      ).telemetry.observedTraces,
+    ).toBeGreaterThan(0);
+
+    // A budget-blocked authenticated execution still receives durable server
+    // correlation. It has no native trace because transport was prevented, so
+    // monitoring reports partial availability instead of treating it as zero.
+    supervisor.__updateModel({
+      model: {
+        specificationVersion: "v2",
+        provider: "unpriced-supervisor-provider",
+        modelId: "unpriced-supervisor",
+        supportedUrls: {},
+        async doGenerate() {
+          throw new Error("the unpriced transport must not execute");
+        },
+        async doStream() {
+          throw new Error("the unpriced transport must not stream");
+        },
+      } as never,
+    });
+    const blocked = await app.request(
+      `http://support.test/support/cases/${caseId}/supervisor`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          message: "Run an unpriced validation.",
+          validation: { mode: "sandbox" },
+        }),
+      },
+    );
+    expect(blocked.status).toBe(422);
+    expect(
+      await caseStore.supervisorExecutionsForMonitoring(binding.tenantId, [
+        caseId,
+      ]),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ state: "failed", traceId: undefined }),
+      ]),
+    );
+    expect(
+      (await monitoring.computeMonitoringSummary(mastra, binding.tenantId))
+        .telemetry.unavailable,
+    ).toContain("partial-supervisor-trace-correlation");
+
+    // Trace associations use the same 30-day lifecycle as exported spans.
+    await client.execute({
+      sql: "UPDATE support_supervisor_executions SET created_at = ? WHERE case_id = ?",
+      args: ["2026-01-01T00:00:00.000Z", insufficientCaseId],
+    });
+    await caseStore.enforceRetention(
+      () => new Date("2026-03-15T00:00:00.000Z"),
+    );
+    await expect(
+      caseStore.supervisorExecutionsForMonitoring(binding.tenantId, [
+        insufficientCaseId,
+      ]),
+    ).resolves.toEqual([]);
     const readOnlyTools = [
       "lookup_customer_refund_history",
       "lookup_order",
