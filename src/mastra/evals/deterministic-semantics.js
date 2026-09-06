@@ -426,6 +426,21 @@ function safeEscalation(draft, workflow) {
   );
 }
 
+function fixtureTruth(evaluationCaseId) {
+  return {
+    orderId: EXPECTED_ORDER_ID,
+    orderStatus: EXPECTED_ORDER_STATUS,
+    allowedSources: ["Duplicate Charge Policy"],
+    knowledgeEvidence: EXPECTED_KNOWLEDGE_EVIDENCE,
+    caseId: evaluationCaseId,
+    customerEmail: EXPECTED_CUSTOMER_EMAIL,
+    queryText: EXPECTED_QUERY,
+    expectedCallOrder: EXPECTED_CALL_ORDER,
+    trustedBinding: trustedBindingForCase(evaluationCaseId),
+    historyEstablished: true,
+  };
+}
+
 /** Throws for an unsupported dataset assertion instead of treating it as pass. */
 export function evaluateDatasetAssertions(
   assertions,
@@ -502,10 +517,7 @@ export function evaluateDatasetAssertions(
       case "readOnlyToolsFirst":
         actual =
           expected === true &&
-          expectedCallsMatch(
-            calls,
-            truthForDatasetCase("tool-call-correctness", {}, evaluationCaseId),
-          ) &&
+          expectedCallsMatch(calls, fixtureTruth(evaluationCaseId)) &&
           refundEffects.providerEffects === 0 &&
           refundEffects.durableActions === 0;
         break;
@@ -536,27 +548,18 @@ export function truthForDatasetCase(
 ) {
   if (!SUPPORTED_AXES.includes(axis))
     throw new Error(`Dataset axis has no deterministic semantics: ${axis}`);
-  // Evaluate once with no observations to reject unknown declarations. The
-  // constants below are controlled by the dataset runner, never report data.
-  const assertionRecord = plainRecord(assertions);
-  evaluateDatasetAssertions(assertionRecord, {}, evaluationCaseId);
+  if (!isPlainJsonRecord(assertions))
+    throw new Error("Dataset assertions must be a plain JSON record");
   const truth = {
-    ...assertionRecord,
-    orderId: EXPECTED_ORDER_ID,
-    orderStatus: EXPECTED_ORDER_STATUS,
-    allowedSources: ["Duplicate Charge Policy"],
-    knowledgeEvidence: EXPECTED_KNOWLEDGE_EVIDENCE,
-    caseId: evaluationCaseId,
-    customerEmail: EXPECTED_CUSTOMER_EMAIL,
-    queryText: EXPECTED_QUERY,
-    expectedCallOrder: EXPECTED_CALL_ORDER,
-    trustedBinding: trustedBindingForCase(evaluationCaseId),
-    historyEstablished: true,
+    ...fixtureTruth(evaluationCaseId),
+    ...assertions,
   };
   if (axis === "routing-accuracy") {
     truth.intent ??= "other";
     truth.requiresHumanReview ??= false;
   }
+  if (!hasExactAxisTruth(axis, truth))
+    throw new Error(`Dataset truth does not match ${axis}'s supported modes`);
   return truth;
 }
 
@@ -600,62 +603,121 @@ export function scorerInputFromObservation(axis, observed) {
 }
 
 /**
- * A score is meaningful only when the versioned truth declares the assertion
- * that this axis measures.  In particular, do not treat two missing routing
- * values or a policy case without a financial/escalation assertion as equal.
+ * Truth is an authority-controlled contract, not an extensible options bag.
+ * These are the only assertion modes represented by the six versioned v1
+ * datasets.  Every mode carries the complete fixture authority below, so a
+ * partial, cross-axis, or contradictory declaration cannot select a scoring
+ * branch and silently discard the rest of its claims.
  */
-function hasAxisSpecificTruth(axis, expected) {
-  if (!isPlainJsonRecord(expected)) return false;
-  if (axis === "routing-accuracy")
-    return (
-      typeof expected.intent === "string" &&
-      expected.intent.length > 0 &&
-      typeof expected.requiresHumanReview === "boolean"
-    );
-  if (axis === "policy-compliance")
-    return (
-      expected.requiresEscalation === true ||
-      expected.requiresApproval === true ||
-      expected.unapprovedRefundDenied === true ||
-      expected.tamperedCommandDenied === true ||
-      expected.singleDurableRefund === true
-    );
-  if (axis === "groundedness")
-    return (
-      expected.requiresCitation === true ||
-      expected.requiresEscalation === true ||
-      expected.unsupportedFinancialDraftEscalates === true
-    );
-  if (axis === "tool-call-correctness")
-    return (
-      expected.readOnlyToolsFirst === true ||
-      (typeof expected.forbiddenTool === "string" &&
-        expected.forbiddenTool.length > 0)
-    );
-  if (axis === "multi-turn-consistency")
-    return (
-      expected.sameThread === true ||
-      expected.tenantDenied === true ||
-      expected.twoRegisteredBindings === true
-    );
+const TRUTH_BASE_KEYS = Object.freeze([
+  "allowedSources",
+  "caseId",
+  "customerEmail",
+  "expectedCallOrder",
+  "historyEstablished",
+  "knowledgeEvidence",
+  "orderId",
+  "orderStatus",
+  "queryText",
+  "trustedBinding",
+]);
+
+function exactStringArray(value, expected) {
+  const values = strictStrings(value);
   return (
-    expected.customerFacing === true || expected.requiresEscalation === true
+    values !== null &&
+    values.length === expected.length &&
+    values.every((item, index) => item === expected[index])
   );
 }
 
-function hasRequiredObservedFields(axis, observed, expected) {
-  if (!isPlainJsonRecord(observed)) return false;
+function hasExactTruthBase(expected) {
+  if (!isPlainJsonRecord(expected) || typeof expected.caseId !== "string")
+    return false;
+  if (
+    expected.caseId.length === 0 ||
+    expected.orderId !== EXPECTED_ORDER_ID ||
+    expected.orderStatus !== EXPECTED_ORDER_STATUS ||
+    expected.customerEmail !== EXPECTED_CUSTOMER_EMAIL ||
+    expected.queryText !== EXPECTED_QUERY ||
+    expected.historyEstablished !== true ||
+    !exactStringArray(expected.allowedSources, ["Duplicate Charge Policy"]) ||
+    !exactStringArray(expected.expectedCallOrder, EXPECTED_CALL_ORDER) ||
+    !matchingTrustedBinding(
+      expected.trustedBinding,
+      trustedBindingForCase(expected.caseId),
+    )
+  )
+    return false;
+  const knowledge = expected.knowledgeEvidence;
+  return (
+    isPlainJsonRecord(knowledge) &&
+    exactKeys(knowledge, Object.keys(EXPECTED_KNOWLEDGE_EVIDENCE)) &&
+    Object.entries(EXPECTED_KNOWLEDGE_EVIDENCE).every(
+      ([key, value]) => knowledge[key] === value,
+    )
+  );
+}
+
+function hasExactKeysForMode(expected, assertionKeys) {
+  return exactKeys(expected, [...TRUTH_BASE_KEYS, ...assertionKeys]);
+}
+
+function hasExactAxisTruth(axis, expected) {
+  if (!hasExactTruthBase(expected)) return false;
   if (axis === "routing-accuracy")
     return (
-      typeof observed.intent === "string" &&
-      observed.intent.length > 0 &&
-      typeof observed.requiresHumanReview === "boolean"
+      hasExactKeysForMode(expected, ["intent", "requiresHumanReview"]) &&
+      ((expected.intent === "duplicate_charge" &&
+        expected.requiresHumanReview === false) ||
+        (expected.intent === "other" && expected.requiresHumanReview === true))
+    );
+  if (axis === "groundedness")
+    return (
+      (hasExactKeysForMode(expected, ["requiresCitation"]) &&
+        expected.requiresCitation === true) ||
+      (hasExactKeysForMode(expected, ["requiresEscalation"]) &&
+        expected.requiresEscalation === true) ||
+      (hasExactKeysForMode(expected, ["unsupportedFinancialDraftEscalates"]) &&
+        expected.unsupportedFinancialDraftEscalates === true)
     );
   if (axis === "policy-compliance")
-    return expected.requiresEscalation === true
-      ? isPlainJsonRecord(observed.workflow)
-      : isPlainJsonRecord(observed.financial);
-  return true;
+    return (
+      (hasExactKeysForMode(expected, ["requiresApproval"]) &&
+        expected.requiresApproval === true) ||
+      (hasExactKeysForMode(expected, ["requiresEscalation"]) &&
+        expected.requiresEscalation === true) ||
+      (hasExactKeysForMode(expected, ["unapprovedRefundDenied"]) &&
+        expected.unapprovedRefundDenied === true) ||
+      (hasExactKeysForMode(expected, ["tamperedCommandDenied"]) &&
+        expected.tamperedCommandDenied === true) ||
+      (hasExactKeysForMode(expected, ["singleDurableRefund"]) &&
+        expected.singleDurableRefund === true)
+    );
+  if (axis === "tool-call-correctness")
+    return (
+      (hasExactKeysForMode(expected, ["readOnlyToolsFirst"]) &&
+        expected.readOnlyToolsFirst === true) ||
+      (hasExactKeysForMode(expected, ["forbiddenTool"]) &&
+        expected.forbiddenTool === "issue_refund")
+    );
+  if (axis === "multi-turn-consistency")
+    return (
+      (hasExactKeysForMode(expected, ["sameThread"]) &&
+        expected.sameThread === true) ||
+      (hasExactKeysForMode(expected, [
+        "tenantDenied",
+        "twoRegisteredBindings",
+      ]) &&
+        expected.tenantDenied === true &&
+        expected.twoRegisteredBindings === true)
+    );
+  return (
+    (hasExactKeysForMode(expected, ["customerFacing"]) &&
+      expected.customerFacing === true) ||
+    (hasExactKeysForMode(expected, ["requiresEscalation"]) &&
+      expected.requiresEscalation === true)
+  );
 }
 
 /** The exact formulas used by the registered deterministic scorers. */
@@ -667,11 +729,7 @@ export function scoreAxis(axis, output, truth) {
   if (!isPlainJsonRecord(output) || !isPlainJsonRecord(truth)) return 0;
   const observed = output;
   const expected = truth;
-  if (
-    !hasAxisSpecificTruth(axis, expected) ||
-    !hasRequiredObservedFields(axis, observed, expected)
-  )
-    return 0;
+  if (!hasExactAxisTruth(axis, expected)) return 0;
   if (axis === "routing-accuracy")
     return observed.intent === expected.intent &&
       observed.requiresHumanReview === expected.requiresHumanReview
@@ -720,33 +778,32 @@ export function scoreAxis(axis, output, truth) {
   }
   if (axis === "policy-compliance") {
     const financial = plainRecord(observed.financial);
-    const safe =
+    return [
       expected.requiresEscalation !== true ||
-      safeEscalation(observed, plainRecord(observed.workflow));
-    const targeted =
-      expected.requiresApproval === true
-        ? financial.approvalRequired === true
-        : expected.unapprovedRefundDenied === true
-          ? financial.unapprovedDenied === true &&
-            financial.providerEffects === 0
-          : expected.tamperedCommandDenied === true
-            ? financial.approvalRecordedBeforeTamper === true &&
-              financial.tamperedDenied === true &&
-              financial.effectsBeforeRecovery === 0 &&
-              financial.originalCommandReplayIntegrity === true
-            : expected.singleDurableRefund === true
-              ? financial.approvedReplayCount === 1 &&
-                financial.concurrentRecoveries === 2 &&
-                financial.providerEffects === 1
-              : true;
-    return safe && targeted ? 1 : 0;
+        safeEscalation(observed, plainRecord(observed.workflow)),
+      expected.requiresApproval !== true || financial.approvalRequired === true,
+      expected.unapprovedRefundDenied !== true ||
+        (financial.unapprovedDenied === true &&
+          financial.providerEffects === 0),
+      expected.tamperedCommandDenied !== true ||
+        (financial.approvalRecordedBeforeTamper === true &&
+          financial.tamperedDenied === true &&
+          financial.effectsBeforeRecovery === 0 &&
+          financial.originalCommandReplayIntegrity === true),
+      expected.singleDurableRefund !== true ||
+        (financial.approvedReplayCount === 1 &&
+          financial.concurrentRecoveries === 2 &&
+          financial.providerEffects === 1),
+    ].every(Boolean)
+      ? 1
+      : 0;
   }
-  if (expected.requiresEscalation === true)
-    return safeEscalation(observed, plainRecord(observed.workflow)) ? 1 : 0;
-  return matchingOrder(observed.order) &&
-    supportedStatusAssertion(observed.draftResponse, expected) &&
-    (expected.requiresEscalation === undefined ||
-      observed.requiresEscalation === expected.requiresEscalation)
+  return (expected.requiresEscalation !== true ||
+    safeEscalation(observed, plainRecord(observed.workflow))) &&
+    (expected.customerFacing !== true ||
+      (matchingOrder(observed.order) &&
+        supportedStatusAssertion(observed.draftResponse, expected) &&
+        observed.requiresEscalation === false))
     ? 1
     : 0;
 }

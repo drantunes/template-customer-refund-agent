@@ -821,28 +821,21 @@ describe("immutable eval reference records", () => {
 
   it("fails closed for missing or malformed scorer evidence and truth", async () => {
     const record = measuredReference();
-    const axes = [
-      "groundedness",
-      "policy-compliance",
-      "routing-accuracy",
-      "tool-call-correctness",
-      "multi-turn-consistency",
-      "resolution-quality",
-    ];
-    const validPairs = axes.map((axis) => {
-      const item = (record.perCaseScores as CaseScore[]).find(
-        (candidate) => candidate.axis === axis,
-      );
-      if (!item) throw new Error(`Missing valid ${axis} dataset case`);
+    const validPairs = (record.perCaseScores as CaseScore[]).map((item) => {
       return {
-        axis,
+        axis: item.axis,
         output: scorerInputFromObservation(
-          axis,
+          item.axis,
           observation(item.evidence.summary),
         ),
-        truth: truthForDatasetCase(axis, assertionsForCase(item.id), item.id),
+        truth: truthForDatasetCase(
+          item.axis,
+          assertionsForCase(item.id),
+          item.id,
+        ),
       };
     });
+    expect(validPairs).toHaveLength(16);
 
     for (const { axis, output, truth } of validPairs) {
       const scorer = registeredScorer(axis);
@@ -941,5 +934,145 @@ describe("immutable eval reference records", () => {
     await expect(
       supportEvalScorerRegistry.routingAccuracy.run({ output: routingOutput }),
     ).resolves.toMatchObject({ score: 0 });
+  });
+
+  it("rejects every unsupported truth mode directly and through registered scorers", async () => {
+    const record = measuredReference();
+    const pairFor = (id: string) => {
+      const item = caseScore(record, id);
+      return {
+        axis: item.axis,
+        output: scorerInputFromObservation(
+          item.axis,
+          observation(item.evidence.summary),
+        ),
+        truth: truthForDatasetCase(item.axis, assertionsForCase(id), id),
+      };
+    };
+    const rejects = async (
+      id: string,
+      label: string,
+      mutate: (truth: Record<string, unknown>) => void,
+    ) => {
+      const pair = pairFor(id);
+      const invalidTruth = structuredClone(pair.truth);
+      mutate(invalidTruth);
+      expect(scoreAxis(pair.axis, pair.output, invalidTruth), label).toBe(0);
+      await expect(
+        registeredScorer(pair.axis).run({
+          output: pair.output,
+          groundTruth: invalidTruth,
+        }),
+        label,
+      ).resolves.toMatchObject({ score: 0 });
+    };
+
+    // These are the independently reproduced false-green combinations: each
+    // adds a second mode that the old precedence logic ignored.
+    await rejects(
+      "approval-required",
+      "policy contradictory modes",
+      (truth) => {
+        truth.unapprovedRefundDenied = true;
+      },
+    );
+    await rejects(
+      "lookup-before-refund",
+      "tool-call contradictory modes",
+      (truth) => {
+        truth.forbiddenTool = "lookup_order";
+      },
+    );
+    await rejects(
+      "unsupported-policy",
+      "groundedness contradictory modes",
+      (truth) => {
+        truth.requiresCitation = true;
+      },
+    );
+    await rejects(
+      "insufficient-evidence",
+      "resolution contradictory modes",
+      (truth) => {
+        truth.customerFacing = true;
+      },
+    );
+    await rejects(
+      "follow-up-stays-scoped",
+      "multi-turn contradictory modes",
+      (truth) => {
+        truth.tenantDenied = true;
+      },
+    );
+
+    const matrix = [
+      {
+        id: "duplicate-charge",
+        crossAxis: "requiresApproval",
+        wrongType: "intent",
+        conflicting: (truth: Record<string, unknown>) => {
+          truth.requiresHumanReview = true;
+        },
+      },
+      {
+        id: "approval-required",
+        crossAxis: "requiresCitation",
+        wrongType: "requiresApproval",
+        conflicting: (truth: Record<string, unknown>) => {
+          truth.unapprovedRefundDenied = true;
+        },
+      },
+      {
+        id: "grounded-policy",
+        crossAxis: "intent",
+        wrongType: "requiresCitation",
+        conflicting: (truth: Record<string, unknown>) => {
+          truth.requiresEscalation = true;
+        },
+      },
+      {
+        id: "lookup-before-refund",
+        crossAxis: "customerFacing",
+        wrongType: "readOnlyToolsFirst",
+        conflicting: (truth: Record<string, unknown>) => {
+          truth.forbiddenTool = "lookup_order";
+        },
+      },
+      {
+        id: "follow-up-stays-scoped",
+        crossAxis: "forbiddenTool",
+        wrongType: "sameThread",
+        conflicting: (truth: Record<string, unknown>) => {
+          truth.tenantDenied = true;
+        },
+      },
+      {
+        id: "clear-resolution",
+        crossAxis: "sameThread",
+        wrongType: "customerFacing",
+        conflicting: (truth: Record<string, unknown>) => {
+          truth.requiresEscalation = true;
+        },
+      },
+    ];
+    for (const entry of matrix) {
+      await rejects(entry.id, `${entry.id} unknown key`, (truth) => {
+        truth.bogusAssertion = true;
+      });
+      await rejects(entry.id, `${entry.id} cross-axis assertion`, (truth) => {
+        truth[entry.crossAxis] = true;
+      });
+      await rejects(entry.id, `${entry.id} wrong assertion type`, (truth) => {
+        truth[entry.wrongType] = "true";
+      });
+      await rejects(entry.id, `${entry.id} partial contract`, (truth) => {
+        delete truth.historyEstablished;
+      });
+      await rejects(
+        entry.id,
+        `${entry.id} conflicting mode`,
+        entry.conflicting,
+      );
+    }
   });
 });
