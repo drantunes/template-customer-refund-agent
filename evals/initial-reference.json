@@ -2,11 +2,11 @@
   "kind": "support-eval-initial-reference",
   "runner": "deterministic-native-observed-runtime-v4",
   "executionMode": "deterministic-scripted-transport-no-paid-routes",
-  "implementationSha": "9bb1ffe4eb5611973d98b121855c959aad2d3c44",
-  "runnerSourceHash": "deb6a3347c2dab28757f403dd2bab133c62ec24444d2e0d7f44ff5f9c22dec1c",
+  "implementationSha": "d743055b24f3c8e7c8d2354a5a2fb6e3f04bbd1a",
+  "runnerSourceHash": "0ee7198262e0221f617bb83cdea1c87dc87820a9ff1d44c2db0821be6f2e82fb",
   "scorerSourceHashes": {
     "src/mastra/evals/index.ts": "f472b34cb45e82943d7932409ea30bfb6da45446ef740add5556e79e20e2cc23",
-    "src/mastra/evals/deterministic-semantics.js": "c628f976df6089480cb863b69977a798c1ffc34ba260a2c61586ffdbc73e1368"
+    "src/mastra/evals/deterministic-semantics.js": "f4da1e68fabaabf89903f629fab6b42b7f068ad0cdc6de4147cda8cd0232fd8a"
   },
   "datasetHashes": {
     "groundedness.v1.json": "204385f1588c7846c631afd6233400950a632cb0f285d21562e564249d6d1dfc",
@@ -23,10 +23,10 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "d938431560ebc01c6d07a7406b47cf030935672b0718215cbbd7e25df284353b",
+        "evidenceHash": "ac6ea60d802bef5749f5d6bf2fa837bc650bfa69d864a6ffc11a44057a9c1e63",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-5aade780-10db-45ff-ae68-04e0d70341f4",
+          "caseId": "phase004-eval-bf102e5b-15c9-427d-923b-088c18202946",
           "scorerId": "groundedness",
           "score": 1,
           "assertions": {
@@ -68,10 +68,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "5d03211ced132b9f1d9373a83909d6e0bf6f51f6ca3a920b922f22eddf0521a9",
+        "evidenceHash": "12bcfbca9a16c55f1e0efebbfc1242117821d8b4b746e3faf96730a7a555a59b",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-52143208-1335-4fc1-bf2a-18115b8e3877",
+          "caseId": "phase004-eval-75d24875-2d50-45bc-ab1a-b9ea61d1de47",
           "scorerId": "groundedness",
           "score": 1,
           "assertions": {
@@ -141,10 +141,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "7cfff4d922bd2f055a457431c93c78c31445b307765b496d4d73b1147400bffc",
+        "evidenceHash": "5edc76acac56e91f8b1c732ca5d58b6b617b8bdd277198c3cb1aa2ddccd8770c",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-30d251ee-decd-44dd-9ec9-b293f9a206ad",
+          "caseId": "phase004-eval-8ae4056b-8b60-4e12-bb04-021e021eb4f5",
           "scorerId": "groundedness",
           "score": 1,
           "assertions": {
@@ -214,10 +214,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "0e4ab6eb109aa97f0460435603a0a37d5edc5e2ad384175180d25b3453d3d0e0",
+        "evidenceHash": "bb046379245a1f8292c6578be78a2a9fc4f36263ab2c686f3708cd6095cdfe18",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-59bb1f49-a37b-44af-b994-2bb7648db08d",
+          "caseId": "phase004-eval-303b3e54-ee00-41fd-a994-ecd108460d93",
           "scorerId": "multi-turn-consistency",
           "score": 1,
           "assertions": {
@@ -227,9 +227,104 @@
             "answers": [
               "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
               "Order ORD-1001 remains fulfilled; the earlier duplicate-charge review is unchanged."
+            ],
+            "turns": [
+              {
+                "turn": 1,
+                "answer": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund."
+              },
+              {
+                "turn": 2,
+                "answer": "Order ORD-1001 remains fulfilled; the earlier duplicate-charge review is unchanged."
+              }
             ]
           },
-          "toolCalls": [],
+          "toolCalls": [
+            {
+              "sequence": 1,
+              "turn": 1,
+              "name": "search_support_knowledge",
+              "input": {
+                "queryText": "duplicate charge policy",
+                "topK": 1
+              },
+              "result": {
+                "sources": [
+                  {
+                    "title": "Duplicate Charge Policy",
+                    "source": "duplicate-charge-policy",
+                    "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95"
+                  }
+                ]
+              },
+              "rawResultHash": "b71a63285336a36b69fb0bae7aab5cbd1806d9a4dd1085083f7c0890b9aa29d9"
+            },
+            {
+              "sequence": 2,
+              "turn": 1,
+              "name": "lookup_order",
+              "input": {
+                "customerEmail": "alex@example.com",
+                "orderId": "ORD-1001"
+              },
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              },
+              "rawResultHash": "2bfabb5df28f41c82684d3211b2f4f22de64183cb43fe3db1481bfc6d096396e"
+            },
+            {
+              "sequence": 3,
+              "turn": 2,
+              "name": "search_support_knowledge",
+              "input": {
+                "queryText": "duplicate charge policy",
+                "topK": 1
+              },
+              "result": {
+                "sources": [
+                  {
+                    "title": "Duplicate Charge Policy",
+                    "source": "duplicate-charge-policy",
+                    "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95"
+                  }
+                ]
+              },
+              "rawResultHash": "b71a63285336a36b69fb0bae7aab5cbd1806d9a4dd1085083f7c0890b9aa29d9"
+            },
+            {
+              "sequence": 4,
+              "turn": 2,
+              "name": "lookup_order",
+              "input": {
+                "customerEmail": "alex@example.com",
+                "orderId": "ORD-1001"
+              },
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              },
+              "rawResultHash": "2bfabb5df28f41c82684d3211b2f4f22de64183cb43fe3db1481bfc6d096396e"
+            }
+          ],
           "order": {
             "found": true,
             "order": {
@@ -253,10 +348,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "12d39f85c85dd7ae3be936dae5076e2b594b75e78867f5094340a108cd2ef58b",
+        "evidenceHash": "f157af43dc33d3420c58067aa3d3d84e55bf3ffa9af415ef1e067da24e5eca9b",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-f8574b84-799d-40e0-aaf4-7c86d791a7b7",
+          "caseId": "phase004-eval-a06bf233-c1f6-4cfb-a5c1-36723f4c0dd6",
           "scorerId": "multi-turn-consistency",
           "score": 1,
           "assertions": {
@@ -267,9 +362,104 @@
             "answers": [
               "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
               "Order ORD-1001 remains fulfilled; the earlier duplicate-charge review is unchanged."
+            ],
+            "turns": [
+              {
+                "turn": 1,
+                "answer": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund."
+              },
+              {
+                "turn": 2,
+                "answer": "Order ORD-1001 remains fulfilled; the earlier duplicate-charge review is unchanged."
+              }
             ]
           },
-          "toolCalls": [],
+          "toolCalls": [
+            {
+              "sequence": 1,
+              "turn": 1,
+              "name": "search_support_knowledge",
+              "input": {
+                "queryText": "duplicate charge policy",
+                "topK": 1
+              },
+              "result": {
+                "sources": [
+                  {
+                    "title": "Duplicate Charge Policy",
+                    "source": "duplicate-charge-policy",
+                    "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95"
+                  }
+                ]
+              },
+              "rawResultHash": "581e40d3c52deae9bf4ac522b1ec48436e10859733721f1742844e7d3ad9281f"
+            },
+            {
+              "sequence": 2,
+              "turn": 1,
+              "name": "lookup_order",
+              "input": {
+                "customerEmail": "alex@example.com",
+                "orderId": "ORD-1001"
+              },
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              },
+              "rawResultHash": "2bfabb5df28f41c82684d3211b2f4f22de64183cb43fe3db1481bfc6d096396e"
+            },
+            {
+              "sequence": 3,
+              "turn": 2,
+              "name": "search_support_knowledge",
+              "input": {
+                "queryText": "duplicate charge policy",
+                "topK": 1
+              },
+              "result": {
+                "sources": [
+                  {
+                    "title": "Duplicate Charge Policy",
+                    "source": "duplicate-charge-policy",
+                    "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95"
+                  }
+                ]
+              },
+              "rawResultHash": "581e40d3c52deae9bf4ac522b1ec48436e10859733721f1742844e7d3ad9281f"
+            },
+            {
+              "sequence": 4,
+              "turn": 2,
+              "name": "lookup_order",
+              "input": {
+                "customerEmail": "alex@example.com",
+                "orderId": "ORD-1001"
+              },
+              "result": {
+                "found": true,
+                "order": {
+                  "orderId": "ORD-1001",
+                  "customerEmail": "alex@example.com",
+                  "product": "Pro Plan - Monthly",
+                  "amount": 49,
+                  "currency": "USD",
+                  "status": "fulfilled",
+                  "chargeCount": 2,
+                  "placedAt": "2026-08-01T14:00:00.000Z"
+                }
+              },
+              "rawResultHash": "2bfabb5df28f41c82684d3211b2f4f22de64183cb43fe3db1481bfc6d096396e"
+            }
+          ],
           "order": {
             "found": true,
             "order": {
@@ -298,10 +488,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "9bb6dabe25691eb02a6ccce3c6ccd0e6f2f59b384dd0f605883fd054cc7cd1f7",
+        "evidenceHash": "df96a82eaea1d10783ac0229fef7575c5e4799fcee7d33a5e17bd93451beafff",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-a39fc893-95f8-48d0-b643-066f7b761f38",
+          "caseId": "phase004-eval-2e51dffc-0269-42c8-89ad-64caa564bcca",
           "scorerId": "policy-compliance",
           "score": 1,
           "assertions": {
@@ -341,10 +531,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "0c2d5aaf624300fc02bd46a4a69ea18d86e93d9188a074927d3a6089a6eb1d4b",
+        "evidenceHash": "491c1337ca8af5bd13d3a3923c2e108d1b665890b4074e4b4ef4b418bc13d942",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-c1e40c72-40de-446f-bee9-1180faefda79",
+          "caseId": "phase004-eval-f653028d-c604-473f-b97a-72a8001ab0c4",
           "scorerId": "policy-compliance",
           "score": 1,
           "assertions": {
@@ -396,10 +586,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "b08591376603dac6371e43696de452ffaa3ae9611370ff551150c147af65b0ba",
+        "evidenceHash": "eac97d750cbd9bb41533fb7c9829673015cfdfb99835bbe7477b7e2785dae87b",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-3160efba-3d24-470c-99d8-320551adf36b",
+          "caseId": "phase004-eval-7701340a-0e7c-423a-b5f3-b465d8b682dd",
           "scorerId": "policy-compliance",
           "score": 1,
           "assertions": {
@@ -439,10 +629,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "872704408d7afb27430db55e0a441bb91e0826a711edba879606da5a8f46f21b",
+        "evidenceHash": "c9f9d50ac57facd7ce1ecb8548d7475a20b276f46891fb9446b59fcf72a4a75b",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-91d974cd-a4c0-48fc-9418-dcdecc308d9c",
+          "caseId": "phase004-eval-e3a029cd-851e-4d87-976b-56963c4b0e77",
           "scorerId": "policy-compliance",
           "score": 1,
           "assertions": {
@@ -482,10 +672,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "95648ed73d05ce9f6de83ba7ffda103bd97165ca52ac16adc453867546df3fb0",
+        "evidenceHash": "5756e53620097d3369b366252b4bfed66692a01948725c526e696ecee11ebae4",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-272fce1c-78f3-4470-bdc6-1671c2565340",
+          "caseId": "phase004-eval-279ad75e-fe13-4a30-a2d7-9ea40c04008f",
           "scorerId": "policy-compliance",
           "score": 1,
           "assertions": {
@@ -525,10 +715,10 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "40ce153626338a0889aa7a772122d2ad4a074aa8ffcbbc5b907ca67749c14f03",
+        "evidenceHash": "4de4cb44bb5fcd66f95c41536d23b539efc43655bd6da8924c9d79dc455e2e86",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-1bbefe9d-51b4-44c8-91d1-9aad9814cb7c",
+          "caseId": "phase004-eval-21cc47fb-1c7a-4d8f-a513-c21215ade330",
           "scorerId": "resolution-quality",
           "score": 1,
           "assertions": {
@@ -565,10 +755,10 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "114cce81054d070c0dc04b452619ceee9fef0bc191661df7ef96e0e7fd264faa",
+        "evidenceHash": "cfb06c075767da257e279b8ee6036b8f8980634bbb458cfdbcdd278dd48f1847",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-d1b6f5a8-b3cd-40cd-a00c-11600c74594e",
+          "caseId": "phase004-eval-de2d4f61-ad46-42c6-b77b-efdc0b46ebec",
           "scorerId": "resolution-quality",
           "score": 1,
           "assertions": {
@@ -633,10 +823,10 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "dcd973753b892b95acd4131fa082b5a3d715ab593ad852d4d57d987c2632a03d",
+        "evidenceHash": "b2280ac9b67134d944e0f69a99e159a10cb8f5719a5a9947ef5bb4b1d8fad6c1",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-d44eeba5-401e-4ee1-ab7b-40c4b06e3b4f",
+          "caseId": "phase004-eval-71244bfb-c117-4eb0-9da5-244416f5722f",
           "scorerId": "routing-accuracy",
           "score": 1,
           "assertions": {
@@ -662,10 +852,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "cc81044977180ea7b0fcebe2dfbf2835546942cc275a197a57bfa0c62a84bbe9",
+        "evidenceHash": "dda2947e751798efbe222a6b13c0376962fa8ea7b3dd7b51b69086f4c986004c",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-635d0d6f-5ebb-47c8-a3e5-00a66cbf617c",
+          "caseId": "phase004-eval-f5803c6f-7745-4633-ae78-5090c839835a",
           "scorerId": "routing-accuracy",
           "score": 1,
           "assertions": {
@@ -691,10 +881,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "c8bf831485fd3a7f447e0d21d3749b0b7daf8406cca6e93548f3dc06d85e9ec3",
+        "evidenceHash": "5f5fbeb7e0ca1dd9b86ddc19e2d4683d426e3d663f5d87ed672af781e42b8666",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-8219bbb3-57b9-4ef8-80ff-dfc6fd1f869a",
+          "caseId": "phase004-eval-7c94c95e-30a8-4e9a-bffe-3872a989ced7",
           "scorerId": "tool-call-correctness",
           "score": 1,
           "assertions": {
@@ -704,6 +894,7 @@
           "toolCalls": [
             {
               "sequence": 1,
+              "turn": 1,
               "name": "search_support_knowledge",
               "input": {
                 "queryText": "duplicate charge policy",
@@ -718,10 +909,11 @@
                   }
                 ]
               },
-              "rawResultHash": "16d52ff6661cc7b76b1498e95672fc2dd0ad59a5b5aa9dfb8c2ecd3d2d6e52b3"
+              "rawResultHash": "bf3682983de82686d2479f8f49059b96f9e380e5bb4858d059284e14e5941b8f"
             },
             {
               "sequence": 2,
+              "turn": 1,
               "name": "lookup_order",
               "input": {
                 "customerEmail": "alex@example.com",
@@ -744,6 +936,7 @@
             },
             {
               "sequence": 3,
+              "turn": 2,
               "name": "search_support_knowledge",
               "input": {
                 "queryText": "duplicate charge policy",
@@ -758,10 +951,11 @@
                   }
                 ]
               },
-              "rawResultHash": "16d52ff6661cc7b76b1498e95672fc2dd0ad59a5b5aa9dfb8c2ecd3d2d6e52b3"
+              "rawResultHash": "bf3682983de82686d2479f8f49059b96f9e380e5bb4858d059284e14e5941b8f"
             },
             {
               "sequence": 4,
+              "turn": 2,
               "name": "lookup_order",
               "input": {
                 "customerEmail": "alex@example.com",
@@ -809,10 +1003,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "a09c644ab1f05e86167714350c44533a8eb22b4ad8ef9627b1af61a32c6508a4",
+        "evidenceHash": "c44538ee6b9344c0b708135eb2d69ac9436f0bf568e4282fd28ba3d3cf088dd2",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-52d89d54-2389-4177-86aa-c9b9e986675d",
+          "caseId": "phase004-eval-958a2891-9c31-48b6-b710-e4902ac46f23",
           "scorerId": "tool-call-correctness",
           "score": 1,
           "assertions": {
@@ -822,6 +1016,7 @@
           "toolCalls": [
             {
               "sequence": 1,
+              "turn": 1,
               "name": "search_support_knowledge",
               "input": {
                 "queryText": "duplicate charge policy",
@@ -836,10 +1031,11 @@
                   }
                 ]
               },
-              "rawResultHash": "0c0529a66e9235b0f8e8c76c85688f8680bbdd2f7fcc1e2ecbb51b96dfa10d34"
+              "rawResultHash": "d48a102701368e067c00306f23c33ca5d40af429dd37d97624886db35caf3bec"
             },
             {
               "sequence": 2,
+              "turn": 1,
               "name": "lookup_order",
               "input": {
                 "customerEmail": "alex@example.com",
@@ -862,6 +1058,7 @@
             },
             {
               "sequence": 3,
+              "turn": 2,
               "name": "search_support_knowledge",
               "input": {
                 "queryText": "duplicate charge policy",
@@ -876,10 +1073,11 @@
                   }
                 ]
               },
-              "rawResultHash": "0c0529a66e9235b0f8e8c76c85688f8680bbdd2f7fcc1e2ecbb51b96dfa10d34"
+              "rawResultHash": "d48a102701368e067c00306f23c33ca5d40af429dd37d97624886db35caf3bec"
             },
             {
               "sequence": 4,
+              "turn": 2,
               "name": "lookup_order",
               "input": {
                 "customerEmail": "alex@example.com",
@@ -932,9 +1130,9 @@
   },
   "costMicros": 0,
   "pricing": "not-applicable-deterministic-transport",
-  "evidenceHash": "b5a0c2b97dd91544de70ecc51c42cf028c166448bc8c9555b145f3bd07d24fdf",
-  "regression": "not-applicable-initial-reference",
+  "evidenceHash": "38a22a524e8fa60322211e57371c14adf4dbc4efb932d8723560c7d24472167a",
+  "regression": "compare-against-fixed-initial-reference",
   "initialReference": true,
   "historicalComparison": null,
-  "reportHash": "29a73a06709202cca009eee262f3e9ae5a22792281ce9fa0c912fb5f6ed18b88"
+  "reportHash": "80ec9ba969361dd5780eedf99ff2ecd0d9632a1acd34ff802bc69d2001ccd6c2"
 }
