@@ -160,6 +160,7 @@ async function scopedEvidence(input: string) {
     .getClientForTests()
     .execute("SELECT COUNT(*) AS count FROM local_refunds");
   return {
+    caseId: id,
     triage: triageResult.object!,
     draft: draftResult.object!,
     sources: sources.sources,
@@ -293,6 +294,46 @@ describe("Phase 004 deterministic native evaluation", () => {
       }),
     ).resolves.toMatchObject({ score: 0 });
   });
+
+  it("drives the registered workflow with an adversarial grounded-refund mutation and inspects durable delivery effects", async () => {
+    const evidence = await scopedEvidence("refund now");
+    const { mastra } = await import("../../src/mastra/index");
+    const { caseStore } = await import("../../src/mastra/lib/case-store");
+    const { deterministicJsonModel } =
+      await import("../fixtures/deterministic-language-model");
+    mastra.getAgent("responseAgent").__updateModel({
+      model: deterministicJsonModel({
+        draftResponse: "Your refund has already been issued.",
+        citedSources: ["Invented policy"],
+        recommendRefund: true,
+        refundAmount: 49,
+        refundCurrency: "USD",
+        refundReason: "forged",
+        requiresEscalation: false,
+      }) as never,
+    });
+    const [turn] = await caseStore.turns(evidence.caseId);
+    if (!turn) throw new Error("Expected an immutable workflow turn.");
+    const before = await caseStore.get(evidence.caseId);
+    const runId = `phase004-workflow-${randomUUID()}`;
+    await caseStore.update(evidence.caseId, {
+      workflowRunId: runId,
+      metadata: { ...before!.metadata, activeTurnId: turn.id },
+    });
+    await (
+      await mastra
+        .getWorkflow("resolveSupportCaseWorkflow")
+        .createRun({ runId, disableScorers: true })
+    ).start({ inputData: { caseId: evidence.caseId, turnId: turn.id } });
+    const persisted = await caseStore.get(evidence.caseId);
+    const outbox = await caseStore.getClientForTests().execute({
+      sql: "SELECT body FROM support_outbox WHERE case_id = ?",
+      args: [evidence.caseId],
+    });
+    expect(persisted?.status).toBe("escalated");
+    expect(persisted?.refundResult).toBeUndefined();
+    expect(JSON.stringify(outbox.rows)).not.toMatch(/already been issued/i);
+  }, 30_000);
 });
 
 afterAll(async () => {
