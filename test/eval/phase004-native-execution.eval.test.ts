@@ -338,7 +338,9 @@ async function observedFinancialEvidence() {
     let command: Record<string, unknown> = {};
     const approvedRefundModel = async () => {
       const current = await caseStore.get(id);
-      const activeTurnId = (current?.metadata as Record<string, unknown>)
+      if (!current)
+        throw new Error("Financial workflow case was not persisted.");
+      const activeTurnId = (current.metadata as Record<string, unknown>)
         .activeTurnId;
       const action = await caseStore.getClientForTests().execute({
         sql: "SELECT action.data FROM support_actions AS action JOIN support_turns AS turn ON turn.case_id = action.case_id AND turn.command_fingerprint = action.fingerprint WHERE action.case_id = ? AND action.kind = 'refund-command' AND turn.id = ? LIMIT 1",
@@ -417,7 +419,9 @@ async function observedFinancialEvidence() {
       dispatch.leaseToken,
     );
     const waiting = await caseStore.get(id);
-    const native = (waiting?.metadata as Record<string, unknown>)
+    if (!waiting)
+      throw new Error("Financial workflow case disappeared before approval.");
+    const native = (waiting.metadata as Record<string, unknown>)
       .nativeApproval as {
       runId: string;
       toolCallId: string;
