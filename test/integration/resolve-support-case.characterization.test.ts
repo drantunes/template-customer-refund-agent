@@ -418,7 +418,8 @@ describe("resolve support case WIP characterization", () => {
     const second = await caseStore.get(supportCase.id);
     expect(second).toMatchObject({
       status: "resolved",
-      finalResponse: "A clean resolved answer for the second request.",
+      finalResponse:
+        "We reviewed your order ORD-1001. Its current status is fulfilled.",
     });
     expect(second?.escalationReason).toBeUndefined();
     const turns = await caseStore.turns(supportCase.id);

@@ -199,6 +199,10 @@ async function loadDeterministicRuntime() {
     routes.supportCaseApproveRoute.handler,
   );
   app.post(
+    "/support/cases/:caseId/reject",
+    routes.supportCaseRejectRoute.handler,
+  );
+  app.post(
     "/support/cases/:caseId/follow-ups",
     routes.supportCaseFollowUpRoute.handler,
   );
@@ -779,6 +783,21 @@ describe("support workflow HTTP context propagation", () => {
     await vi.waitFor(async () =>
       expect((await runtimeCaseStore.get(id))?.status).toBe("resolved"),
     );
+    const recovered = (await runtimeCaseStore.get(id))!;
+    const outbox = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT body, state FROM support_outbox WHERE case_id = ?",
+      args: [id],
+    });
+    expect(recovered.refundResult).toMatchObject({
+      orderId: "ORD-1001",
+      amount: 49,
+      currency: "USD",
+    });
+    expect(recovered.finalResponse).toBe(
+      "Your refund of 49 USD has been issued.",
+    );
+    expect(String(outbox.rows[0]?.body)).toBe(recovered.finalResponse);
+    expect(outbox.rows[0]?.state).toBe("delivered");
   });
 
   it("passes the Hono RequestContext from inbound and approval requests to specialists and registered tools", async () => {
@@ -1145,6 +1164,206 @@ describe("support workflow HTTP context propagation", () => {
     });
   });
 
+  it.each([
+    "Your refund has already been issued.",
+    "The reimbursement was completed and the funds are on their way.",
+    "We processed the credit, so your card will be refunded.",
+  ])(
+    "never promotes a valid-citation, effectless financial completion claim: %s",
+    async (draftResponse) => {
+      const {
+        app,
+        caseStore: runtimeCaseStore,
+        responseAgent,
+      } = await loadDeterministicRuntime();
+      vi.mocked(responseAgent.generate).mockResolvedValueOnce({
+        object: {
+          draftResponse,
+          // The registered retrieval fixture exposes this active, applicable
+          // policy title. Both model flags deliberately avoid approval.
+          citedSources: ["Duplicate Charge Policy"],
+          recommendRefund: false,
+          requiresEscalation: false,
+        },
+        usage: { inputTokens: 1, outputTokens: 1 },
+        response: { modelId: "deterministic/hostile-valid-citation" },
+      } as never);
+      const inbound = await app.request("http://support.test/support/inbound", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...customerHeaders },
+        body: JSON.stringify({
+          externalId: `valid-citation-hostile-${crypto.randomUUID()}`,
+          from: "alex@example.com",
+          subject: "Order status",
+          body: "Please confirm my order status.",
+        }),
+      });
+      const { caseId } = inboundSupportResponseSchema.parse(
+        await inbound.json(),
+      );
+      await vi.waitFor(async () =>
+        expect((await runtimeCaseStore.get(caseId))?.status).toBe("resolved"),
+      );
+      const supportCase = await runtimeCaseStore.get(caseId);
+      if (!supportCase) throw new Error("Expected resolved support case.");
+      const outbox = await runtimeCaseStore.getClientForTests().execute({
+        sql: "SELECT body, state FROM support_outbox WHERE case_id = ?",
+        args: [caseId],
+      });
+      const durable = await runtimeCaseStore.getClientForTests().execute({
+        sql: "SELECT (SELECT COUNT(*) FROM support_decisions WHERE case_id = ?) AS approvals, (SELECT COUNT(*) FROM support_idempotency) AS effects, (SELECT COUNT(*) FROM local_refunds) AS refunds",
+        args: [caseId],
+      });
+      expect(supportCase.finalResponse).toBe(
+        "We reviewed your order ORD-1001. Its current status is fulfilled.",
+      );
+      expect(supportCase.finalResponse).not.toContain(draftResponse);
+      expect(String(outbox.rows[0]?.body)).toBe(supportCase.finalResponse);
+      expect(outbox.rows[0]?.state).toBe("delivered");
+      expect(durable.rows[0]).toMatchObject({
+        approvals: 0,
+        effects: 0,
+        refunds: 0,
+      });
+    },
+  );
+
+  it("renders an ordinary grounded order answer from durable order state", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      responseAgent,
+    } = await loadDeterministicRuntime();
+    vi.mocked(responseAgent.generate).mockResolvedValueOnce({
+      object: {
+        draftResponse: "Your order is fulfilled and no refund is needed.",
+        citedSources: ["Duplicate Charge Policy"],
+        recommendRefund: false,
+        requiresEscalation: false,
+      },
+      usage: { inputTokens: 1, outputTokens: 1 },
+      response: { modelId: "deterministic/ordinary-order" },
+    } as never);
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `ordinary-order-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Order status",
+        body: "Where is my order?",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("resolved"),
+    );
+    const supportCase = (await runtimeCaseStore.get(caseId))!;
+    expect(supportCase.finalResponse).toBe(
+      "We reviewed your order ORD-1001. Its current status is fulfilled.",
+    );
+  });
+
+  it("renders completed refund status only after native approval creates its matching durable effect", async () => {
+    const { app, caseStore: runtimeCaseStore } =
+      await loadDeterministicRuntime();
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `completed-refund-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Refund request",
+        body: "Please refund my duplicate charge.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe(
+        "waiting_approval",
+      ),
+    );
+    const command = (await runtimeCaseStore.get(caseId))!.metadata
+      .refundCommand as { fingerprint: string };
+    const approved = await app.request(
+      `http://support.test/support/cases/${caseId}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...approverHeaders },
+        body: JSON.stringify({ commandFingerprint: command.fingerprint }),
+      },
+    );
+    expect(approved.status).toBe(200);
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("resolved"),
+    );
+    const supportCase = (await runtimeCaseStore.get(caseId))!;
+    const outbox = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT body, state FROM support_outbox WHERE case_id = ?",
+      args: [caseId],
+    });
+    const effect = await runtimeCaseStore.idempotency(
+      supportCase.refundResult!.idempotencyKey,
+    );
+    expect(effect?.fingerprint).toBe(command.fingerprint);
+    expect(supportCase.finalResponse).toBe(
+      "Your refund of 49 USD has been issued.",
+    );
+    expect(String(outbox.rows[0]?.body)).toBe(supportCase.finalResponse);
+    expect(outbox.rows[0]?.state).toBe("delivered");
+  });
+
+  it("does not claim a completed refund when native approval is rejected without an effect", async () => {
+    const { app, caseStore: runtimeCaseStore } =
+      await loadDeterministicRuntime();
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `rejected-refund-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Refund request",
+        body: "Please refund my duplicate charge.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe(
+        "waiting_approval",
+      ),
+    );
+    const command = (await runtimeCaseStore.get(caseId))!.metadata
+      .refundCommand as { fingerprint: string };
+    const rejected = await app.request(
+      `http://support.test/support/cases/${caseId}/reject`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...approverHeaders },
+        body: JSON.stringify({ commandFingerprint: command.fingerprint }),
+      },
+    );
+    expect(rejected.status).toBe(200);
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("escalated"),
+    );
+    const supportCase = (await runtimeCaseStore.get(caseId))!;
+    const outbox = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT body, state FROM support_outbox WHERE case_id = ?",
+      args: [caseId],
+    });
+    const effects = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT COUNT(*) AS count FROM support_idempotency",
+    });
+    expect(effects.rows[0]?.count).toBe(0);
+    expect(supportCase.refundResult).toBeUndefined();
+    expect(supportCase.finalResponse).toContain(
+      "specialist is going to take a closer look",
+    );
+    expect(supportCase.finalResponse).not.toContain("has been issued");
+    expect(String(outbox.rows[0]?.body)).toBe(supportCase.finalResponse);
+    expect(outbox.rows[0]?.state).toBe("delivered");
+  });
+
   it("never delivers an already-escalated uncited financial claim", async () => {
     const {
       app,
@@ -1491,7 +1710,8 @@ describe("support workflow HTTP context propagation", () => {
     expect(secondTurn).toMatchObject({
       state: "resolved",
       outcome: {
-        finalResponse: "Your order is fulfilled and no refund is needed.",
+        finalResponse:
+          "We reviewed your order ORD-1001. Its current status is fulfilled.",
       },
     });
     const secondTraceId = (await runtimeCaseStore.get(caseId))?.traceId;

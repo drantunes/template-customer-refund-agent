@@ -72,6 +72,153 @@ function parsedDraftEvidence(supportCase: SupportCase, citations: string[]) {
   });
 }
 
+const safeEscalationResponse =
+  "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.";
+
+const financialResponseCommandSchema = z.object({
+  approvalCaseId: z.string(),
+  orderId: z.string(),
+  amount: z.number().positive(),
+  currency: z.string(),
+  reason: z.string(),
+  idempotencyKey: z.string(),
+  fingerprint: z.string(),
+});
+
+const immutableRefundCommandSchema = z.object({
+  binding: z.object({
+    tenantId: z.string(),
+    providerKind: z.literal("local"),
+    providerAccountId: z.string(),
+    externalConversationId: z.string(),
+  }),
+  approvalCaseId: z.string(),
+  orderId: z.string(),
+  amount: z.object({
+    currency: z.string(),
+    minor: z.number().int().positive(),
+  }),
+  reason: z.string(),
+  idempotencyKey: z.string(),
+  fingerprint: z.string(),
+});
+
+const durableRefundEffectSchema = z.object({
+  refundId: z.string(),
+  orderId: z.string(),
+  amount: z.object({
+    currency: z.string(),
+    minor: z.number().int().positive(),
+  }),
+  idempotencyKey: z.string(),
+  executedAt: z.string().refine((value) => Number.isFinite(Date.parse(value))),
+  replayed: z.boolean().optional(),
+});
+
+/** Model text is useful staff context, but it is not an authority to state a
+ * financial outcome. Customer-visible status is a projection of durable case
+ * facts; this keeps arbitrary prose, paraphrases, and mixed clauses from
+ * becoming an effectless financial completion claim. */
+function ordinarySupportResponse(supportCase: SupportCase) {
+  const order = supportCase.orderLookup?.order;
+  if (order && order.status !== "refunded")
+    return `We reviewed your order ${order.orderId}. Its current status is ${order.status}.`;
+  return "We reviewed your request. A support specialist will follow up if further action is needed.";
+}
+
+/** A completed refund message is permitted only when every customer-visible
+ * detail is bound back to the same durable effect, immutable command, account,
+ * and inbound turn. This intentionally does not inspect model text. */
+async function completedRefundResponse(
+  supportCase: SupportCase,
+  turnId: string,
+) {
+  const metadata = supportCase.metadata as Record<string, unknown>;
+  const command = financialResponseCommandSchema.safeParse(
+    metadata.refundCommand,
+  );
+  const result = supportCase.refundResult;
+  const turn = await persistentCaseStore.turn(supportCase.id, turnId);
+  if (!command.success || !result || !turn) return undefined;
+
+  const binding = resolveConfiguredBinding(
+    bindingsForPersistedCase(supportCase).transactions,
+  );
+  let expectedAmount;
+  try {
+    expectedAmount = legacyAmountToMoney(
+      command.data.amount,
+      command.data.currency,
+    );
+  } catch {
+    return undefined;
+  }
+  const expectedFingerprint = refundFingerprint({
+    binding,
+    approvalCaseId: supportCase.id,
+    orderId: command.data.orderId,
+    amount: expectedAmount,
+    reason: command.data.reason,
+    idempotencyKey: command.data.idempotencyKey,
+  });
+  const immutable = immutableRefundCommandSchema.safeParse(
+    await persistentCaseStore.getAction(
+      supportCase.id,
+      "refund-command",
+      command.data.fingerprint,
+    ),
+  );
+  const idempotency = await persistentCaseStore.idempotency(
+    command.data.idempotencyKey,
+  );
+  const effect = durableRefundEffectSchema.safeParse(idempotency?.effect);
+  const decision = await persistentCaseStore.approvalDecision(
+    supportCase.id,
+    turnId,
+  );
+  const projected = metadata.refundEffects as
+    Record<string, unknown> | undefined;
+  const projectedResult = projected?.[command.data.fingerprint];
+
+  if (
+    command.data.approvalCaseId !== supportCase.id ||
+    command.data.fingerprint !== expectedFingerprint ||
+    turn.commandFingerprint !== command.data.fingerprint ||
+    metadata.activeTurnId !== turnId ||
+    !supportCase.approval?.approved ||
+    !decision?.approved ||
+    decision.turnId !== turnId ||
+    decision.commandFingerprint !== command.data.fingerprint ||
+    !immutable.success ||
+    immutable.data.binding.tenantId !== binding.tenantId ||
+    immutable.data.binding.providerKind !== binding.providerKind ||
+    immutable.data.binding.providerAccountId !== binding.providerAccountId ||
+    immutable.data.approvalCaseId !== supportCase.id ||
+    immutable.data.orderId !== command.data.orderId ||
+    immutable.data.amount.currency !== expectedAmount.currency ||
+    immutable.data.amount.minor !== expectedAmount.minor ||
+    immutable.data.reason !== command.data.reason ||
+    immutable.data.idempotencyKey !== command.data.idempotencyKey ||
+    immutable.data.fingerprint !== command.data.fingerprint ||
+    idempotency?.fingerprint !== command.data.fingerprint ||
+    !effect.success ||
+    effect.data.orderId !== command.data.orderId ||
+    effect.data.amount.currency !== expectedAmount.currency ||
+    effect.data.amount.minor !== expectedAmount.minor ||
+    effect.data.idempotencyKey !== command.data.idempotencyKey ||
+    result.refundId !== effect.data.refundId ||
+    result.orderId !== effect.data.orderId ||
+    result.amount !== command.data.amount ||
+    result.currency !== effect.data.amount.currency ||
+    result.idempotencyKey !== effect.data.idempotencyKey ||
+    result.executedAt !== effect.data.executedAt ||
+    JSON.stringify(projectedResult) !== JSON.stringify(result)
+  )
+    return undefined;
+
+  return `Your refund of ${result.amount} ${result.currency} has been issued.`;
+}
+
 async function getCaseOrThrow(caseId: string, turnId: string) {
   const supportCase = await caseStore.get(caseId);
   if (!supportCase) throw new Error(`Support case not found: ${caseId}`);
@@ -514,8 +661,7 @@ const draftResponseStep = createStep({
     const safeDraft = mustUseSafeEscalation
       ? {
           ...parsedDraft,
-          draftResponse:
-            "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
+          draftResponse: safeEscalationResponse,
           recommendRefund: false,
           refundAmount: undefined,
           refundCurrency: undefined,
@@ -903,7 +1049,9 @@ const resolveCaseStep = createStep({
       inputData.turnId,
     );
     const draft = supportCase.draft!;
-    let finalResponse = draft.draftResponse;
+    let finalResponse = draft.requiresEscalation
+      ? safeEscalationResponse
+      : ordinarySupportResponse(supportCase);
     let status: "resolved" | "escalated" = draft.requiresEscalation
       ? "escalated"
       : "resolved";
@@ -931,11 +1079,16 @@ const resolveCaseStep = createStep({
           // Phase 003 executes through the native Agent approval lifecycle.
           // The tool writes its durable result before this workflow resumes;
           // never call a requireApproval tool directly from a workflow step.
-          if (supportCase.refundResult) {
+          const completed = await completedRefundResponse(
+            supportCase,
+            inputData.turnId,
+          );
+          if (completed) {
             status = "resolved";
+            finalResponse = completed;
           } else
             throw new Error(
-              "Native approval resumed without a durable refund effect; recovery must reconcile the native run.",
+              "Native approval resumed without a matching durable refund effect; recovery must reconcile the immutable command.",
             );
         }
       }
