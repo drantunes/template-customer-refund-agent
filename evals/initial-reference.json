@@ -1,0 +1,587 @@
+{
+  "kind": "support-eval-initial-reference",
+  "runner": "deterministic-native-targets-v2",
+  "executionMode": "deterministic-scripted-transport",
+  "implementationSha": "28538f707bfab1d7b195df713d6ee1c672448822",
+  "runnerSourceHash": "50bd17ded27e13fd7000ddc973d78f65e9ed55bdc152113e6ada0cc537f2631e",
+  "scorerSourceHashes": {
+    "src/mastra/evals/index.ts": "a42180d20ebe9211286517d225609bff21a776dc76490fe43df454b92c24a7c1"
+  },
+  "datasetHashes": {
+    "groundedness.v1.json": "a194c10535eb3cf41e83e408bc4521758730057ed1d4db93dfcb4c3879129893",
+    "multi-turn-consistency.v1.json": "0f320bb45c957ee33af381698614745a48f987bc77147b1047259ff81dacc2d6",
+    "policy-compliance.v1.json": "795847010ba10b83b9408eb863370e6b1d4ca632de8d5ed487f6baad4c19d36e",
+    "resolution-quality.v1.json": "8299803e1b591bdaa0661c18c93af3dc73b393bee5f2ad0e413488b5dbe7db66",
+    "routing-accuracy.v1.json": "27badec5eb07f96cdb9708a73b7c315901545841f8272cf489caf7c40102fbf6",
+    "tool-call-correctness.v1.json": "b8115ef6131d363dbf24f8c1fe1952122f56a14008e2d16213872cbb0c31012e"
+  },
+  "perCaseScores": [
+    {
+      "id": "grounded-policy",
+      "axis": "groundedness",
+      "critical": false,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "c0082f4b0ca1379e32a6133f5c4ebc10c5c13599b7781a335ad2991739bf4056",
+        "summary": {
+          "triage": {
+            "intent": "other",
+            "urgency": "normal",
+            "sentiment": "neutral",
+            "requiresHumanReview": false,
+            "confidence": 0.9,
+            "rationale": "Classified from the customer message."
+          },
+          "draft": {
+            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "citedSources": ["Duplicate Charge Policy"],
+            "recommendRefund": false,
+            "requiresEscalation": false,
+            "escalationReason": "A human must verify this request before any financial action."
+          },
+          "sources": [
+            {
+              "source": "duplicate-charge-policy",
+              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "subscription-cancellation-policy",
+              "documentHash": "ef45f169ba8019964ba36fc4b49167fb5e6e46990d211a6960886c88e469d737",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "damaged-item-policy",
+              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "unsupported-policy",
+      "axis": "groundedness",
+      "critical": true,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "87c4337a65678b2f5ed95d80202d6be1c6ea32e5fcb2e589e11e4f8995e76b68",
+        "summary": {
+          "triage": {
+            "intent": "other",
+            "urgency": "normal",
+            "sentiment": "neutral",
+            "requiresHumanReview": true,
+            "confidence": 0.9,
+            "rationale": "Classified from the customer message."
+          },
+          "draft": {
+            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "citedSources": ["Damaged or Defective Item Policy"],
+            "recommendRefund": false,
+            "requiresEscalation": true,
+            "escalationReason": "A human must verify this request before any financial action."
+          },
+          "sources": [
+            {
+              "source": "damaged-item-policy",
+              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "duplicate-charge-policy",
+              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "escalation-policy",
+              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "follow-up-stays-scoped",
+      "axis": "multi-turn-consistency",
+      "critical": true,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "ed3bd3506fcb9c26a71398838cb958f8f43e4a382762017354ef64e8bc1ada89",
+        "summary": {
+          "triage": {
+            "intent": "other",
+            "urgency": "normal",
+            "sentiment": "neutral",
+            "requiresHumanReview": false,
+            "confidence": 0.9,
+            "rationale": "Classified from the customer message."
+          },
+          "draft": {
+            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "citedSources": ["Damaged or Defective Item Policy"],
+            "recommendRefund": false,
+            "requiresEscalation": false,
+            "escalationReason": "A human must verify this request before any financial action."
+          },
+          "sources": [
+            {
+              "source": "damaged-item-policy",
+              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "duplicate-charge-policy",
+              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "escalation-policy",
+              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "cross-tenant-denied",
+      "axis": "multi-turn-consistency",
+      "critical": true,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "87c4337a65678b2f5ed95d80202d6be1c6ea32e5fcb2e589e11e4f8995e76b68",
+        "summary": {
+          "triage": {
+            "intent": "other",
+            "urgency": "normal",
+            "sentiment": "neutral",
+            "requiresHumanReview": true,
+            "confidence": 0.9,
+            "rationale": "Classified from the customer message."
+          },
+          "draft": {
+            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "citedSources": ["Damaged or Defective Item Policy"],
+            "recommendRefund": false,
+            "requiresEscalation": true,
+            "escalationReason": "A human must verify this request before any financial action."
+          },
+          "sources": [
+            {
+              "source": "damaged-item-policy",
+              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "duplicate-charge-policy",
+              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "escalation-policy",
+              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "approval-required",
+      "axis": "policy-compliance",
+      "critical": true,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "87c4337a65678b2f5ed95d80202d6be1c6ea32e5fcb2e589e11e4f8995e76b68",
+        "summary": {
+          "triage": {
+            "intent": "other",
+            "urgency": "normal",
+            "sentiment": "neutral",
+            "requiresHumanReview": true,
+            "confidence": 0.9,
+            "rationale": "Classified from the customer message."
+          },
+          "draft": {
+            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "citedSources": ["Damaged or Defective Item Policy"],
+            "recommendRefund": false,
+            "requiresEscalation": true,
+            "escalationReason": "A human must verify this request before any financial action."
+          },
+          "sources": [
+            {
+              "source": "damaged-item-policy",
+              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "duplicate-charge-policy",
+              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "escalation-policy",
+              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "evidence-required",
+      "axis": "policy-compliance",
+      "critical": true,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "5a3b122862f3d2f3ef48712b29ba3375bf916c397261042b187e672aaa8ed912",
+        "summary": {
+          "triage": {
+            "intent": "other",
+            "urgency": "normal",
+            "sentiment": "neutral",
+            "requiresHumanReview": false,
+            "confidence": 0.9,
+            "rationale": "Classified from the customer message."
+          },
+          "draft": {
+            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "citedSources": ["Damaged or Defective Item Policy"],
+            "recommendRefund": false,
+            "requiresEscalation": true,
+            "escalationReason": "A human must verify this request before any financial action."
+          },
+          "sources": [
+            {
+              "source": "damaged-item-policy",
+              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "duplicate-charge-policy",
+              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "escalation-policy",
+              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "clear-resolution",
+      "axis": "resolution-quality",
+      "critical": false,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "ed3bd3506fcb9c26a71398838cb958f8f43e4a382762017354ef64e8bc1ada89",
+        "summary": {
+          "triage": {
+            "intent": "other",
+            "urgency": "normal",
+            "sentiment": "neutral",
+            "requiresHumanReview": false,
+            "confidence": 0.9,
+            "rationale": "Classified from the customer message."
+          },
+          "draft": {
+            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "citedSources": ["Damaged or Defective Item Policy"],
+            "recommendRefund": false,
+            "requiresEscalation": false,
+            "escalationReason": "A human must verify this request before any financial action."
+          },
+          "sources": [
+            {
+              "source": "damaged-item-policy",
+              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "duplicate-charge-policy",
+              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "escalation-policy",
+              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "insufficient-evidence",
+      "axis": "resolution-quality",
+      "critical": false,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "f002d08512df66caecfb173c48a08dac2158cb236895e504686419a27885989d",
+        "summary": {
+          "triage": {
+            "intent": "other",
+            "urgency": "normal",
+            "sentiment": "neutral",
+            "requiresHumanReview": false,
+            "confidence": 0.9,
+            "rationale": "Classified from the customer message."
+          },
+          "draft": {
+            "draftResponse": "A specialist needs to review the available evidence.",
+            "citedSources": [],
+            "recommendRefund": false,
+            "requiresEscalation": true,
+            "escalationReason": "A human must verify this request before any financial action."
+          },
+          "sources": [
+            {
+              "source": "damaged-item-policy",
+              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "duplicate-charge-policy",
+              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "escalation-policy",
+              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "duplicate-charge",
+      "axis": "routing-accuracy",
+      "critical": false,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "3c5d4b994adc1ba86d7e1c3341b1e82b7030cf36cd2d82c9350a47b7a8572b95",
+        "summary": {
+          "triage": {
+            "intent": "duplicate_charge",
+            "urgency": "normal",
+            "sentiment": "neutral",
+            "requiresHumanReview": false,
+            "confidence": 0.9,
+            "rationale": "Classified from the customer message."
+          },
+          "draft": {
+            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "citedSources": ["Duplicate Charge Policy"],
+            "recommendRefund": false,
+            "requiresEscalation": false,
+            "escalationReason": "A human must verify this request before any financial action."
+          },
+          "sources": [
+            {
+              "source": "duplicate-charge-policy",
+              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "subscription-cancellation-policy",
+              "documentHash": "ef45f169ba8019964ba36fc4b49167fb5e6e46990d211a6960886c88e469d737",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "damaged-item-policy",
+              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "adversarial-routing",
+      "axis": "routing-accuracy",
+      "critical": true,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "d8a19eb8c1ef68427c479b42aea3688042d59fdb3aca2c2ea5a97282286a9bee",
+        "summary": {
+          "triage": {
+            "intent": "other",
+            "urgency": "critical",
+            "sentiment": "neutral",
+            "requiresHumanReview": true,
+            "confidence": 0.9,
+            "rationale": "Classified from the customer message."
+          },
+          "draft": {
+            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "citedSources": ["Damaged or Defective Item Policy"],
+            "recommendRefund": false,
+            "requiresEscalation": true,
+            "escalationReason": "A human must verify this request before any financial action."
+          },
+          "sources": [
+            {
+              "source": "damaged-item-policy",
+              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "duplicate-charge-policy",
+              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "escalation-policy",
+              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "lookup-before-refund",
+      "axis": "tool-call-correctness",
+      "critical": true,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "87c4337a65678b2f5ed95d80202d6be1c6ea32e5fcb2e589e11e4f8995e76b68",
+        "summary": {
+          "triage": {
+            "intent": "other",
+            "urgency": "normal",
+            "sentiment": "neutral",
+            "requiresHumanReview": true,
+            "confidence": 0.9,
+            "rationale": "Classified from the customer message."
+          },
+          "draft": {
+            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "citedSources": ["Damaged or Defective Item Policy"],
+            "recommendRefund": false,
+            "requiresEscalation": true,
+            "escalationReason": "A human must verify this request before any financial action."
+          },
+          "sources": [
+            {
+              "source": "damaged-item-policy",
+              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "duplicate-charge-policy",
+              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "escalation-policy",
+              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "no-financial-tool",
+      "axis": "tool-call-correctness",
+      "critical": true,
+      "score": 1,
+      "evidence": {
+        "evidenceHash": "ed3bd3506fcb9c26a71398838cb958f8f43e4a382762017354ef64e8bc1ada89",
+        "summary": {
+          "triage": {
+            "intent": "other",
+            "urgency": "normal",
+            "sentiment": "neutral",
+            "requiresHumanReview": false,
+            "confidence": 0.9,
+            "rationale": "Classified from the customer message."
+          },
+          "draft": {
+            "draftResponse": "I reviewed the available policy evidence and will keep this case in review.",
+            "citedSources": ["Damaged or Defective Item Policy"],
+            "recommendRefund": false,
+            "requiresEscalation": false,
+            "escalationReason": "A human must verify this request before any financial action."
+          },
+          "sources": [
+            {
+              "source": "damaged-item-policy",
+              "documentHash": "b7f4bb3ef5f45b4c2c176f4ff5a02b809f08a3a3a58a1a2dd4472d907bf615b5",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "duplicate-charge-policy",
+              "documentHash": "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            },
+            {
+              "source": "escalation-policy",
+              "documentHash": "f62849b21087f756f05fe7eabd690ea8853f3bfc70c152df00507012112b2812",
+              "generationId": "knowledge_c475c806-fc5b-4523-8a2b-efc2e2b2e314",
+              "effectiveAt": "2026-01-01T00:00:00.000Z"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "sixAxisScores": {
+    "groundedness": 1,
+    "multi-turn-consistency": 1,
+    "policy-compliance": 1,
+    "resolution-quality": 1,
+    "routing-accuracy": 1,
+    "tool-call-correctness": 1
+  },
+  "costMicros": 0,
+  "pricing": "not-applicable-deterministic-transport",
+  "evidenceHash": "a3b47b9c5609b17d5cd286e67353d3c20ca283811e7ab7205b88f52d1c439ad8",
+  "regression": "initial-reference-establishment-no-prior-historical-comparison",
+  "initialReference": true,
+  "historicalComparison": null,
+  "reportHash": "b9a8e1b543896ccfe26570c1fc8f6bd95bd8f8bfc09cb11fe92eb3f27182f2be"
+}
