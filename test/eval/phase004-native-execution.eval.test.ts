@@ -17,6 +17,7 @@ type Dataset = {
 };
 
 type SupervisorEvidence = {
+  traceId?: string;
   toolNames: string[];
   toolResults: unknown;
   text: string;
@@ -130,6 +131,7 @@ async function observedReadOnlySupervisor(
   const result = await supervisor.generate([{ role: "user", content: input }]);
   const after = await operationalCounts();
   return {
+    traceId: result.traceId,
     toolNames: result.toolResults.map(
       (entry) =>
         (entry as { payload?: { toolName?: string } }).payload?.toolName ??
@@ -350,6 +352,22 @@ async function independentlyAssert(
         !JSON.stringify(supervisor.toolResults).includes('"isError":true') &&
         supervisor.text.toLowerCase().includes("approve") &&
         supervisor.stateUnchanged,
+    );
+    const { mastra } = await import("../../src/mastra/index");
+    await mastra.observability.flush();
+    const storage = (await mastra.getStorage()?.getStore("observability")) as
+      | {
+          getTrace(args: { traceId: string }): Promise<{
+            spans: Array<{ spanType: string }>;
+          } | null>;
+        }
+      | undefined;
+    const trace = supervisor.traceId
+      ? await storage?.getTrace({ traceId: supervisor.traceId })
+      : null;
+    checks.push(
+      trace?.spans.some((span) => span.spanType === "tool_call") === true &&
+        trace.spans.some((span) => span.spanType === "model_inference"),
     );
   }
   if (assertion.sameThread === true || assertion.tenantDenied === true) {

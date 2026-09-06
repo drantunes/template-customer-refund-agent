@@ -73,8 +73,11 @@ export const monitoringSummarySchema = z.object({
     rejected: z.number().int().nonnegative(),
     autoEscalated: z.number().int().nonnegative(),
     approvalRate: z.number().nullable(),
-    totalApprovedAmount: z.number().nonnegative(),
-    currency: z.string(),
+    executed: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    executedTotals: z.array(
+      z.object({ currency: z.string(), minor: z.number().int().nonnegative() }),
+    ),
   }),
   feedback: z.object({
     totalResponses: z.number().int().nonnegative(),
@@ -86,8 +89,10 @@ export const monitoringSummarySchema = z.object({
         caseId: z.string(),
         subject: z.string(),
         rating: z.enum(["up", "down"]),
-        comment: z.string().optional(),
         submittedAt: z.iso.datetime(),
+        turnId: z.string().optional(),
+        runId: z.string().optional(),
+        traceId: z.string().optional(),
       }),
     ),
   }),
@@ -96,6 +101,46 @@ export const monitoringSummarySchema = z.object({
     observedSpans: z.number().int().nonnegative(),
     providerOrToolErrorRate: z.number().nullable(),
     providerOrToolP95Ms: z.number().nullable(),
+    modelUsage: z.array(
+      z.object({
+        model: z.string(),
+        inputTokens: z.number().int().nonnegative(),
+        outputTokens: z.number().int().nonnegative(),
+        estimatedCostMicrosUsd: z.number().nullable(),
+      }),
+    ),
+    workflowStages: z.array(
+      z.object({
+        operation: z.string(),
+        calls: z.number().int().nonnegative(),
+        errorRate: z.number().nullable(),
+        p95Ms: z.number().nullable(),
+      }),
+    ),
+    providerCalls: z.array(
+      z.object({
+        operation: z.string(),
+        calls: z.number().int().nonnegative(),
+        errorRate: z.number().nullable(),
+        p95Ms: z.number().nullable(),
+      }),
+    ),
+    toolCalls: z.array(
+      z.object({
+        operation: z.string(),
+        calls: z.number().int().nonnegative(),
+        errorRate: z.number().nullable(),
+        p95Ms: z.number().nullable(),
+      }),
+    ),
+    unavailable: z.array(z.string()),
+    alerts: z.array(z.string()),
+  }),
+  failures: z.object({
+    rejectedDecisions: z.number().int().nonnegative(),
+    workflow: z.number().int().nonnegative(),
+    financial: z.number().int().nonnegative(),
+    delivery: z.number().int().nonnegative(),
   }),
 });
 

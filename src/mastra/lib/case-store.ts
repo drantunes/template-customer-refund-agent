@@ -2324,6 +2324,57 @@ export class CaseStore {
         }
       : undefined;
   }
+  /** Monitoring reads immutable decision rows rather than a mutable case
+   * projection, so a later follow-up cannot erase earlier approval outcomes. */
+  async monitoringDecisions(caseIds: string[]) {
+    await this.ensured();
+    if (!caseIds.length)
+      return [] as Array<{ caseId: string; turnId: string; approved: boolean }>;
+    const placeholders = caseIds.map(() => "?").join(", ");
+    const result = await this.client.execute({
+      sql: `SELECT case_id, turn_id, approved FROM support_decisions WHERE case_id IN (${placeholders}) ORDER BY created_at`,
+      args: caseIds,
+    });
+    return result.rows.map((row) => ({
+      caseId: String(row.case_id),
+      turnId: String(row.turn_id),
+      approved: Number(row.approved) === 1,
+    }));
+  }
+  /** Separate failure counters intentionally do not collapse rejection,
+   * workflow, financial, and delivery into one misleading error rate. */
+  async monitoringOperationalFailures(caseIds: string[]) {
+    await this.ensured();
+    if (!caseIds.length)
+      return { rejectedDecisions: 0, workflow: 0, financial: 0, delivery: 0 };
+    const placeholders = caseIds.map(() => "?").join(", ");
+    const [decisions, workflow, financial, delivery] = await Promise.all([
+      this.client.execute({
+        sql: `SELECT COUNT(*) AS total FROM support_decisions WHERE approved = 0 AND case_id IN (${placeholders})`,
+        args: caseIds,
+      }),
+      this.client.execute({
+        sql: `SELECT COUNT(*) AS total FROM support_turns WHERE state = 'failed' AND case_id IN (${placeholders})`,
+        args: caseIds,
+      }),
+      this.client.execute({
+        sql: `SELECT COUNT(*) AS total FROM support_turns AS t JOIN support_decisions AS d ON d.case_id = t.case_id AND d.turn_id = t.id AND d.approved = 1 WHERE t.state = 'failed' AND t.case_id IN (${placeholders})`,
+        args: caseIds,
+      }),
+      this.client.execute({
+        sql: `SELECT COUNT(*) AS total FROM support_outbox WHERE state = 'failed' AND case_id IN (${placeholders})`,
+        args: caseIds,
+      }),
+    ]);
+    const total = (result: { rows: Array<Record<string, unknown>> }) =>
+      Number(result.rows[0]?.total ?? 0);
+    return {
+      rejectedDecisions: total(decisions),
+      workflow: total(workflow),
+      financial: total(financial),
+      delivery: total(delivery),
+    };
+  }
   /** Decisions are durable authority. A worker uses this queue after an HTTP
    * process dies between recording the one decision and resuming Mastra. */
   /** Native resume is driven by the one durable decision, whether it approved

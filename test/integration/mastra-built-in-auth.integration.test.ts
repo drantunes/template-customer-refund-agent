@@ -4,6 +4,7 @@ import { createHonoServer } from "@mastra/deployer/server";
 import { SpanType } from "@mastra/core/observability";
 import { TestExporter } from "@mastra/observability";
 import { issueLocalSession } from "../../src/mastra/server/auth";
+import { deterministicJsonModel } from "../fixtures/deterministic-language-model";
 
 const databases: string[] = [];
 const shutdowns: Array<() => Promise<void>> = [];
@@ -224,5 +225,49 @@ describe("configured Mastra built-in API authorization", () => {
       expect(exported).not.toContain(marker);
     expect(exported).toContain("case-diagnostic-003");
     expect(exported).toContain("failed");
+  });
+
+  it("flushes real registered generation spans to LibSQL and preserves numeric usage", async () => {
+    const { mastra } = await configuredServer();
+    const { triageResultSchema } =
+      await import("../../src/mastra/domain/support-case");
+    const triage = mastra.getAgent("triageAgent");
+    triage.__updateModel({
+      model: deterministicJsonModel({
+        intent: "other",
+        urgency: "normal",
+        sentiment: "neutral",
+        requiresHumanReview: false,
+        confidence: 0.9,
+        rationale: "synthetic",
+      }) as never,
+    });
+    const result = await triage.generate(
+      [{ role: "user", content: "Synthetic trace request." }],
+      { structuredOutput: { schema: triageResultSchema } },
+    );
+    expect(result.traceId).toBeTruthy();
+    await mastra.observability.flush();
+    const store = (await mastra.getStorage()!.getStore("observability")) as {
+      getTrace(args: { traceId: string }): Promise<{
+        spans: Array<{
+          spanType: string;
+          attributes?: Record<string, unknown>;
+        }>;
+      } | null>;
+    };
+    const trace = await store.getTrace({ traceId: result.traceId! });
+    expect(
+      trace?.spans.some((span) => span.spanType === "model_generation"),
+    ).toBe(true);
+    expect(
+      trace?.spans.some((span) => span.spanType === "model_inference"),
+    ).toBe(true);
+    const generation = trace?.spans.find(
+      (span) => span.spanType === "model_generation",
+    );
+    expect(generation?.attributes).toMatchObject({
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
   });
 });

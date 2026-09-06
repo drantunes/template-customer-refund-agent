@@ -34,4 +34,32 @@ describe("operational alert policy", () => {
       ),
     ).toContain("refund-failure");
   });
+
+  it("keeps exact threshold and 15-minute boundaries deterministic", () => {
+    const now = new Date("2026-01-01T00:15:00.000Z");
+    const exactlyTwoPercent = Array.from({ length: 100 }, (_, index) => ({
+      providerOrTool: "provider",
+      occurredAt: new Date("2026-01-01T00:00:00.000Z"),
+      durationMs: index >= 95 ? 5_000 : 1,
+      failed: index < 2,
+    }));
+    expect(alertReasons(exactlyTwoPercent, now)).toEqual([]);
+    expect(
+      alertReasons(
+        [
+          ...exactlyTwoPercent,
+          {
+            providerOrTool: "provider",
+            occurredAt: new Date("2025-12-31T23:59:59.999Z"),
+            durationMs: 9_999,
+            failed: true,
+          },
+        ],
+        now,
+      ),
+    ).toEqual([]);
+    expect(
+      classifyFailure({ ...exactlyTwoPercent[0]!, durationMs: 5_001 }),
+    ).toBe("escalate");
+  });
 });

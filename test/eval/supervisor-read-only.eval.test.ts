@@ -76,30 +76,26 @@ describe("registered support supervisor read-only acceptance", () => {
     const { mastra } = await import("../../src/mastra/index");
     const { caseStore } = await import("../../src/mastra/lib/case-store");
     const supervisor = mastra.getAgent("supportSupervisorAgent");
-    mastra
-      .getAgent("triageAgent")
-      .__updateModel({
-        model: deterministicJsonModel({
-          intent: "duplicate_charge",
-          urgency: "normal",
-          sentiment: "neutral",
-          requiresHumanReview: false,
-          confidence: 0.9,
-          rationale: "Duplicate charge.",
-        }) as never,
-      });
-    mastra
-      .getAgent("responseAgent")
-      .__updateModel({
-        model: deterministicJsonModel({
-          draftResponse:
-            "A support specialist will review the duplicate charge under the policy.",
-          citedSources: ["Duplicate charge policy"],
-          recommendRefund: false,
-          requiresEscalation: true,
-          escalationReason: "Approval is required.",
-        }) as never,
-      });
+    mastra.getAgent("triageAgent").__updateModel({
+      model: deterministicJsonModel({
+        intent: "duplicate_charge",
+        urgency: "normal",
+        sentiment: "neutral",
+        requiresHumanReview: false,
+        confidence: 0.9,
+        rationale: "Duplicate charge.",
+      }) as never,
+    });
+    mastra.getAgent("responseAgent").__updateModel({
+      model: deterministicJsonModel({
+        draftResponse:
+          "A support specialist will review the duplicate charge under the policy.",
+        citedSources: ["Duplicate charge policy"],
+        recommendRefund: false,
+        requiresEscalation: true,
+        escalationReason: "Approval is required.",
+      }) as never,
+    });
     supervisor.__updateModel({ model: deterministicLookupModel() as never });
     const before = Object.keys(await supervisor.listTools()).sort();
     const casesBefore = await caseStore.list();
