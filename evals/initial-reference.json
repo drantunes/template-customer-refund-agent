@@ -2,8 +2,8 @@
   "kind": "support-eval-initial-reference",
   "runner": "deterministic-native-observed-runtime-v4",
   "executionMode": "deterministic-scripted-transport-no-paid-routes",
-  "implementationSha": "568e746bdc24bfa0fe69349c0f55f1b869cd2043",
-  "runnerSourceHash": "cded403b368f5b5421968aae481ea8d24fe0cf0dc6048142a8296182ccedb90c",
+  "implementationSha": "f471236380e2f9b8ee96375c782bc73a6c18a8b9",
+  "runnerSourceHash": "a65d85136c6d059a8310f684f68e277c8e136cb305ef8deffd0c80f2e8b420c5",
   "scorerSourceHashes": {
     "src/mastra/evals/index.ts": "71e8d416bc84dd5f193bad245e962d8688636059abc931f98fe91d553224cb62"
   },
@@ -22,10 +22,10 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "837a868e15ce91c86699dd0802d00cc30aa34c6f94d2ef052ff3bce23a37567d",
+        "evidenceHash": "7bcc2c968f0a295e30535c8981c2f8436385d1479adec51a610738b4034d475b",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-64a11f82-e484-4b57-865b-23c23f2a1d96",
+          "caseId": "phase004-eval-0d0f0df4-b96d-4d82-b6c4-bf15515f2512",
           "scorerId": "groundedness",
           "score": 1,
           "modelOutputs": {
@@ -60,10 +60,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "f8cc1f4cddc93a25fb7c23cc26bb827c5c150f6a8aeaeeee3e4af38c62e992fa",
+        "evidenceHash": "d4a1e2ae7d51d63159a1475fb46038b7c8e0e2c703f2dd57d252b79b31d91df4",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-f8c67387-c9dd-432d-804a-ed0a67950468",
+          "caseId": "phase004-eval-0cb1f25a-0696-4d63-a9f7-8ba445cbab98",
           "scorerId": "groundedness",
           "score": 1,
           "modelOutputs": {
@@ -98,10 +98,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "f30020e49c087978f6c239d0deff2563adafae39745ccac8189b175b75671048",
+        "evidenceHash": "f5945cbdb04eab33296ac66f3f1a04b6a0e6b20809128417bd853bb6795ad8b8",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-020a4707-1774-4d5d-99ac-864a225b61cf",
+          "caseId": "phase004-eval-b99b0c1c-ce20-495f-b832-8479b1da4356",
           "scorerId": "groundedness",
           "score": 1,
           "modelOutputs": {
@@ -136,10 +136,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "4a1917e63d531fbf99afec7efde6f488610c030b82cdfb794763eec7938c4a06",
+        "evidenceHash": "345c6103ab1f75acd06a80ad309cc222829ffa7a9a6a897d843bf1593a6b3f4a",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-fe25154a-f0bd-4a07-97ad-de22aef65b39",
+          "caseId": "phase004-eval-49db39ec-0d8b-48d7-be42-84c8eacd7a3e",
           "scorerId": "multi-turn-consistency",
           "score": 1,
           "modelOutputs": {
@@ -176,10 +176,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "35f43a25fea5b100c3ccb2862f0a260db89b1fcc6e6712c1fc52140e79e4c06a",
+        "evidenceHash": "03c7e012f875cb508e5114d4806f22305162fc150200d3a08bbe2e915e67a965",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-6523c720-0368-46d8-bebf-c8d98f82cbb7",
+          "caseId": "phase004-eval-f14732a7-eb3e-4b83-8652-2815207294c9",
           "scorerId": "multi-turn-consistency",
           "score": 1,
           "modelOutputs": {
@@ -216,10 +216,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "1f383f76bb37fac2a6913d78ea1f6882a423f6d1353245c9af77dc56ea3a0e48",
+        "evidenceHash": "9131e305e0f78633ce80d5af75e3f1429c79224f8c46ace38308f676fcffa0ff",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-c2e8812b-e85f-4e50-b8f7-5a09a4462bd9",
+          "caseId": "phase004-eval-dd2761be-644e-40e5-be47-5a3a14c14374",
           "scorerId": "policy-compliance",
           "score": 1,
           "modelOutputs": {},
@@ -242,10 +242,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "fa6ef9e3f17db102d7088a3b2cb38d060eb177f33549d99043055db48ce3ef1a",
+        "evidenceHash": "99b345a800d3535e96a03c26c8365d6f584cca2dc554f0bc82b5779a7672efc2",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-784e92e1-3f77-42b2-837c-266b2974b77a",
+          "caseId": "phase004-eval-fb10d904-39cc-4a68-aaf5-fa4d199d9337",
           "scorerId": "policy-compliance",
           "score": 1,
           "modelOutputs": {},
@@ -268,10 +268,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "b84cd7a5352da48a4e281b036c1d1a1642c0e76a6da508b12f1753263b3fc3c8",
+        "evidenceHash": "28e387f0caccba7f7396bad58b19f6022fa36fd2e3921216ef630f91a9cea1b9",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-1b407c6c-ff57-4908-8991-e96d57f31542",
+          "caseId": "phase004-eval-e7f7c316-52bb-4ac5-be28-ef2d40b47026",
           "scorerId": "policy-compliance",
           "score": 1,
           "modelOutputs": {},
@@ -294,10 +294,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "1f5a4a69c9db00f45bb141b4809ffb9245bb8b4025373133c10574053c87dd3b",
+        "evidenceHash": "2e70b6aefb5ebbfe4eb59d94d55659f52309247023ed2b82433c07ba97fab5be",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-0cb6b25b-43c0-4ec9-98e0-9fdb7fe64baa",
+          "caseId": "phase004-eval-c146fe52-e338-42b1-9455-4a4614ffdf5c",
           "scorerId": "policy-compliance",
           "score": 1,
           "modelOutputs": {},
@@ -320,10 +320,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "d1342fc4bf4253ab0696d9d00e28731b3d67871e8b69294a7af695066c454d17",
+        "evidenceHash": "7702eb08645c3d2cd3e525fdbafe6df6ce634a3b0c6e9b8fd9d0c6d428be3251",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-361ca687-7b96-4df9-9e26-8839c283c6ae",
+          "caseId": "phase004-eval-51d6162c-cc46-4186-ab11-04393f9f7e4d",
           "scorerId": "policy-compliance",
           "score": 1,
           "modelOutputs": {},
@@ -346,10 +346,10 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "f890d611e6f8f406f99d837bce5eefff751e1f9cf652bcf39ef987ab48873389",
+        "evidenceHash": "6f5d2536fbc1ba0969ace7d8b18235e237f425cc0c416397c9e9fd3e1fb277be",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-b2ca0cd0-91f8-4e06-82e9-4f379c8c6e81",
+          "caseId": "phase004-eval-7371884e-c091-45b2-b7d3-73e02663083e",
           "scorerId": "resolution-quality",
           "score": 1,
           "modelOutputs": {
@@ -383,10 +383,10 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "dee6d925ecb2b258676f5fd8b6462be1b3f9bbc0db336483537320a32c490fba",
+        "evidenceHash": "9844fa25d10a0cd2526b0daf47cc7623f4a376973fa287323aa0d6170b1a2959",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-44a2f714-6e1b-4d80-affa-ba6e79d63862",
+          "caseId": "phase004-eval-707bad7b-99c7-4cf0-bec6-8af645d2e416",
           "scorerId": "resolution-quality",
           "score": 1,
           "modelOutputs": {
@@ -420,10 +420,10 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "14f8119aa36b9cf9d59d617a8e6aefdb547f2aa481389501f18197fb72ae79c1",
+        "evidenceHash": "277180425729f8067ea9a7665c32ed501a8d3189647859d343de623fef33f738",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-445d5ebc-982e-4013-9783-8bebd9744c56",
+          "caseId": "phase004-eval-acc986f6-dc4b-4f61-8f83-240a5271ff6f",
           "scorerId": "routing-accuracy",
           "score": 1,
           "modelOutputs": {
@@ -446,10 +446,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "c92a003e153b364eea2eedc4ff014ee8d3f3c315dd1e27e55825590b6b2eb998",
+        "evidenceHash": "302168db33f11fe16ff37dd90277d2fecd395d09bb8541f857f8ac873c920065",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-b342636e-a597-4d4e-9af6-318cd8917e3b",
+          "caseId": "phase004-eval-b272eed0-7a0f-49c8-87f0-eccf891ac278",
           "scorerId": "routing-accuracy",
           "score": 1,
           "modelOutputs": {
@@ -472,10 +472,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "2ea2e94aed52b9a582655539a8e69890a1efbd42171805651bf0808b3ae0a69c",
+        "evidenceHash": "92d5d77741ca58ee8a79415c89d42abf76756fd81614cfd4b5d81adb0e0417da",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-3d635bc7-33e3-44a0-a531-ee0e80c49d77",
+          "caseId": "phase004-eval-4f0d2bab-f88c-424d-b58c-a6ce4531a5c5",
           "scorerId": "tool-call-correctness",
           "score": 1,
           "modelOutputs": {},
@@ -493,7 +493,7 @@
                   }
                 ]
               },
-              "rawResultHash": "cf12e16a0dfd1b5f1003923ced7dd2c88060a3c86b986021d8c2284e3dd94c07"
+              "rawResultHash": "7a7989231ff9141199c73dcdbd2805be16075b5e50cd6f62c2d55613c3b382d4"
             },
             {
               "sequence": 2,
@@ -530,7 +530,7 @@
                   }
                 ]
               },
-              "rawResultHash": "cf12e16a0dfd1b5f1003923ced7dd2c88060a3c86b986021d8c2284e3dd94c07"
+              "rawResultHash": "7a7989231ff9141199c73dcdbd2805be16075b5e50cd6f62c2d55613c3b382d4"
             },
             {
               "sequence": 4,
@@ -582,10 +582,10 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "69e60c73b5fa040206748af53475ddcf956c98fb471e1be2f5f19440336f03bd",
+        "evidenceHash": "335af33e91576c52e3f76e08ad41f20bce4ca8cd641db8c015a1aaed10c306e1",
         "summary": {
           "schemaVersion": 1,
-          "caseId": "phase004-eval-8756a786-5e95-4c00-bd86-40a6dbfad887",
+          "caseId": "phase004-eval-e1e34309-00a7-4647-b155-fbbd8d4793ef",
           "scorerId": "tool-call-correctness",
           "score": 1,
           "modelOutputs": {},
@@ -603,7 +603,7 @@
                   }
                 ]
               },
-              "rawResultHash": "cf12e16a0dfd1b5f1003923ced7dd2c88060a3c86b986021d8c2284e3dd94c07"
+              "rawResultHash": "7a7989231ff9141199c73dcdbd2805be16075b5e50cd6f62c2d55613c3b382d4"
             },
             {
               "sequence": 2,
@@ -640,7 +640,7 @@
                   }
                 ]
               },
-              "rawResultHash": "cf12e16a0dfd1b5f1003923ced7dd2c88060a3c86b986021d8c2284e3dd94c07"
+              "rawResultHash": "7a7989231ff9141199c73dcdbd2805be16075b5e50cd6f62c2d55613c3b382d4"
             },
             {
               "sequence": 4,
@@ -697,9 +697,9 @@
   },
   "costMicros": 0,
   "pricing": "not-applicable-deterministic-transport",
-  "evidenceHash": "bd6e540453a5b4a3ed98bf9be61e05487fbe758edfeb3e822fe46fc37cb84e85",
+  "evidenceHash": "cf67c2f9c17997c3564c040822623525b717c88e3e6628390b1651879167afd9",
   "regression": "initial-reference-measured-native-observed-runtime-no-prior-history",
-  "reportHash": "a95e217f22272571754697e681c8ccf0eab0f7a123d5ceae30b8b97d4c036fd9",
+  "reportHash": "a606b5f7b76e2bf0329f9d6df1263306691036e51e2656a4cdffb706b3364368",
   "initialReference": true,
   "historicalComparison": null
 }
