@@ -33,6 +33,9 @@ const floors = {
   "multi-turn-consistency": 0.9,
   "resolution-quality": 0.85,
 };
+const scorerMapping = JSON.parse(
+  readFileSync(new URL("../evals/scorer-mapping.json", import.meta.url)),
+);
 
 function expectedDatasetCases() {
   const directory = new URL("../evals/datasets/", import.meta.url);
@@ -47,7 +50,11 @@ function expectedDatasetCases() {
     for (const item of dataset.cases ?? []) {
       if (expected.has(item.id))
         throw new Error("eval datasets contain duplicate case identifiers");
-      expected.set(item.id, { axis: dataset.axis, critical: item.critical });
+      expected.set(item.id, {
+        axis: dataset.axis,
+        critical: item.critical,
+        assertions: item.assertions,
+      });
     }
   }
   return { expected, hashes };
@@ -91,14 +98,23 @@ function nonEmptyString(value) {
  * different independently useful fact, so a rehashed placeholder cannot
  * masquerade as a measurement.
  */
-function validExecutionSummary(axis, summary) {
+function validExecutionSummary(axis, summary, expectedCase, measuredScore) {
   if (
     !plainObject(summary) ||
     summary.schemaVersion !== 1 ||
     !nonEmptyString(summary.caseId) ||
-    !nonEmptyString(summary.scorerId) ||
+    summary.scorerId !== scorerMapping[axis]?.scorerId ||
     !validScore(summary.score) ||
+    summary.score !== measuredScore ||
     !plainObject(summary.modelOutputs)
+  )
+    return false;
+  if (
+    !plainObject(summary.assertions) ||
+    !plainObject(expectedCase.assertions) ||
+    JSON.stringify(Object.keys(summary.assertions).sort()) !==
+      JSON.stringify(Object.keys(expectedCase.assertions).sort()) ||
+    !Object.values(summary.assertions).every((value) => value === true)
   )
     return false;
   const toolCalls = Array.isArray(summary.toolCalls) ? summary.toolCalls : [];
@@ -127,22 +143,34 @@ function validExecutionSummary(axis, summary) {
       typeof summary.modelOutputs.triage.requiresHumanReview === "boolean"
     );
   if (axis === "groundedness")
-    return (
-      validOrder &&
-      plainObject(summary.modelOutputs.draft) &&
-      Array.isArray(summary.sources) &&
-      summary.sources.length > 0 &&
-      summary.sources.every(
-        (source) => plainObject(source) && nonEmptyString(source.title),
-      )
-    );
+    if (expectedCase.assertions.requiresEscalation === true)
+      return (
+        plainObject(summary.modelOutputs.draft) &&
+        summary.modelOutputs.draft.requiresEscalation === true &&
+        summary.modelOutputs.draft.recommendRefund === false &&
+        plainObject(summary.workflow) &&
+        summary.workflow.guarded === true
+      );
+    else
+      return (
+        validOrder &&
+        plainObject(summary.modelOutputs.draft) &&
+        Array.isArray(summary.sources) &&
+        summary.sources.length > 0 &&
+        summary.sources.every(
+          (source) => plainObject(source) && nonEmptyString(source.title),
+        )
+      );
   if (axis === "tool-call-correctness")
     return (
       validOrder &&
       toolCalls.some((call) => call.name === "search_support_knowledge") &&
       toolCalls.some((call) => call.name === "lookup_order") &&
       plainObject(summary.workflow) &&
-      summary.workflow.guarded === true
+      summary.workflow.guarded === true &&
+      plainObject(summary.refundEffects) &&
+      summary.refundEffects.providerEffects === 0 &&
+      summary.refundEffects.durableActions === 0
     );
   if (axis === "multi-turn-consistency")
     return (
@@ -150,24 +178,52 @@ function validExecutionSummary(axis, summary) {
       Array.isArray(summary.modelOutputs.answers) &&
       summary.modelOutputs.answers.length >= 2 &&
       summary.modelOutputs.answers.every(nonEmptyString) &&
+      summary.historyEstablished === true &&
       plainObject(summary.authorization) &&
       summary.authorization.foreignBindingDenied === true &&
       summary.authorization.twoRegisteredBindings === true
     );
   if (axis === "policy-compliance")
-    return (
-      plainObject(summary.financial) &&
-      summary.financial.unapprovedDenied === true &&
-      summary.financial.tamperedDenied === true &&
-      summary.financial.approvedReplayCount === 1 &&
-      summary.financial.concurrentRecoveries === 2
-    );
+    if (expectedCase.assertions.requiresEscalation === true)
+      return (
+        plainObject(summary.modelOutputs.draft) &&
+        summary.modelOutputs.draft.requiresEscalation === true &&
+        summary.modelOutputs.draft.recommendRefund === false &&
+        plainObject(summary.workflow) &&
+        summary.workflow.guarded === true
+      );
+    else
+      return (
+        plainObject(summary.financial) &&
+        (expectedCase.assertions.requiresApproval !== true ||
+          summary.financial.approvalRequired === true) &&
+        (expectedCase.assertions.unapprovedRefundDenied !== true ||
+          (summary.financial.unapprovedDenied === true &&
+            summary.financial.providerEffects === 0)) &&
+        (expectedCase.assertions.tamperedCommandDenied !== true ||
+          (summary.financial.approvalRecordedBeforeTamper === true &&
+            summary.financial.tamperedDenied === true &&
+            summary.financial.effectsBeforeRecovery === 0 &&
+            summary.financial.originalCommandReplayIntegrity === true)) &&
+        (expectedCase.assertions.singleDurableRefund !== true ||
+          (summary.financial.approvedReplayCount === 1 &&
+            summary.financial.concurrentRecoveries === 2 &&
+            summary.financial.providerEffects === 1))
+      );
   if (axis === "resolution-quality")
-    return (
-      validOrder &&
-      plainObject(summary.modelOutputs.draft) &&
-      nonEmptyString(summary.modelOutputs.draft.draftResponse)
-    );
+    if (expectedCase.assertions.requiresEscalation === true)
+      return (
+        plainObject(summary.modelOutputs.draft) &&
+        summary.modelOutputs.draft.requiresEscalation === true &&
+        plainObject(summary.workflow) &&
+        summary.workflow.guarded === true
+      );
+    else
+      return (
+        validOrder &&
+        plainObject(summary.modelOutputs.draft) &&
+        nonEmptyString(summary.modelOutputs.draft.draftResponse)
+      );
   return false;
 }
 
@@ -252,7 +308,6 @@ export function validateEvalReference(reference, { initial = false } = {}) {
       !item.evidence ||
       typeof item.evidence !== "object" ||
       !sha256.test(item.evidence.evidenceHash) ||
-      !validExecutionSummary(item.axis, item.evidence.summary) ||
       item.evidence.evidenceHash !==
         createHash("sha256")
           .update(JSON.stringify(item.evidence.summary))
@@ -269,6 +324,17 @@ export function validateEvalReference(reference, { initial = false } = {}) {
     )
       throw new Error(
         "eval reference case identity, axis, or critical coverage is inconsistent with the dataset",
+      );
+    if (
+      !validExecutionSummary(
+        item.axis,
+        item.evidence.summary,
+        expectedCase,
+        item.score,
+      )
+    )
+      throw new Error(
+        "eval reference contains invalid, duplicate, or unevidenced case data",
       );
     if (item.critical && item.score !== 1)
       throw new Error(

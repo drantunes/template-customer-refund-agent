@@ -16,6 +16,17 @@ type DatasetCase = {
   assertions: Record<string, unknown>;
 };
 type Dataset = { axis: string; cases: DatasetCase[] };
+type AssertionObservation = {
+  triage?: Record<string, unknown>;
+  draft?: Record<string, unknown>;
+  calls?: ObservedCall[];
+  workflow?: Record<string, unknown>;
+  authorization?: Record<string, unknown>;
+  financial?: Record<string, unknown>;
+  historyEstablished?: boolean;
+  refundEffects?: Record<string, unknown>;
+  order?: unknown;
+};
 type ObservedCall = {
   sequence: number;
   name: string;
@@ -34,29 +45,33 @@ const datasets: Dataset[] = [];
 const ciEvaluationBudget = createValidationBudgetExecution("ci-eval");
 const budgetedDeterministicModel = (model: LanguageModelV2) =>
   budgetedLanguageModel(model, ciEvaluationBudget);
-const scorerKey: Record<string, string> = {
-  groundedness: "groundedness",
-  "policy-compliance": "policyCompliance",
-  "routing-accuracy": "routingAccuracy",
-  "tool-call-correctness": "toolCallCorrectness",
-  "multi-turn-consistency": "multiTurnConsistency",
-  "resolution-quality": "resolutionQuality",
-};
+const scorerMapping = JSON.parse(
+  await readFile(
+    new URL("../../evals/scorer-mapping.json", import.meta.url),
+    "utf8",
+  ),
+) as Record<string, { registryKey: string; scorerId: string }>;
 const binding = (id: string, tenantId = "local-demo") => ({
   tenantId,
   providerKind: "local" as const,
-  providerAccountId: tenantId === "local-demo" ? "local-demo" : `account-${id}`,
+  providerAccountId: `phase004-account-${id}`,
   externalConversationId: id,
 });
 
-function responseModel(answer: string, citation: string): LanguageModelV2 {
+function responseModel(options: {
+  firstAnswer: string;
+  citation: string;
+  requiresEscalation?: boolean;
+  recommendRefund?: boolean;
+  followUpContradiction?: boolean;
+}): LanguageModelV2 {
   let iteration = 0;
   return {
     specificationVersion: "v2",
     provider: "phase004-test",
     modelId: "observed-response-trajectory",
     supportedUrls: {},
-    async doGenerate() {
+    async doGenerate(request) {
       iteration += 1;
       if (iteration === 1)
         return {
@@ -92,15 +107,22 @@ function responseModel(answer: string, citation: string): LanguageModelV2 {
           usage: { inputTokens: 1, outputTokens: 1 },
           warnings: [],
         };
+      const receivedPrompt = JSON.stringify(request.prompt);
+      const historyEstablished = receivedPrompt.includes(options.firstAnswer);
+      const answer = historyEstablished
+        ? options.followUpContradiction
+          ? "Order ORD-1001 was cancelled."
+          : "Order ORD-1001 remains fulfilled; the earlier duplicate-charge review is unchanged."
+        : options.firstAnswer;
       return {
         content: [
           {
             type: "text" as const,
             text: JSON.stringify({
               draftResponse: answer,
-              citedSources: [citation],
-              recommendRefund: false,
-              requiresEscalation: false,
+              citedSources: [options.citation],
+              recommendRefund: options.recommendRefund ?? false,
+              requiresEscalation: options.requiresEscalation ?? false,
             }),
           },
         ],
@@ -147,17 +169,25 @@ async function createCase(input: string) {
 }
 
 /** Runs registered agents/tools. Calls are captured by wrapping their actual execution boundary. */
-async function observedReadTrajectory(input: string) {
+async function observedReadTrajectory(
+  input: string,
+  options: { includeMemory?: boolean; followUpContradiction?: boolean } = {},
+) {
   const { mastra } = await import("../../src/mastra/index");
   const { publishKnowledge } =
     await import("../../src/mastra/lib/publish-knowledge");
   const { ensureProviderFixtures } =
     await import("../../src/mastra/providers/registry");
+  const { registerProviderRegistry } =
+    await import("../../src/mastra/providers/registry");
+  const { localRuntime } =
+    await import("../../src/mastra/runtime/local-runtime");
   const { withTrustedCaseReadScope } =
     await import("../../src/mastra/lib/trusted-run-scope");
   const { triageResultSchema, draftResolutionSchema } =
     await import("../../src/mastra/domain/support-case");
   const { id, configured } = await createCase(input);
+  registerProviderRegistry(localRuntime, [configured]);
   await publishKnowledge(configured, { onlyIfMissing: true });
   await ensureProviderFixtures(configured);
   const search = mastra.getTool("searchSupportKnowledgeTool");
@@ -206,26 +236,29 @@ async function observedReadTrajectory(input: string) {
     const response = mastra.getAgent("responseAgent");
     const thread = `phase004-eval-thread-${id}`;
     const resource = "local-demo:customer-alex";
-    const runTurn = async (message: string, answer: string) => {
-      const model = responseModel(answer, "Duplicate Charge Policy");
+    const firstAnswer =
+      "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.";
+    const runTurn = async (message: string, includeMemory: boolean) => {
+      const model = responseModel({
+        firstAnswer,
+        citation: "Duplicate Charge Policy",
+        followUpContradiction: options.followUpContradiction,
+      });
       response.__updateModel({ model: model as never });
       return withTrustedCaseReadScope(
         { caseId: id, ownerId: "customer-alex", tenantId: configured.tenantId },
         () =>
           response.generate([{ role: "user", content: message }], {
             structuredOutput: { schema: draftResolutionSchema },
-            memory: { thread, resource },
+            memory: includeMemory ? { thread, resource } : undefined,
             model: budgetedLanguageModel(model as never, ciEvaluationBudget),
           }),
       );
     };
-    const first = await runTurn(
-      input,
-      "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
-    );
+    const first = await runTurn(input, true);
     const second = await runTurn(
       "Please confirm the earlier order status.",
-      "Order ORD-1001 remains fulfilled; the earlier duplicate-charge review is unchanged.",
+      options.includeMemory ?? true,
     );
     const order = calls.find((call) => call.name === "lookup_order")?.result;
     const sources = calls.find(
@@ -237,6 +270,8 @@ async function observedReadTrajectory(input: string) {
       triage: triageResult.object!,
       draft: first.object!,
       answers: [first.object!.draftResponse, second.object!.draftResponse],
+      historyEstablished:
+        second.object!.draftResponse.includes("remains fulfilled"),
       calls,
       order,
       sources: sources?.sources ?? [],
@@ -247,21 +282,37 @@ async function observedReadTrajectory(input: string) {
   }
 }
 
-let workflowGuardPromise:
-  | Promise<{ guarded: boolean; status?: string; outboxBody: string }>
-  | undefined;
-async function workflowGuardEvidence() {
-  workflowGuardPromise ??= (async () => {
+async function workflowGuardEvidence(evidenceKind: "invalid" | "expired") {
+  return (async () => {
     const { mastra } = await import("../../src/mastra/index");
     const { caseStore } = await import("../../src/mastra/lib/case-store");
-    const { id } = await createCase("refund now with invented policy");
+    const { publishKnowledge } =
+      await import("../../src/mastra/lib/publish-knowledge");
+    const { registerProviderRegistry } =
+      await import("../../src/mastra/providers/registry");
+    const { localRuntime } =
+      await import("../../src/mastra/runtime/local-runtime");
+    const { id, configured } = await createCase(
+      `refund ${evidenceKind} evidence policy`,
+    );
+    registerProviderRegistry(localRuntime, [configured]);
+    await publishKnowledge(configured, { onlyIfMissing: true });
+    if (evidenceKind === "expired")
+      await caseStore.getClientForTests().execute({
+        sql: "UPDATE support_knowledge_documents SET expires_at = ? WHERE provider_kind = ? AND provider_account_id = ?",
+        args: [
+          "2000-01-01T00:00:00.000Z",
+          configured.providerKind,
+          configured.providerAccountId,
+        ],
+      });
     const [turn] = await caseStore.turns(id);
     if (!turn) throw new Error("Expected immutable workflow turn.");
     mastra.getAgent("responseAgent").__updateModel({
       model: budgetedDeterministicModel(
         deterministicJsonModel({
           draftResponse: "Your refund has already been issued.",
-          citedSources: ["Invented policy"],
+          citedSources: evidenceKind === "invalid" ? ["Invented policy"] : [],
           recommendRefund: true,
           refundAmount: 49,
           refundCurrency: "USD",
@@ -294,21 +345,32 @@ async function workflowGuardEvidence() {
         !/already been issued/i.test(outboxBody),
       status: persisted?.status,
       outboxBody,
+      draft: persisted?.draft,
+      order: persisted?.orderLookup,
+      evidenceKind,
+      policyMatchCount: persisted?.policyMatches?.length ?? 0,
     };
   })();
-  return workflowGuardPromise;
 }
 
-let financialPromise: Promise<Record<string, unknown>> | undefined;
-async function observedFinancialEvidence() {
-  financialPromise ??= (async () => {
+async function observedFinancialEvidence(
+  scenario:
+    | "approval-required"
+    | "unapproved-financial-denied"
+    | "tampered-approved-command-denied"
+    | "approved-replay-concurrency",
+) {
+  return (async () => {
     const { mastra } = await import("../../src/mastra/index");
     const { caseStore } = await import("../../src/mastra/lib/case-store");
     const { localRuntime, recoverApprovedNativeDecisions } =
       await import("../../src/mastra/runtime/local-runtime");
+    const { registerProviderRegistry } =
+      await import("../../src/mastra/providers/registry");
     const { id, configured } = await createCase(
       "Please refund the duplicate charge.",
     );
+    registerProviderRegistry(localRuntime, [configured]);
     await localRuntime.seed(configured);
     mastra.getAgent("triageAgent").__updateModel({
       model: budgetedDeterministicModel(
@@ -432,6 +494,15 @@ async function observedFinancialEvidence() {
       throw new Error(
         `Financial workflow did not suspend: ${JSON.stringify({ status: waiting?.status, draft: waiting?.draft, started })}`,
       );
+    if (
+      !native.runId ||
+      !native.toolCallId ||
+      !native.fingerprint ||
+      !native.turnId
+    )
+      throw new Error(
+        `Financial workflow native approval binding is incomplete: ${JSON.stringify(native)}`,
+      );
     command = (await caseStore.getAction(
       id,
       "refund-command",
@@ -452,47 +523,77 @@ async function observedFinancialEvidence() {
     } catch (error) {
       unapprovedError = String(error);
     }
+    const approvalRequired =
+      Boolean(native.runId) &&
+      Boolean(native.toolCallId) &&
+      Boolean(native.fingerprint) &&
+      Boolean(native.turnId);
+    let approvalRecordedBeforeTamper = false;
     let tamperedError = "";
-    try {
-      await localRuntime.issueRefund({
-        ...(command as never),
-        fingerprint: "tampered",
+    let effectsBeforeRecovery = 0;
+    let recoveries: number[] = [];
+    if (scenario !== "unapproved-financial-denied") {
+      await caseStore.recordApprovalDecision({
+        caseId: id,
+        turnId: native.turnId,
+        commandFingerprint: native.fingerprint,
+        principalId: "approver-demo",
+        approved: true,
+        nativeRunId: native.runId,
+        nativeToolCallId: native.toolCallId,
       });
-    } catch (error) {
-      tamperedError = String(error);
+      approvalRecordedBeforeTamper = true;
+      if (scenario === "tampered-approved-command-denied") {
+        try {
+          await localRuntime.issueRefund({
+            ...(command as never),
+            fingerprint: "tampered",
+          });
+        } catch (error) {
+          tamperedError = String(error);
+        }
+        effectsBeforeRecovery = (
+          await localRuntime.refunds(configured, "ORD-1001")
+        ).length;
+      }
+      if (scenario !== "approval-required")
+        recoveries = await Promise.all([
+          recoverApprovedNativeDecisions(mastra, caseStore, {
+            disableScorers: true,
+          }),
+          recoverApprovedNativeDecisions(mastra, caseStore, {
+            disableScorers: true,
+          }),
+        ]);
     }
-    await caseStore.recordApprovalDecision({
-      caseId: id,
-      turnId: native.turnId,
-      commandFingerprint: native.fingerprint,
-      principalId: "approver-demo",
-      approved: true,
-      nativeRunId: native.runId,
-      nativeToolCallId: native.toolCallId,
-    });
-    const recoveries = await Promise.all([
-      recoverApprovedNativeDecisions(mastra, caseStore, {
-        disableScorers: true,
-      }),
-      recoverApprovedNativeDecisions(mastra, caseStore, {
-        disableScorers: true,
-      }),
-    ]);
     const refunds = await localRuntime.refunds(configured, "ORD-1001");
+    const durableActions = await caseStore.getClientForTests().execute({
+      sql: "SELECT COUNT(*) AS count FROM support_actions WHERE case_id = ? AND kind IN ('refund-failure', 'refund-uncertain', 'refund-command')",
+      args: [id],
+    });
     return {
+      scenario,
+      approvalRequired,
       unapprovedDenied:
         /persisted approved|current durable workflow dispatch/i.test(
           unapprovedError,
         ),
       unapprovedError,
+      approvalRecordedBeforeTamper,
       tamperedDenied: /fingerprint was tampered/i.test(tamperedError),
       tamperedError,
+      effectsBeforeRecovery,
       approvedReplayCount: refunds.length,
+      providerEffects: refunds.length,
+      durableActions: Number(durableActions.rows[0]?.count ?? 0),
+      originalCommandReplayIntegrity:
+        refunds.length === 1 &&
+        refunds[0]?.reason === command.reason &&
+        refunds[0]?.orderId === command.orderId,
       concurrentRecoveries: recoveries.length,
       recoveryResults: recoveries,
     };
   })();
-  return financialPromise;
 }
 
 async function foreignBindingEvidence(
@@ -540,29 +641,167 @@ async function foreignBindingEvidence(
   };
 }
 
+function asRecord(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+/** Every dataset assertion is executable; an undeclared assertion is a test failure. */
+function evaluateDatasetAssertions(
+  assertions: Record<string, unknown>,
+  observed: AssertionObservation,
+) {
+  const draft = asRecord(observed.draft);
+  const financial = asRecord(observed.financial);
+  const authorization = asRecord(observed.authorization);
+  const workflow = asRecord(observed.workflow);
+  const triage = asRecord(observed.triage);
+  const calls = observed.calls ?? [];
+  const refundEffects = asRecord(observed.refundEffects);
+  const evaluated: Record<string, boolean> = {};
+  for (const [name, expected] of Object.entries(assertions)) {
+    let actual: boolean;
+    switch (name) {
+      case "requiresCitation":
+        actual =
+          expected === true &&
+          Array.isArray(draft.citedSources) &&
+          draft.citedSources.length > 0;
+        break;
+      case "requiresEscalation":
+        actual =
+          expected === true &&
+          draft.requiresEscalation === true &&
+          draft.recommendRefund === false &&
+          workflow.guarded === true;
+        break;
+      case "unsupportedFinancialDraftEscalates":
+        actual =
+          expected === true &&
+          workflow.guarded === true &&
+          workflow.status === "escalated";
+        break;
+      case "sameThread":
+        actual = expected === true && observed.historyEstablished === true;
+        break;
+      case "tenantDenied":
+        actual =
+          expected === true && authorization.foreignBindingDenied === true;
+        break;
+      case "twoRegisteredBindings":
+        actual =
+          expected === true && authorization.twoRegisteredBindings === true;
+        break;
+      case "requiresApproval":
+        actual = expected === true && financial.approvalRequired === true;
+        break;
+      case "unapprovedRefundDenied":
+        actual =
+          expected === true &&
+          financial.unapprovedDenied === true &&
+          financial.providerEffects === 0;
+        break;
+      case "tamperedCommandDenied":
+        actual =
+          expected === true &&
+          financial.approvalRecordedBeforeTamper === true &&
+          financial.tamperedDenied === true &&
+          financial.effectsBeforeRecovery === 0 &&
+          financial.originalCommandReplayIntegrity === true;
+        break;
+      case "singleDurableRefund":
+        actual =
+          expected === true &&
+          financial.approvedReplayCount === 1 &&
+          financial.concurrentRecoveries === 2 &&
+          financial.providerEffects === 1;
+        break;
+      case "intent":
+        actual = triage.intent === expected;
+        break;
+      case "requiresHumanReview":
+        actual = triage.requiresHumanReview === expected;
+        break;
+      case "readOnlyToolsFirst":
+        actual =
+          expected === true &&
+          calls.length >= 2 &&
+          calls[0]?.name === "search_support_knowledge" &&
+          calls[1]?.name === "lookup_order" &&
+          !calls.some((call) => call.name === "issue_refund") &&
+          refundEffects.providerEffects === 0 &&
+          refundEffects.durableActions === 0;
+        break;
+      case "forbiddenTool":
+        actual =
+          typeof expected === "string" &&
+          !calls.some((call) => call.name === expected);
+        break;
+      case "customerFacing":
+        actual =
+          expected === true &&
+          String(draft.draftResponse ?? "").includes("ORD-1001") &&
+          String(draft.draftResponse ?? "")
+            .toLowerCase()
+            .includes("fulfilled");
+        break;
+      default:
+        throw new Error(`Unhandled declared dataset assertion: ${name}`);
+    }
+    evaluated[name] = actual;
+    if (!actual)
+      throw new Error(
+        `Dataset assertion ${name} failed with ${JSON.stringify({ expected, draft, financial, authorization, workflow, refundEffects })}`,
+      );
+    expect(actual, `dataset assertion ${name}`).toBe(true);
+  }
+  return evaluated;
+}
+
+async function caseRefundEffects(
+  caseId: string,
+  configured: ReturnType<typeof binding>,
+) {
+  const { caseStore } = await import("../../src/mastra/lib/case-store");
+  const { localRuntime } =
+    await import("../../src/mastra/runtime/local-runtime");
+  const actions = await caseStore.getClientForTests().execute({
+    sql: "SELECT COUNT(*) AS count FROM support_actions WHERE case_id = ? AND kind IN ('refund-command', 'refund-failure', 'refund-uncertain')",
+    args: [caseId],
+  });
+  return {
+    providerEffects: (await localRuntime.refunds(configured, "ORD-1001"))
+      .length,
+    durableActions: Number(actions.rows[0]?.count ?? 0),
+  };
+}
+
 function truth(
   axis: string,
   item: DatasetCase,
-  evidence: Awaited<ReturnType<typeof observedReadTrajectory>>,
+  evidence: AssertionObservation,
 ) {
-  const order = (
-    evidence.order as { order?: { orderId?: string; status?: string } }
-  )?.order;
+  const order = asRecord(evidence.order).order as
+    { orderId?: string; status?: string } | undefined;
   const base = { orderId: order?.orderId, orderStatus: order?.status };
   if (axis === "routing-accuracy")
     return {
       ...base,
-      intent: item.id === "duplicate-charge" ? "duplicate_charge" : "other",
-      requiresHumanReview: item.id === "adversarial-routing",
+      ...item.assertions,
+      intent: item.assertions.intent ?? "other",
+      requiresHumanReview: item.assertions.requiresHumanReview ?? false,
     };
   if (axis === "groundedness")
     return {
       ...base,
-      allowedSources: evidence.sources.map((source) => source.metadata.title),
+      ...item.assertions,
+      allowedSources: ["Duplicate Charge Policy"],
     };
   if (axis === "tool-call-correctness")
     return {
       ...base,
+      ...item.assertions,
       expectedCallOrder: [
         "search_support_knowledge",
         "lookup_order",
@@ -572,26 +811,10 @@ function truth(
       queryText: "duplicate charge policy",
       customerEmail: "alex@example.com",
     };
-  if (axis === "policy-compliance")
-    return { ...base, requiresEscalation: false, recommendRefund: false };
-  return base;
-}
-function scorerOutput(
-  axis: string,
-  evidence: Awaited<ReturnType<typeof observedReadTrajectory>>,
-  authorization: Record<string, unknown>,
-  financial: Record<string, unknown>,
-  workflow: Record<string, unknown>,
-) {
-  if (axis === "routing-accuracy") return evidence.triage;
-  if (axis === "groundedness")
-    return { ...evidence.draft, order: evidence.order };
-  if (axis === "tool-call-correctness")
-    return { toolCalls: evidence.calls, refundEffects: 0, workflow };
+  if (axis === "policy-compliance") return { ...base, ...item.assertions };
   if (axis === "multi-turn-consistency")
-    return { answers: evidence.answers, authorization };
-  if (axis === "policy-compliance") return { ...evidence.draft, financial };
-  return { ...evidence.draft, order: evidence.order };
+    return { ...base, ...item.assertions, historyEstablished: true };
+  return { ...base, ...item.assertions };
 }
 
 describe("Phase 004 deterministic native evaluation", () => {
@@ -607,31 +830,81 @@ describe("Phase 004 deterministic native evaluation", () => {
       );
     const { supportEvalScorerRegistry } =
       await import("../../src/mastra/evals");
-    const financial = await observedFinancialEvidence();
-    const workflow = await workflowGuardEvidence();
-    expect(financial).toMatchObject({
-      unapprovedDenied: true,
-      tamperedDenied: true,
-      approvedReplayCount: 1,
-      concurrentRecoveries: 2,
-    });
-    expect(workflow.guarded).toBe(true);
     for (const dataset of datasets)
       for (const item of dataset.cases) {
-        const evidence = await observedReadTrajectory(item.input);
-        const authorization = await foreignBindingEvidence(evidence);
-        expect(authorization.foreignBindingDenied).toBe(true);
-        const output = scorerOutput(
-          dataset.axis,
-          evidence,
-          authorization,
-          financial,
-          workflow,
+        const read = await observedReadTrajectory(item.input);
+        const observed: AssertionObservation = {
+          triage: read.triage,
+          draft: read.draft,
+          calls: read.calls,
+          order: read.order,
+          historyEstablished: read.historyEstablished,
+          refundEffects: await caseRefundEffects(read.caseId, read.binding),
+        };
+        if (
+          item.id === "unsupported-policy" ||
+          item.id === "workflow-guard-mutation" ||
+          item.id === "evidence-required" ||
+          item.id === "insufficient-evidence"
+        ) {
+          const evidenceKind =
+            item.id === "unsupported-policy" ||
+            item.id === "workflow-guard-mutation"
+              ? "invalid"
+              : item.id === "evidence-required"
+                ? "expired"
+                : "expired";
+          const workflow = await workflowGuardEvidence(evidenceKind);
+          observed.workflow = workflow;
+          observed.draft = asRecord(workflow.draft);
+          observed.order = workflow.order;
+        }
+        if (item.id === "cross-tenant-denied")
+          observed.authorization = await foreignBindingEvidence(read);
+        if (dataset.axis === "policy-compliance" && !observed.workflow)
+          observed.financial = await observedFinancialEvidence(
+            item.id as Parameters<typeof observedFinancialEvidence>[0],
+          );
+        const assertionResults = evaluateDatasetAssertions(
+          item.assertions,
+          observed,
         );
-        const scorer = supportEvalScorerRegistry[scorerKey[dataset.axis]!];
+        const output =
+          dataset.axis === "routing-accuracy"
+            ? observed.triage
+            : dataset.axis === "groundedness"
+              ? {
+                  ...observed.draft,
+                  order: observed.order,
+                  workflow: observed.workflow,
+                }
+              : dataset.axis === "tool-call-correctness"
+                ? {
+                    toolCalls: observed.calls,
+                    refundEffects: observed.refundEffects,
+                    workflow: { guarded: true },
+                  }
+                : dataset.axis === "multi-turn-consistency"
+                  ? {
+                      answers: read.answers,
+                      historyEstablished: observed.historyEstablished,
+                      authorization: observed.authorization,
+                    }
+                  : dataset.axis === "policy-compliance"
+                    ? { ...observed.draft, financial: observed.financial }
+                    : { ...observed.draft, order: observed.order };
+        const scorer =
+          supportEvalScorerRegistry[
+            scorerMapping[dataset.axis]?.registryKey ?? ""
+          ];
+        if (!scorer)
+          throw new Error(
+            `Dataset axis has no declared registered scorer: ${dataset.axis}`,
+          );
+        expect(scorer.id).toBe(scorerMapping[dataset.axis]?.scorerId);
         const scored = await scorer.run({
           output,
-          groundTruth: truth(dataset.axis, item, evidence),
+          groundTruth: truth(dataset.axis, item, observed),
         });
         expect(scored.score, `${dataset.axis}/${item.id}`).toBe(1);
         // Preserve the native boundary's exact inputs and a hash of its raw
@@ -639,7 +912,7 @@ describe("Phase 004 deterministic native evaluation", () => {
         // full policy document in every per-case immutable reference record.
         const toolCalls =
           dataset.axis === "tool-call-correctness"
-            ? evidence.calls.map((call) => ({
+            ? (observed.calls ?? []).map((call) => ({
                 sequence: call.sequence,
                 name: call.name,
                 input: call.input,
@@ -670,28 +943,39 @@ describe("Phase 004 deterministic native evaluation", () => {
             : [];
         const axisEvidence =
           dataset.axis === "routing-accuracy"
-            ? { modelOutputs: { triage: evidence.triage } }
+            ? { modelOutputs: { triage: observed.triage } }
             : dataset.axis === "groundedness"
               ? {
-                  modelOutputs: { draft: evidence.draft },
-                  order: evidence.order,
-                  sources: evidence.sources.map((source) => ({
+                  modelOutputs: { draft: observed.draft },
+                  order: observed.order,
+                  sources: read.sources.map((source) => ({
                     title: source.metadata.title,
                   })),
+                  workflow: observed.workflow,
                 }
               : dataset.axis === "tool-call-correctness"
-                ? { order: evidence.order, workflow }
+                ? {
+                    order: observed.order,
+                    workflow: { guarded: true },
+                    refundEffects: observed.refundEffects,
+                  }
                 : dataset.axis === "multi-turn-consistency"
                   ? {
-                      modelOutputs: { answers: evidence.answers },
-                      order: evidence.order,
-                      authorization,
+                      modelOutputs: { answers: read.answers },
+                      order: observed.order,
+                      historyEstablished: observed.historyEstablished,
+                      authorization: observed.authorization,
                     }
                   : dataset.axis === "policy-compliance"
-                    ? { financial }
+                    ? {
+                        modelOutputs: { draft: observed.draft },
+                        financial: observed.financial,
+                        workflow: observed.workflow,
+                      }
                     : {
-                        modelOutputs: { draft: evidence.draft },
-                        order: evidence.order,
+                        modelOutputs: { draft: observed.draft },
+                        order: observed.order,
+                        workflow: observed.workflow,
                       };
         results.push({
           id: item.id,
@@ -700,9 +984,10 @@ describe("Phase 004 deterministic native evaluation", () => {
           score: scored.score,
           evidence: {
             schemaVersion: 1,
-            caseId: evidence.caseId,
+            caseId: read.caseId,
             scorerId: scorer.id,
             score: scored.score,
+            assertions: assertionResults,
             modelOutputs: {},
             toolCalls,
             ...axisEvidence,
@@ -750,7 +1035,7 @@ describe("Phase 004 deterministic native evaluation", () => {
             approvedReplayCount: 2,
           },
         },
-        groundTruth: { requiresEscalation: false, recommendRefund: false },
+        groundTruth: { singleDurableRefund: true },
       }),
     ).resolves.toMatchObject({ score: 0 });
     await expect(
@@ -766,6 +1051,51 @@ describe("Phase 004 deterministic native evaluation", () => {
           },
         },
         groundTruth: { orderId: "ORD-1001", orderStatus: "fulfilled" },
+      }),
+    ).resolves.toMatchObject({ score: 0 });
+  });
+
+  it("fails multi-turn scoring when native received history is absent or contradicted", async () => {
+    const { supportEvalScorerRegistry } =
+      await import("../../src/mastra/evals");
+    const absent = await observedReadTrajectory("same conversation follow-up", {
+      includeMemory: false,
+    });
+    const contradictory = await observedReadTrajectory(
+      "same conversation follow-up",
+      {
+        followUpContradiction: true,
+      },
+    );
+    const truth = {
+      orderId: "ORD-1001",
+      orderStatus: "fulfilled",
+      historyEstablished: true,
+    };
+    await expect(
+      supportEvalScorerRegistry.multiTurnConsistency.run({
+        output: {
+          answers: absent.answers,
+          historyEstablished: absent.historyEstablished,
+          authorization: {
+            foreignBindingDenied: true,
+            twoRegisteredBindings: true,
+          },
+        },
+        groundTruth: truth,
+      }),
+    ).resolves.toMatchObject({ score: 0 });
+    await expect(
+      supportEvalScorerRegistry.multiTurnConsistency.run({
+        output: {
+          answers: contradictory.answers,
+          historyEstablished: contradictory.historyEstablished,
+          authorization: {
+            foreignBindingDenied: true,
+            twoRegisteredBindings: true,
+          },
+        },
+        groundTruth: truth,
       }),
     ).resolves.toMatchObject({ score: 0 });
   });

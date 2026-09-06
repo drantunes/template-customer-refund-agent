@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
@@ -15,6 +16,21 @@ function measuredReference() {
 }
 function rehash(record: Record<string, unknown>) {
   record.reportHash = reportHash(record);
+  return record;
+}
+function rehashEvidence(record: {
+  perCaseScores: Array<{
+    evidence: { summary: unknown; evidenceHash: string };
+  }>;
+  evidenceHash: string;
+}) {
+  for (const item of record.perCaseScores)
+    item.evidence.evidenceHash = createHash("sha256")
+      .update(JSON.stringify(item.evidence.summary))
+      .digest("hex");
+  record.evidenceHash = createHash("sha256")
+    .update(JSON.stringify(record.perCaseScores))
+    .digest("hex");
   return record;
 }
 
@@ -68,5 +84,27 @@ describe("immutable eval reference records", () => {
     expect(() => validateEvalReference(rehash(aggregate))).toThrow(
       "usage or execution evidence",
     );
+  });
+
+  it("rejects rehashed contradictory measurements, scorer identities, and assertion results", () => {
+    const contradictory = measuredReference();
+    contradictory.perCaseScores[0].evidence.summary.score = 0;
+    expect(() =>
+      validateEvalReference(rehash(rehashEvidence(contradictory))),
+    ).toThrow("invalid, duplicate, or unevidenced");
+
+    const wrongScorer = measuredReference();
+    wrongScorer.perCaseScores[0].evidence.summary.scorerId = "wrong-scorer";
+    expect(() =>
+      validateEvalReference(rehash(rehashEvidence(wrongScorer))),
+    ).toThrow("invalid, duplicate, or unevidenced");
+
+    const failedAssertion = measuredReference();
+    failedAssertion.perCaseScores[0].evidence.summary.assertions = {
+      requiresCitation: false,
+    };
+    expect(() =>
+      validateEvalReference(rehash(rehashEvidence(failedAssertion))),
+    ).toThrow("invalid, duplicate, or unevidenced");
   });
 });

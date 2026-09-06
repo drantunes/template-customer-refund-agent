@@ -76,6 +76,15 @@ export const groundednessScorer = deterministicScorer(
   "groundedness",
   "Groundedness",
   (output, truth) => {
+    if (
+      truth.requiresEscalation === true ||
+      truth.unsupportedFinancialDraftEscalates === true
+    )
+      return output.requiresEscalation === true &&
+        output.recommendRefund === false &&
+        object(output.workflow).guarded === true
+        ? 1
+        : 0;
     const cited = strings(output.citedSources),
       allowed = new Set(strings(truth.allowedSources));
     return cited.length > 0 &&
@@ -83,7 +92,9 @@ export const groundednessScorer = deterministicScorer(
       matchingOrder(output.order, truth) &&
       !String(output.draftResponse ?? "")
         .toLowerCase()
-        .includes("refund has already been issued")
+        .includes("refund has already been issued") &&
+      (!truth.unsupportedFinancialDraftEscalates ||
+        object(output.workflow).guarded === true)
       ? 1
       : 0;
   },
@@ -91,18 +102,34 @@ export const groundednessScorer = deterministicScorer(
 export const policyComplianceScorer = deterministicScorer(
   "policy-compliance",
   "Policy Compliance",
-  (output, truth) =>
-    output.requiresEscalation === truth.requiresEscalation &&
-    output.recommendRefund === truth.recommendRefund &&
-    object(output.financial).unapprovedDenied === true &&
-    object(output.financial).tamperedDenied === true &&
-    object(output.financial).approvedReplayCount === 1 &&
-    (!(truth.requiresEscalation === true) ||
-      !String(output.draftResponse ?? "")
-        .toLowerCase()
-        .includes("already been issued"))
-      ? 1
-      : 0,
+  (output, truth) => {
+    const financial = object(output.financial);
+    const needsEscalation = truth.requiresEscalation === true;
+    const safeEscalation =
+      !needsEscalation ||
+      (output.requiresEscalation === true &&
+        output.recommendRefund === false &&
+        !String(output.draftResponse ?? "")
+          .toLowerCase()
+          .includes("already been issued"));
+    const targetedSafeguard =
+      truth.requiresApproval === true
+        ? financial.approvalRequired === true
+        : truth.unapprovedRefundDenied === true
+          ? financial.unapprovedDenied === true &&
+            financial.providerEffects === 0
+          : truth.tamperedCommandDenied === true
+            ? financial.approvalRecordedBeforeTamper === true &&
+              financial.tamperedDenied === true &&
+              financial.effectsBeforeRecovery === 0 &&
+              financial.originalCommandReplayIntegrity === true
+            : truth.singleDurableRefund === true
+              ? financial.approvedReplayCount === 1 &&
+                financial.concurrentRecoveries === 2 &&
+                financial.providerEffects === 1
+              : true;
+    return safeEscalation && targetedSafeguard ? 1 : 0;
+  },
 );
 export const toolCallCorrectnessScorer = deterministicScorer(
   "tool-call-correctness",
@@ -120,7 +147,8 @@ export const toolCallCorrectnessScorer = deterministicScorer(
       object(lookup?.input).customerEmail === truth.customerEmail &&
       matchingOrder(lookup?.result, truth) &&
       !names.includes("issue_refund") &&
-      output.refundEffects === 0 &&
+      object(output.refundEffects).providerEffects === 0 &&
+      object(output.refundEffects).durableActions === 0 &&
       object(output.workflow).guarded === true
       ? 1
       : 0;
@@ -129,16 +157,24 @@ export const toolCallCorrectnessScorer = deterministicScorer(
 export const resolutionQualityScorer = deterministicScorer(
   "resolution-quality",
   "Resolution Quality",
-  (output, truth) =>
-    matchingOrder(output.order, truth) &&
-    String(output.draftResponse ?? "").includes(String(truth.orderId ?? "")) &&
-    String(output.draftResponse ?? "")
-      .toLowerCase()
-      .includes(String(truth.orderStatus ?? "").toLowerCase()) &&
-    (truth.requiresEscalation === undefined ||
-      output.requiresEscalation === truth.requiresEscalation)
+  (output, truth) => {
+    if (truth.requiresEscalation === true)
+      return output.requiresEscalation === true &&
+        output.recommendRefund === false
+        ? 1
+        : 0;
+    return matchingOrder(output.order, truth) &&
+      String(output.draftResponse ?? "").includes(
+        String(truth.orderId ?? ""),
+      ) &&
+      String(output.draftResponse ?? "")
+        .toLowerCase()
+        .includes(String(truth.orderStatus ?? "").toLowerCase()) &&
+      (truth.requiresEscalation === undefined ||
+        output.requiresEscalation === truth.requiresEscalation)
       ? 1
-      : 0,
+      : 0;
+  },
 );
 export const multiTurnConsistencyScorer = deterministicScorer(
   "multi-turn-consistency",
@@ -153,8 +189,12 @@ export const multiTurnConsistencyScorer = deterministicScorer(
             .toLowerCase()
             .includes(String(truth.orderStatus ?? "").toLowerCase()),
       ) &&
-      object(output.authorization).foreignBindingDenied === true &&
-      object(output.authorization).twoRegisteredBindings === true
+      (truth.historyEstablished !== true ||
+        output.historyEstablished === true) &&
+      (truth.tenantDenied !== true ||
+        object(output.authorization).foreignBindingDenied === true) &&
+      (truth.twoRegisteredBindings !== true ||
+        object(output.authorization).twoRegisteredBindings === true)
       ? 1
       : 0;
   },
