@@ -61,6 +61,15 @@ export const supervisorExecutionResponseSchema = z.object({
   text: z.string(),
   traceId: z.string().optional(),
   toolNames: z.array(z.string()),
+  // Staff can inspect the read-only evidence their authorized supervisor run
+  // actually observed. This deliberately exposes no command or approval data.
+  toolResults: z.array(
+    z.object({
+      toolName: z.string(),
+      result: z.unknown().optional(),
+      isError: z.boolean(),
+    }),
+  ),
 });
 export const monitoringSummarySchema = z.object({
   generatedAt: z.iso.datetime(),

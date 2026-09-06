@@ -523,6 +523,15 @@ export const supportCaseSupervisorRoute = registerApiRoute(
           409,
         );
       const binding = bindingsForCase(supportCase).support;
+      // Mastra's final aggregate omits failed tool calls after the model
+      // recovers with a text response. Capture the supported native iteration
+      // result so the authenticated staff response reports both successful
+      // evidence and a denied read without fabricating either outcome.
+      const observedToolResults: Array<{
+        name: string;
+        result: unknown;
+        error?: Error;
+      }> = [];
       const result = await withTrustedCaseReadScope(
         { caseId: supportCase.id, ownerId, tenantId: binding.tenantId },
         () =>
@@ -542,18 +551,27 @@ export const supportCaseSupervisorRoute = registerApiRoute(
                   resource: resourceIdForOwner(ownerId, binding.tenantId),
                 },
                 requestContext: c.get("requestContext"),
+                onIterationComplete: ({ toolResults }) => {
+                  observedToolResults.push(...toolResults);
+                },
               },
             ),
       );
+      const toolResults = observedToolResults.map((entry) => ({
+        toolName: entry.name,
+        result: entry.error ? { error: entry.error.message } : entry.result,
+        // All four direct supervisor tools and both registered specialists
+        // have object output schemas. Mastra materializes a thrown tool error
+        // as its message string in this native hook rather than setting
+        // `error`, so a string here is the observed denied-tool outcome.
+        isError: Boolean(entry.error) || typeof entry.result === "string",
+      }));
       return c.json(
         supervisorExecutionResponseSchema.parse({
           text: result.text,
           traceId: result.traceId,
-          toolNames: result.toolResults.map(
-            (entry) =>
-              (entry as { payload?: { toolName?: string } }).payload
-                ?.toolName ?? "unknown",
-          ),
+          toolNames: toolResults.map((entry) => entry.toolName),
+          toolResults,
         }),
       );
     },

@@ -31,6 +31,30 @@ const indexNameForGeneration = (generationId: string) =>
     .digest("hex")
     .slice(0, 32)}`;
 
+function chunkId(documentHash: string, chunkIndex: number, text: string) {
+  return createHash("sha256")
+    .update(JSON.stringify([documentHash, chunkIndex, text]))
+    .digest("hex");
+}
+
+async function authoritativeChunks(document: PublishedEvidence) {
+  const mdoc = MDocument.fromText(document.text, {
+    title: document.title,
+    source: document.source,
+  });
+  return (
+    await mdoc.chunk({
+      strategy: "recursive",
+      maxSize: 512,
+      overlap: 50,
+    })
+  ).map((piece, chunkIndex) => ({
+    chunkIndex,
+    text: String(piece.text),
+    chunkId: chunkId(document.documentHash, chunkIndex, String(piece.text)),
+  }));
+}
+
 /** Builds an isolated physical index. Callers publish the matching SQL
  * generation only after this succeeds, preserving the previous serving pair. */
 export async function buildPublishedVectorCandidate(
@@ -74,7 +98,7 @@ export async function buildPublishedVectorCandidate(
       maxSize: 512,
       overlap: 50,
     });
-    for (const piece of pieces)
+    for (const [chunkIndex, piece] of pieces.entries())
       chunks.push({
         text: String(piece.text),
         metadata: {
@@ -87,6 +111,12 @@ export async function buildPublishedVectorCandidate(
           effectiveAt: authoritative.effectiveAt,
           indexedAt: authoritative.indexedAt,
           expiresAt: authoritative.expiresAt,
+          chunkIndex,
+          chunkId: chunkId(
+            authoritative.documentHash,
+            chunkIndex,
+            String(piece.text),
+          ),
           tenantId: binding.tenantId,
           providerKind: binding.providerKind,
           providerAccountId: binding.providerAccountId,
@@ -156,7 +186,12 @@ export async function searchPublishedVector(
       typeof metadata.source !== "string" ||
       typeof metadata.version !== "string" ||
       typeof metadata.title !== "string" ||
-      typeof metadata.text !== "string"
+      typeof metadata.text !== "string" ||
+      !metadata.text ||
+      !Number.isInteger(metadata.chunkIndex) ||
+      (metadata.chunkIndex as number) < 0 ||
+      typeof metadata.chunkId !== "string" ||
+      !metadata.chunkId
     )
       throw new Error("Knowledge vector result has incomplete provenance.");
     const authoritative = await knowledgePublicationStore.document(
@@ -167,14 +202,21 @@ export async function searchPublishedVector(
     );
     // The vector index may be stale or corrupt. A row is usable only when its
     // source identity and all serving metadata match SQL authority, and its
-    // chunk text is demonstrably part of that authoritative document.
+    // exact generated chunk identity/content match the authoritative source.
+    const authoritativeChunk = authoritative
+      ? (await authoritativeChunks(authoritative)).find(
+          (chunk) => chunk.chunkIndex === metadata.chunkIndex,
+        )
+      : undefined;
     if (
       !authoritative ||
       metadata.title !== authoritative.title ||
       metadata.version !== authoritative.version ||
       metadata.effectiveAt !== authoritative.effectiveAt ||
       metadata.expiresAt !== authoritative.expiresAt ||
-      !authoritative.text.includes(metadata.text)
+      !authoritativeChunk ||
+      metadata.text !== authoritativeChunk.text ||
+      metadata.chunkId !== authoritativeChunk.chunkId
     )
       throw new Error(
         "Knowledge vector result does not match the publication.",

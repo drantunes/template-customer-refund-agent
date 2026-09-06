@@ -151,17 +151,67 @@ describe("support knowledge index", () => {
     const publishedGeneration = results.sources[0]!.metadata.generationId;
     const { searchPublishedVector, vectorStore } =
       await import("../../src/mastra/lib/vector-store");
-    const first = results.sources[0]!;
-    const query = vi.spyOn(vectorStore, "query").mockResolvedValue([
+    const originalQuery = vectorStore.query.bind(vectorStore);
+    let generatedMetadata: Record<string, unknown> | undefined;
+    const query = vi
+      .spyOn(vectorStore, "query")
+      .mockImplementation(async (input) => {
+        const rows = await originalQuery(input);
+        generatedMetadata = rows[0]?.metadata as Record<string, unknown>;
+        return rows;
+      });
+    await expect(
+      searchPublishedVector(
+        readBinding,
+        publishedGeneration,
+        "duplicate charge refund policy",
+        1,
+      ),
+    ).resolves.toHaveLength(1);
+    expect(generatedMetadata).toMatchObject({
+      chunkId: expect.any(String),
+      chunkIndex: expect.any(Number),
+      text: expect.any(String),
+    });
+    query.mockResolvedValue([
       {
         score: 1,
         metadata: {
-          ...first.metadata,
-          tenantId: "local-demo",
+          ...generatedMetadata,
           // Preserve the selected generation and hash while altering content
           // provenance: vector metadata is never serving authority.
           title: "Tampered policy title",
-          text: first.document,
+        },
+      },
+    ] as never);
+    await expect(
+      searchPublishedVector(
+        readBinding,
+        publishedGeneration,
+        "duplicate charge refund policy",
+        1,
+      ),
+    ).rejects.toThrow("does not match the publication");
+    query.mockResolvedValue([
+      {
+        score: 1,
+        metadata: { ...generatedMetadata, text: "" },
+      },
+    ] as never);
+    await expect(
+      searchPublishedVector(
+        readBinding,
+        publishedGeneration,
+        "duplicate charge refund policy",
+        1,
+      ),
+    ).rejects.toThrow("incomplete provenance");
+    query.mockResolvedValue([
+      {
+        score: 1,
+        metadata: {
+          ...generatedMetadata,
+          text: String(generatedMetadata?.text).slice(0, 12),
         },
       },
     ] as never);

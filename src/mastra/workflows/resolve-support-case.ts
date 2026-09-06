@@ -461,35 +461,42 @@ const draftResponseStep = createStep({
     // A model cannot turn absent, stale, or conflicting evidence into an
     // executable promise. Preserve its text for staff review, but force the
     // durable case down the escalation path and suppress a refund proposal.
-    const safeDraft =
-      missingEvidence || invalidCitation || staleOrUnauthoritativeEvidence
-        ? {
-            ...parsedDraft,
-            draftResponse:
-              "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
-            recommendRefund: false,
-            refundAmount: undefined,
-            refundCurrency: undefined,
-            refundReason: undefined,
-            requiresEscalation: true,
-            escalationReason: missingEvidence
-              ? "No published policy evidence was retrieved for this case."
-              : "Draft lacks applicable evidence from the active publication.",
-          }
-        : parsedDraft;
+    // An escalation is deliberately a handoff, not a license to deliver
+    // arbitrary model prose.  Keep the model's proposed text only in staff
+    // metadata: even a non-refund draft can falsely assert that a refund was
+    // issued or rely on evidence that expired while it was being generated.
+    const mustUseSafeEscalation =
+      parsedDraft.requiresEscalation ||
+      missingEvidence ||
+      invalidCitation ||
+      staleOrUnauthoritativeEvidence;
+    const safeDraft = mustUseSafeEscalation
+      ? {
+          ...parsedDraft,
+          draftResponse:
+            "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
+          recommendRefund: false,
+          refundAmount: undefined,
+          refundCurrency: undefined,
+          refundReason: undefined,
+          requiresEscalation: true,
+          escalationReason: missingEvidence
+            ? "No published policy evidence was retrieved for this case."
+            : "Draft lacks applicable evidence from the active publication.",
+        }
+      : parsedDraft;
     await caseStore.update(supportCase.id, {
       draft: safeDraft,
-      metadata:
-        missingEvidence || invalidCitation || staleOrUnauthoritativeEvidence
-          ? {
-              ...supportCase.metadata,
-              rejectedDraftForStaff: {
-                draftResponse: parsedDraft.draftResponse,
-                citedSources: parsedDraft.citedSources,
-                reason: safeDraft.escalationReason,
-              },
-            }
-          : supportCase.metadata,
+      metadata: mustUseSafeEscalation
+        ? {
+            ...supportCase.metadata,
+            rejectedDraftForStaff: {
+              draftResponse: parsedDraft.draftResponse,
+              citedSources: parsedDraft.citedSources,
+              reason: safeDraft.escalationReason,
+            },
+          }
+        : supportCase.metadata,
       agentUsage: {
         inputTokens:
           (existingUsage?.inputTokens ?? 0) + (responseUsage.inputTokens ?? 0),

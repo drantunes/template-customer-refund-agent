@@ -1033,6 +1033,7 @@ describe("support workflow HTTP context propagation", () => {
       expect((await runtimeCaseStore.get(caseId))?.status).toBe("escalated"),
     );
     const supportCase = await runtimeCaseStore.get(caseId);
+    if (!supportCase) throw new Error("Expected escalated support case.");
     const outbox = await runtimeCaseStore.getClientForTests().execute({
       sql: "SELECT body FROM support_outbox WHERE case_id = ?",
       args: [caseId],
@@ -1043,6 +1044,106 @@ describe("support workflow HTTP context propagation", () => {
     const metadata = supportCase!.metadata as Record<string, unknown>;
     expect(metadata.rejectedDraftForStaff).toMatchObject({
       draftResponse: "Your refund has already been issued.",
+    });
+  });
+
+  it("never delivers an already-escalated uncited financial claim", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      responseAgent,
+    } = await loadDeterministicRuntime();
+    vi.mocked(responseAgent.generate).mockResolvedValueOnce({
+      object: {
+        draftResponse: "Your refund has already been issued.",
+        citedSources: [],
+        recommendRefund: false,
+        requiresEscalation: true,
+        escalationReason: "Please review this manually.",
+      },
+      usage: { inputTokens: 1, outputTokens: 1 },
+      response: { modelId: "deterministic/unsafe-escalation" },
+    } as never);
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `uncited-escalation-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Refund request",
+        body: "Refund me.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("escalated"),
+    );
+    const supportCase = await runtimeCaseStore.get(caseId);
+    if (!supportCase) throw new Error("Expected escalated support case.");
+    const outbox = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT body FROM support_outbox WHERE case_id = ?",
+      args: [caseId],
+    });
+    expect(supportCase.finalResponse).toContain("specialist needs to review");
+    expect(supportCase.finalResponse).not.toContain("already been issued");
+    expect(String(outbox.rows[0]?.body)).toBe(supportCase.finalResponse);
+    expect(
+      (supportCase.metadata as Record<string, unknown>).rejectedDraftForStaff,
+    ).toMatchObject({ draftResponse: "Your refund has already been issued." });
+  });
+
+  it("replaces an expired-policy draft before finalization and outbox delivery", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      responseAgent,
+    } = await loadDeterministicRuntime();
+    vi.mocked(responseAgent.generate).mockImplementationOnce(async () => {
+      // Retrieval has already persisted its policy matches. Expire the active
+      // authoritative document while generation is in flight to exercise the
+      // decision-time publication recheck rather than a fabricated draft.
+      await runtimeCaseStore.getClientForTests().execute({
+        sql: "UPDATE support_knowledge_documents SET expires_at = ?",
+        args: ["2000-01-01T00:00:00.000Z"],
+      });
+      return {
+        object: {
+          draftResponse: "The duplicate-charge policy confirms your refund.",
+          citedSources: ["duplicate-charge-policy"],
+          recommendRefund: false,
+          requiresEscalation: false,
+        },
+        usage: { inputTokens: 1, outputTokens: 1 },
+        response: { modelId: "deterministic/expired-policy" },
+      } as never;
+    });
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `expired-policy-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Duplicate charge",
+        body: "I was charged twice for order ORD-1001.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("escalated"),
+    );
+    const supportCase = await runtimeCaseStore.get(caseId);
+    if (!supportCase) throw new Error("Expected escalated support case.");
+    const outbox = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT body FROM support_outbox WHERE case_id = ?",
+      args: [caseId],
+    });
+    expect(supportCase.finalResponse).toContain("specialist needs to review");
+    expect(supportCase.finalResponse).not.toContain("duplicate-charge policy");
+    expect(String(outbox.rows[0]?.body)).toBe(supportCase.finalResponse);
+    expect(
+      (supportCase.metadata as Record<string, unknown>).rejectedDraftForStaff,
+    ).toMatchObject({
+      draftResponse: "The duplicate-charge policy confirms your refund.",
     });
   });
 

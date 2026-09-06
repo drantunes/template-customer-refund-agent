@@ -359,8 +359,10 @@ describe("resolve support case WIP characterization", () => {
     const second = await caseStore.get(supportCase.id);
     expect(second).toMatchObject({
       status: "escalated",
-      finalResponse: "A distinct response for the queued second request.",
-      escalationReason: "Second-turn escalation.",
+      finalResponse:
+        "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
+      escalationReason:
+        "Draft lacks applicable evidence from the active publication.",
     });
     const turns = await caseStore.turns(supportCase.id);
     expect(turns).toHaveLength(2);
@@ -536,7 +538,8 @@ describe("resolve support case WIP characterization", () => {
     expect(result.status).toBe("success");
     expect(await caseStore.get(supportCase.id)).toMatchObject({
       status: "escalated",
-      escalationReason: "Deterministic escalation.",
+      escalationReason:
+        "Draft lacks applicable evidence from the active publication.",
     });
   });
 
