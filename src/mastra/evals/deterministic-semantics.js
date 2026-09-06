@@ -7,12 +7,21 @@ const EXPECTED_ORDER_ID = "ORD-1001";
 const EXPECTED_ORDER_STATUS = "fulfilled";
 const EXPECTED_CUSTOMER_EMAIL = "alex@example.com";
 const EXPECTED_QUERY = "duplicate charge policy";
+const EXPECTED_KNOWLEDGE_EVIDENCE = {
+  title: "Duplicate Charge Policy",
+  source: "duplicate-charge-policy",
+  // This is the versioned local fixture's authoritative document digest, not
+  // a value learned from an eval report.
+  documentHash:
+    "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+};
 const EXPECTED_CALL_ORDER = [
   "search_support_knowledge",
   "lookup_order",
   "search_support_knowledge",
   "lookup_order",
 ];
+const SHA256 = /^[a-f0-9]{64}$/;
 
 export const SUPPORTED_AXES = [
   "groundedness",
@@ -36,23 +45,171 @@ function object(value) {
   }
 }
 
-function strings(value) {
-  return Array.isArray(value)
-    ? value.filter((item) => typeof item === "string")
-    : [];
+/**
+ * Eval evidence is untrusted when it is replayed from a reference. Never
+ * filter malformed entries before applying a universal condition: doing so
+ * would let a malformed call, source, answer, or turn disappear from the
+ * measurement. `null` means the entire collection is invalid.
+ */
+function strictRecords(value) {
+  if (!Array.isArray(value)) return null;
+  const result = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    result.push(item);
+  }
+  return result;
 }
 
-function records(value) {
-  return Array.isArray(value) ? value.map(object) : [];
+function strictStrings(value) {
+  if (!Array.isArray(value)) return null;
+  const result = [];
+  for (const item of value) {
+    if (typeof item !== "string") return null;
+    result.push(item);
+  }
+  return result;
 }
 
-function matchingOrder(value) {
+function matchingOrder(value, expected = {}) {
   const order = object(value);
+  const orderValue = object(order.order);
   return (
     order.found === true &&
-    object(order.order).orderId === EXPECTED_ORDER_ID &&
-    object(order.order).status === EXPECTED_ORDER_STATUS
+    orderValue.orderId === (expected.orderId ?? EXPECTED_ORDER_ID) &&
+    orderValue.status === (expected.orderStatus ?? EXPECTED_ORDER_STATUS) &&
+    orderValue.customerEmail ===
+      (expected.customerEmail ?? EXPECTED_CUSTOMER_EMAIL)
   );
+}
+
+function acceptableKnowledgeEvidence(value, expected) {
+  const result = object(value);
+  const sources = strictRecords(result.sources);
+  if (!sources || sources.length === 0) return false;
+  let authoritative = false;
+  for (const source of sources) {
+    // Native tool output retains provenance under metadata; compact immutable
+    // report evidence stores those same three fields at the source level.
+    const provenance = object(source.metadata);
+    const title = source.title ?? provenance.title;
+    const sourceId = source.source ?? provenance.source;
+    const documentHash = source.documentHash ?? provenance.documentHash;
+    if (
+      typeof title !== "string" ||
+      typeof sourceId !== "string" ||
+      typeof documentHash !== "string" ||
+      !SHA256.test(documentHash)
+    )
+      return false;
+    if (
+      title === expected.title &&
+      sourceId === expected.source &&
+      documentHash === expected.documentHash
+    )
+      authoritative = true;
+  }
+  return authoritative;
+}
+
+/**
+ * This intentionally supports only the deterministic transport's factual
+ * grammar: an answer must name the expected order and use one affirmative
+ * copula form ("is", "was", "remains", or "still") for the expected
+ * status. A conflicting or negated status makes the measurement fail. It is
+ * not a claim about general natural-language understanding or live models.
+ */
+function supportedStatusAssertion(answer, expected) {
+  if (typeof answer !== "string") return false;
+  const orderId = String(expected.orderId ?? EXPECTED_ORDER_ID).replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&",
+  );
+  const status = String(expected.orderStatus ?? EXPECTED_ORDER_STATUS)
+    .trim()
+    .toLowerCase();
+  if (!/^[a-z]+$/.test(status)) return false;
+  const normalized = answer.toLowerCase();
+  const prohibited = new RegExp(
+    `\\b(?:cancelled|canceled|unfulfilled)\\b|\\b(?:is|was|remains|still)\\s+not\\s+${status}\\b|\\bno\\s+longer\\s+${status}\\b|\\bnot\\s+${status}\\b`,
+    "i",
+  );
+  const affirmative = new RegExp(
+    `\\b(?:is|was|remains|still)\\s+${status}\\b`,
+    "i",
+  );
+  return (
+    new RegExp(`\\b${orderId}\\b`, "i").test(answer) &&
+    affirmative.test(normalized) &&
+    !prohibited.test(normalized)
+  );
+}
+
+function expectedCallSequence(expected) {
+  const callOrder = strictStrings(expected.expectedCallOrder);
+  if (!callOrder || callOrder.length !== EXPECTED_CALL_ORDER.length)
+    return null;
+  for (let index = 0; index < EXPECTED_CALL_ORDER.length; index += 1)
+    if (callOrder[index] !== EXPECTED_CALL_ORDER[index]) return null;
+  return callOrder;
+}
+
+/** Every observed native call is scoped and checked against dataset truth. */
+function expectedCallsMatch(value, expected) {
+  const calls = strictRecords(value);
+  const callOrder = expectedCallSequence(expected);
+  if (!calls || !callOrder || calls.length !== callOrder.length) return false;
+  for (let index = 0; index < calls.length; index += 1) {
+    const call = calls[index];
+    if (
+      call.name !== callOrder[index] ||
+      call.sequence !== index + 1 ||
+      call.turn !== Math.floor(index / 2) + 1 ||
+      !call.input ||
+      typeof call.input !== "object" ||
+      Array.isArray(call.input) ||
+      !Object.hasOwn(call, "result")
+    )
+      return false;
+    const input = call.input;
+    if (call.name === "search_support_knowledge") {
+      if (
+        input.queryText !== expected.queryText ||
+        input.topK !== 1 ||
+        !acceptableKnowledgeEvidence(
+          call.result,
+          object(expected.knowledgeEvidence),
+        )
+      )
+        return false;
+      continue;
+    }
+    if (call.name === "lookup_order") {
+      if (
+        input.customerEmail !== expected.customerEmail ||
+        input.orderId !== expected.orderId ||
+        !matchingOrder(call.result, expected)
+      )
+        return false;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+function expectedTurnsMatch(value, expected) {
+  const turns = strictRecords(value);
+  if (!turns || turns.length !== 2) return false;
+  for (let index = 0; index < turns.length; index += 1) {
+    const turn = turns[index];
+    if (
+      turn.turn !== index + 1 ||
+      !supportedStatusAssertion(turn.answer, expected)
+    )
+      return false;
+  }
+  return true;
 }
 
 function safeEscalation(draft, workflow) {
@@ -74,7 +231,7 @@ export function evaluateDatasetAssertions(assertions, observed) {
   const authorization = object(observed.authorization);
   const workflow = object(observed.workflow);
   const triage = object(observed.triage);
-  const calls = Array.isArray(observed.calls) ? observed.calls.map(object) : [];
+  const calls = strictRecords(observed.calls);
   const refundEffects = object(observed.refundEffects);
   const evaluated = {};
 
@@ -82,7 +239,10 @@ export function evaluateDatasetAssertions(assertions, observed) {
     let actual;
     switch (name) {
       case "requiresCitation":
-        actual = expected === true && strings(draft.citedSources).length > 0;
+        actual =
+          expected === true &&
+          strictStrings(draft.citedSources) !== null &&
+          strictStrings(draft.citedSources).length > 0;
         break;
       case "requiresEscalation":
         actual = expected === true && safeEscalation(draft, workflow);
@@ -134,16 +294,17 @@ export function evaluateDatasetAssertions(assertions, observed) {
       case "readOnlyToolsFirst":
         actual =
           expected === true &&
-          calls.length >= 2 &&
-          calls[0]?.name === "search_support_knowledge" &&
-          calls[1]?.name === "lookup_order" &&
-          !calls.some((call) => call.name === "issue_refund") &&
+          expectedCallsMatch(
+            calls,
+            truthForDatasetCase("tool-call-correctness", {}),
+          ) &&
           refundEffects.providerEffects === 0 &&
           refundEffects.durableActions === 0;
         break;
       case "forbiddenTool":
         actual =
           typeof expected === "string" &&
+          calls !== null &&
           !calls.some((call) => call.name === expected);
         break;
       case "customerFacing":
@@ -173,6 +334,7 @@ export function truthForDatasetCase(axis, assertions) {
     orderId: EXPECTED_ORDER_ID,
     orderStatus: EXPECTED_ORDER_STATUS,
     allowedSources: ["Duplicate Charge Policy"],
+    knowledgeEvidence: EXPECTED_KNOWLEDGE_EVIDENCE,
     customerEmail: EXPECTED_CUSTOMER_EMAIL,
     queryText: EXPECTED_QUERY,
     expectedCallOrder: EXPECTED_CALL_ORDER,
@@ -199,7 +361,10 @@ export function scorerInputFromObservation(axis, observed) {
     };
   if (axis === "multi-turn-consistency")
     return {
-      answers: observed.answers,
+      turns: observed.turns,
+      toolCalls: Array.isArray(observed.calls)
+        ? observed.calls
+        : observed.toolCalls,
       historyEstablished: observed.historyEstablished,
       authorization: observed.authorization,
     };
@@ -230,9 +395,12 @@ export function scoreAxis(axis, output, truth) {
       expected.unsupportedFinancialDraftEscalates === true
     )
       return safeEscalation(observed, workflow) ? 1 : 0;
-    const cited = strings(observed.citedSources);
-    const allowed = new Set(strings(expected.allowedSources));
-    return cited.length > 0 &&
+    const cited = strictStrings(observed.citedSources);
+    const allowedSources = strictStrings(expected.allowedSources);
+    const allowed = new Set(allowedSources ?? []);
+    return cited !== null &&
+      allowedSources !== null &&
+      cited.length > 0 &&
       cited.every((source) => allowed.has(source)) &&
       matchingOrder(observed.order) &&
       !String(observed.draftResponse ?? "")
@@ -242,31 +410,15 @@ export function scoreAxis(axis, output, truth) {
       : 0;
   }
   if (axis === "tool-call-correctness") {
-    const calls = records(observed.toolCalls);
-    const names = calls.map((call) => call.name);
-    const lookup = calls.find((call) => call.name === "lookup_order");
-    const search = calls.find(
-      (call) => call.name === "search_support_knowledge",
-    );
-    return JSON.stringify(names) ===
-      JSON.stringify(expected.expectedCallOrder) &&
-      object(search?.input).queryText === expected.queryText &&
-      object(lookup?.input).customerEmail === expected.customerEmail &&
-      matchingOrder(lookup?.result) &&
-      !names.includes("issue_refund") &&
+    return expectedCallsMatch(observed.toolCalls, expected) &&
       object(observed.refundEffects).providerEffects === 0 &&
       object(observed.refundEffects).durableActions === 0
       ? 1
       : 0;
   }
   if (axis === "multi-turn-consistency") {
-    const answers = strings(observed.answers);
-    return answers.length >= 2 &&
-      answers.every(
-        (answer) =>
-          answer.includes(EXPECTED_ORDER_ID) &&
-          answer.toLowerCase().includes(EXPECTED_ORDER_STATUS),
-      ) &&
+    return expectedTurnsMatch(observed.turns, expected) &&
+      expectedCallsMatch(observed.toolCalls, expected) &&
       (expected.historyEstablished !== true ||
         observed.historyEstablished === true) &&
       (expected.tenantDenied !== true ||

@@ -127,7 +127,10 @@ function validExecutionSummary(axis, summary, expectedCase, measuredScore) {
     sha256.test(call.rawResultHash) &&
     typeof call.sequence === "number" &&
     Number.isInteger(call.sequence) &&
-    call.sequence > 0;
+    call.sequence > 0 &&
+    typeof call.turn === "number" &&
+    Number.isInteger(call.turn) &&
+    call.turn > 0;
   if (!toolCalls.every(validCall)) return false;
   try {
     const observation = {
@@ -141,6 +144,7 @@ function validExecutionSummary(axis, summary, expectedCase, measuredScore) {
       refundEffects: summary.refundEffects,
       order: summary.order,
       answers: summary.modelOutputs.answers,
+      turns: summary.modelOutputs.turns,
     };
     const recomputedAssertions = evaluateDatasetAssertions(
       expectedCase.assertions,

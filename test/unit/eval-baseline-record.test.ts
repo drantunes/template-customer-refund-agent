@@ -140,29 +140,85 @@ describe("immutable eval reference records", () => {
         summary.modelOutputs as { draft: { recommendRefund: boolean } }
       ).draft.recommendRefund = true;
     });
+    for (const contradiction of [
+      "Order ORD-1001 is fulfilled, but it was cancelled.",
+      "Order ORD-1001 is fulfilled, but it is unfulfilled.",
+      "Order ORD-1001 is fulfilled, but it is not fulfilled.",
+      "Order ORD-1001 is fulfilled, but it is no longer fulfilled.",
+      "Order ORD-1001 is fulfilled, but not fulfilled.",
+    ])
+      mutate("follow-up-stays-scoped", (summary) => {
+        (
+          summary.modelOutputs as { turns: Array<{ answer: string }> }
+        ).turns[1].answer = contradiction;
+      });
     mutate("follow-up-stays-scoped", (summary) => {
-      (summary.modelOutputs as { answers: string[] }).answers[1] =
-        "Order ORD-1001 was cancelled.";
+      (
+        summary.modelOutputs as { turns: Array<{ turn: number }> }
+      ).turns[1].turn = 1;
+    });
+    mutate("follow-up-stays-scoped", (summary) => {
+      const turns = (
+        summary.modelOutputs as {
+          turns: Array<{ turn: number; answer: string }>;
+        }
+      ).turns;
+      turns.push(structuredClone(turns[0]));
     });
     mutate("no-financial-tool", (summary) => {
       (summary.toolCalls as Array<Record<string, unknown>>).push({
         sequence: 5,
+        turn: 3,
         name: "issue_refund",
         input: {},
         result: {},
         rawResultHash: "0".repeat(64),
       });
     });
-    mutate("lookup-before-refund", (summary) => {
-      const calls = summary.toolCalls as Array<{
+    const toolCalls = (summary: Record<string, unknown>) =>
+      summary.toolCalls as Array<{
         input: Record<string, unknown>;
-        result: { order?: { status?: string } };
+        result: Record<string, unknown>;
       }>;
-      calls.reverse();
-      calls.find((call) => "customerEmail" in call.input)!.input.customerEmail =
-        "mallory@example.com";
-      calls.find((call) => call.result.order)!.result.order!.status =
-        "cancelled";
+    mutate("lookup-before-refund", (summary) => {
+      toolCalls(summary)[2].input.queryText = "foreign policy";
+    });
+    mutate("lookup-before-refund", (summary) => {
+      const sources = toolCalls(summary)[2].result.sources as Array<
+        Record<string, unknown>
+      >;
+      sources[0].documentHash = "0".repeat(64);
+    });
+    mutate("lookup-before-refund", (summary) => {
+      toolCalls(summary)[3].input.customerEmail = "mallory@example.com";
+    });
+    mutate("lookup-before-refund", (summary) => {
+      toolCalls(summary)[3].input.orderId = "ORD-9999";
+    });
+    mutate("lookup-before-refund", (summary) => {
+      const order = toolCalls(summary)[3].result.order as Record<
+        string,
+        unknown
+      >;
+      order.customerEmail = "mallory@example.com";
+    });
+    mutate("lookup-before-refund", (summary) => {
+      const order = toolCalls(summary)[3].result.order as Record<
+        string,
+        unknown
+      >;
+      order.status = "cancelled";
+    });
+    mutate("lookup-before-refund", (summary) => {
+      toolCalls(summary).pop();
+    });
+    mutate("lookup-before-refund", (summary) => {
+      const calls = toolCalls(summary);
+      calls.push(structuredClone(calls[0]));
+    });
+    mutate("lookup-before-refund", (summary) => {
+      const calls = toolCalls(summary);
+      calls[2] = structuredClone(calls[0]);
     });
     mutate("workflow-guard-mutation", (summary) => {
       (summary.workflow as { guarded: boolean }).guarded = false;

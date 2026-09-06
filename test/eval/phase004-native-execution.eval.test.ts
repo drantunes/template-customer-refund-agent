@@ -31,9 +31,11 @@ type AssertionObservation = {
   historyEstablished?: boolean;
   refundEffects?: Record<string, unknown>;
   order?: unknown;
+  turns?: Array<{ turn: number; answer: string }>;
 };
 type ObservedCall = {
   sequence: number;
+  turn: number;
   name: string;
   input: Record<string, unknown>;
   result: unknown;
@@ -62,6 +64,45 @@ const binding = (id: string, tenantId = "local-demo") => ({
   providerAccountId: `phase004-account-${id}`,
   externalConversationId: id,
 });
+
+const expectedKnowledgeEvidence = {
+  title: "Duplicate Charge Policy",
+  source: "duplicate-charge-policy",
+  documentHash:
+    "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+};
+
+function completeObservedCalls() {
+  const search = (sequence: number, turn: number) => ({
+    sequence,
+    turn,
+    name: "search_support_knowledge",
+    input: { queryText: "duplicate charge policy", topK: 1 },
+    result: { sources: [expectedKnowledgeEvidence] },
+  });
+  const lookup = (sequence: number, turn: number) => ({
+    sequence,
+    turn,
+    name: "lookup_order",
+    input: { customerEmail: "alex@example.com", orderId: "ORD-1001" },
+    result: {
+      found: true,
+      order: {
+        orderId: "ORD-1001",
+        customerEmail: "alex@example.com",
+        status: "fulfilled",
+      },
+    },
+  });
+  return [search(1, 1), lookup(2, 1), search(3, 2), lookup(4, 2)];
+}
+
+function completeObservedTurns() {
+  return [
+    { turn: 1, answer: "Order ORD-1001 is fulfilled." },
+    { turn: 2, answer: "Order ORD-1001 remains fulfilled." },
+  ];
+}
 
 function responseModel(options: {
   firstAnswer: string;
@@ -198,6 +239,7 @@ async function observedReadTrajectory(
   const search = mastra.getTool("searchSupportKnowledgeTool");
   const lookup = mastra.getTool("lookupOrderTool");
   const calls: ObservedCall[] = [];
+  let observedTurn = 0;
   const observe = (name: string, tool: typeof search) => {
     const original = tool.execute!.bind(tool);
     return vi
@@ -206,6 +248,7 @@ async function observedReadTrajectory(
         const result = await original(raw, context);
         calls.push({
           sequence: calls.length + 1,
+          turn: observedTurn,
           name,
           input: raw as Record<string, unknown>,
           result,
@@ -243,7 +286,12 @@ async function observedReadTrajectory(
     const resource = "local-demo:customer-alex";
     const firstAnswer =
       "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.";
-    const runTurn = async (message: string, includeMemory: boolean) => {
+    const runTurn = async (
+      message: string,
+      includeMemory: boolean,
+      turn: number,
+    ) => {
+      observedTurn = turn;
       const model = responseModel({
         firstAnswer,
         citation: "Duplicate Charge Policy",
@@ -260,10 +308,11 @@ async function observedReadTrajectory(
           }),
       );
     };
-    const first = await runTurn(input, true);
+    const first = await runTurn(input, true, 1);
     const second = await runTurn(
       "Please confirm the earlier order status.",
       options.includeMemory ?? true,
+      2,
     );
     const order = calls.find((call) => call.name === "lookup_order")?.result;
     const sources = calls.find(
@@ -275,6 +324,10 @@ async function observedReadTrajectory(
       triage: triageResult.object!,
       draft: first.object!,
       answers: [first.object!.draftResponse, second.object!.draftResponse],
+      turns: [
+        { turn: 1, answer: first.object!.draftResponse },
+        { turn: 2, answer: second.object!.draftResponse },
+      ],
       historyEstablished:
         second.object!.draftResponse.includes("remains fulfilled"),
       calls,
@@ -747,6 +800,7 @@ describe("Phase 004 deterministic native evaluation", () => {
         const output = scorerInputFromObservation(dataset.axis, {
           ...observed,
           answers: read.answers,
+          turns: read.turns,
         });
         const scorer =
           supportEvalScorerRegistry[
@@ -766,9 +820,11 @@ describe("Phase 004 deterministic native evaluation", () => {
         // result. The semantic result remains visible without duplicating each
         // full policy document in every per-case immutable reference record.
         const toolCalls =
-          dataset.axis === "tool-call-correctness"
+          dataset.axis === "tool-call-correctness" ||
+          dataset.axis === "multi-turn-consistency"
             ? (observed.calls ?? []).map((call) => ({
                 sequence: call.sequence,
+                turn: call.turn,
                 name: call.name,
                 input: call.input,
                 result:
@@ -815,8 +871,12 @@ describe("Phase 004 deterministic native evaluation", () => {
                   }
                 : dataset.axis === "multi-turn-consistency"
                   ? {
-                      modelOutputs: { answers: read.answers },
+                      modelOutputs: {
+                        answers: read.answers,
+                        turns: read.turns,
+                      },
                       order: observed.order,
+                      toolCalls,
                       historyEstablished: observed.historyEstablished,
                       authorization: observed.authorization,
                     }
@@ -853,6 +913,98 @@ describe("Phase 004 deterministic native evaluation", () => {
   it("makes registered scorers reject mutated observed arguments, results, and answers", async () => {
     const { supportEvalScorerRegistry } =
       await import("../../src/mastra/evals");
+    const toolTruth = truthForDatasetCase("tool-call-correctness", {});
+    const multiTurnTruth = truthForDatasetCase("multi-turn-consistency", {
+      sameThread: true,
+    });
+    const scoreTool = (calls: ReturnType<typeof completeObservedCalls>) =>
+      supportEvalScorerRegistry.toolCallCorrectness.run({
+        output: {
+          toolCalls: calls,
+          refundEffects: { providerEffects: 0, durableActions: 0 },
+        },
+        groundTruth: toolTruth,
+      });
+    const scoreTurns = (turns: ReturnType<typeof completeObservedTurns>) =>
+      supportEvalScorerRegistry.multiTurnConsistency.run({
+        output: {
+          turns,
+          toolCalls: completeObservedCalls(),
+          historyEstablished: true,
+        },
+        groundTruth: multiTurnTruth,
+      });
+    await expect(scoreTool(completeObservedCalls())).resolves.toMatchObject({
+      score: 1,
+    });
+    await expect(scoreTurns(completeObservedTurns())).resolves.toMatchObject({
+      score: 1,
+    });
+    const rejectedToolMutations = [
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        calls[2].input.queryText = "foreign policy";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        (
+          calls[2].result as { sources: Array<{ documentHash: string }> }
+        ).sources[0].documentHash = "0".repeat(64);
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        calls[3].input.customerEmail = "mallory@example.com";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        calls[3].input.orderId = "ORD-9999";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        (
+          calls[3].result as { order: { customerEmail: string } }
+        ).order.customerEmail = "mallory@example.com";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        (calls[3].result as { order: { status: string } }).order.status =
+          "cancelled";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        calls.pop();
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        calls.push(structuredClone(calls[0]));
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        calls[2] = structuredClone(calls[0]);
+      },
+    ];
+    for (const mutate of rejectedToolMutations) {
+      const calls = completeObservedCalls();
+      mutate(calls);
+      await expect(scoreTool(calls)).resolves.toMatchObject({ score: 0 });
+    }
+    for (const contradiction of [
+      "Order ORD-1001 is fulfilled, but it was cancelled.",
+      "Order ORD-1001 is fulfilled, but it is unfulfilled.",
+      "Order ORD-1001 is fulfilled, but it is not fulfilled.",
+      "Order ORD-1001 is fulfilled, but it is no longer fulfilled.",
+      "Order ORD-1001 is fulfilled, but not fulfilled.",
+    ]) {
+      const turns = completeObservedTurns();
+      turns[1].answer = contradiction;
+      await expect(scoreTurns(turns)).resolves.toMatchObject({ score: 0 });
+    }
+    for (const mutate of [
+      (turns: ReturnType<typeof completeObservedTurns>) => {
+        turns.pop();
+      },
+      (turns: ReturnType<typeof completeObservedTurns>) => {
+        turns[1].turn = 1;
+      },
+      (turns: ReturnType<typeof completeObservedTurns>) => {
+        turns.push(structuredClone(turns[0]));
+      },
+    ]) {
+      const turns = completeObservedTurns();
+      mutate(turns);
+      await expect(scoreTurns(turns)).resolves.toMatchObject({ score: 0 });
+    }
     await expect(
       supportEvalScorerRegistry.toolCallCorrectness.run({
         output: {
@@ -892,13 +1044,14 @@ describe("Phase 004 deterministic native evaluation", () => {
         groundTruth: { singleDurableRefund: true },
       }),
     ).resolves.toMatchObject({ score: 0 });
+    const inconsistentTurns = completeObservedTurns();
+    inconsistentTurns[1].answer =
+      "Order ORD-1001 is fulfilled, but it was cancelled.";
     await expect(
       supportEvalScorerRegistry.multiTurnConsistency.run({
         output: {
-          answers: [
-            "Order ORD-1001 is fulfilled",
-            "Order ORD-1001 was cancelled",
-          ],
+          turns: inconsistentTurns,
+          toolCalls: completeObservedCalls(),
           authorization: {
             foreignBindingDenied: true,
             twoRegisteredBindings: true,
@@ -929,7 +1082,8 @@ describe("Phase 004 deterministic native evaluation", () => {
     await expect(
       supportEvalScorerRegistry.multiTurnConsistency.run({
         output: {
-          answers: absent.answers,
+          turns: absent.turns,
+          toolCalls: absent.calls,
           historyEstablished: absent.historyEstablished,
           authorization: {
             foreignBindingDenied: true,
@@ -942,7 +1096,8 @@ describe("Phase 004 deterministic native evaluation", () => {
     await expect(
       supportEvalScorerRegistry.multiTurnConsistency.run({
         output: {
-          answers: contradictory.answers,
+          turns: contradictory.turns,
+          toolCalls: contradictory.calls,
           historyEstablished: contradictory.historyEstablished,
           authorization: {
             foreignBindingDenied: true,
