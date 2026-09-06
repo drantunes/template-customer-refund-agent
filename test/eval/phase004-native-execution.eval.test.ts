@@ -965,6 +965,12 @@ describe("Phase 004 deterministic native evaluation", () => {
           "cancelled";
       },
       (calls: ReturnType<typeof completeObservedCalls>) => {
+        calls[2].result = { sources: [{}] } as never;
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        delete (calls[3] as { result?: unknown }).result;
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
         calls.pop();
       },
       (calls: ReturnType<typeof completeObservedCalls>) => {

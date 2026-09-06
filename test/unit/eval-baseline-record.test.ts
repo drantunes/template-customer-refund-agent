@@ -158,6 +158,9 @@ describe("immutable eval reference records", () => {
       ).turns[1].turn = 1;
     });
     mutate("follow-up-stays-scoped", (summary) => {
+      (summary.modelOutputs as { turns: Array<{ turn: number }> }).turns.pop();
+    });
+    mutate("follow-up-stays-scoped", (summary) => {
       const turns = (
         summary.modelOutputs as {
           turns: Array<{ turn: number; answer: string }>;
@@ -208,6 +211,12 @@ describe("immutable eval reference records", () => {
         unknown
       >;
       order.status = "cancelled";
+    });
+    mutate("lookup-before-refund", (summary) => {
+      toolCalls(summary)[2].result = { sources: [{}] };
+    });
+    mutate("lookup-before-refund", (summary) => {
+      delete (toolCalls(summary)[3].result as { order?: unknown }).order;
     });
     mutate("lookup-before-refund", (summary) => {
       toolCalls(summary).pop();
