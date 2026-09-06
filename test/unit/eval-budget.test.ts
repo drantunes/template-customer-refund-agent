@@ -7,11 +7,11 @@ import {
 describe("eval budget ledger", () => {
   it("reserves before a call, reconciles actual usage, and fails closed at the exact limit", () => {
     const budget = new EvalBudgetLedger("ci-eval");
-    const reservation = budget.reserve(5_000_000n);
+    const reservation = budget.reserve(4_999_999n);
     expect(() => budget.reserve(1n)).toThrow("budget exhausted");
-    budget.reconcile(reservation, 5_000_000n);
+    budget.reconcile(reservation, 4_999_999n);
     expect(budget.snapshot()).toMatchObject({
-      actualMicros: 5_000_000n,
+      actualMicros: 4_999_999n,
       reservedMicros: 0n,
     });
     expect(() => budget.reserve(1n)).toThrow("budget exhausted");
@@ -40,5 +40,19 @@ describe("eval budget ledger", () => {
       }),
     ).rejects.toThrow("budget exhausted");
     expect(invoked).toBe(false);
+  });
+
+  it("prevents concurrent callers from reaching the DEC-016 limit before either transport runs", async () => {
+    const budget = new EvalBudgetLedger("ci-eval");
+    let calls = 0;
+    const attempt = async () => {
+      const reservation = budget.reserve(2_500_000n);
+      calls += 1;
+      budget.reconcile(reservation, 2_500_000n);
+    };
+    await expect(Promise.all([attempt(), attempt()])).rejects.toThrow(
+      "budget exhausted",
+    );
+    expect(calls).toBe(1);
   });
 });

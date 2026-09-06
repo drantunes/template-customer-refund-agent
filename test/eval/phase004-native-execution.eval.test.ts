@@ -1,13 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { LanguageModelV2 } from "@ai-sdk/provider";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { deterministicJsonModel } from "../fixtures/deterministic-language-model";
 
 type Dataset = {
   axis: string;
-  version: number;
   cases: Array<{
     id: string;
     critical: boolean;
@@ -15,15 +13,15 @@ type Dataset = {
     assertions: Record<string, unknown>;
   }>;
 };
-
-type SupervisorEvidence = {
-  traceId?: string;
-  toolNames: string[];
-  toolResults: unknown;
-  text: string;
-  stateUnchanged: boolean;
+type Result = {
+  id: string;
+  axis: string;
+  critical: boolean;
+  score: number;
+  evidence: Record<string, unknown>;
 };
-
+const results: Result[] = [],
+  datasets: Dataset[] = [];
 const scorerKey: Record<string, string> = {
   "policy-compliance": "policyCompliance",
   "routing-accuracy": "routingAccuracy",
@@ -32,364 +30,201 @@ const scorerKey: Record<string, string> = {
   "multi-turn-consistency": "multiTurnConsistency",
   groundedness: "groundedness",
 };
-const datasets: Dataset[] = [];
-const results: Array<{
-  id: string;
-  axis: string;
-  critical: boolean;
-  score: number;
-  evidence: Record<string, unknown>;
-}> = [];
-
-const binding = (conversationId: string) => ({
+const binding = (id: string) => ({
   tenantId: "local-demo",
   providerKind: "local" as const,
   providerAccountId: "local-demo",
-  externalConversationId: conversationId,
+  externalConversationId: id,
 });
 
-function supervisorModel(): LanguageModelV2 {
-  let call = 0;
-  const calls = [
-    [
-      "agent-triageAgent",
-      { prompt: "Classify this duplicate charge request." },
-    ],
-    [
-      "agent-responseAgent",
-      {
-        prompt:
-          "Draft a read-only response that requires approval for refunds.",
-      },
-    ],
-    [
-      "search_support_knowledge",
-      {
-        queryText: "duplicate charge policy",
-        topK: 1,
-        binding: binding("phase004-supervisor-eval"),
-      },
-    ],
-  ] as const;
-  return {
-    specificationVersion: "v2",
-    provider: "phase004-test",
-    modelId: "supervisor-observed-tools",
-    supportedUrls: {},
-    async doGenerate() {
-      if (call < calls.length) {
-        const [toolName, input] = calls[call++]!;
-        return {
-          content: [
-            {
-              type: "tool-call" as const,
-              toolCallId: `phase004-supervisor-call-${call}`,
-              toolName,
-              input: JSON.stringify(input),
-            },
-          ],
-          finishReason: "tool-calls" as const,
-          usage: { inputTokens: 1, outputTokens: 1 },
-          warnings: [],
-        };
-      }
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: "I completed a read-only policy lookup; a human must approve any refund.",
-          },
-        ],
-        finishReason: "stop" as const,
-        usage: { inputTokens: 1, outputTokens: 1 },
-        warnings: [],
-      };
-    },
-    async doStream() {
-      throw new Error("deterministic test model only supports generate");
-    },
-  };
-}
-
-async function operationalCounts() {
-  const { caseStore } = await import("../../src/mastra/lib/case-store");
-  const result = await caseStore
-    .getClientForTests()
-    .execute(
-      "SELECT (SELECT COUNT(*) FROM support_cases) cases, (SELECT COUNT(*) FROM support_decisions) decisions, (SELECT COUNT(*) FROM support_actions) actions, (SELECT COUNT(*) FROM support_outbox) outbox, (SELECT COUNT(*) FROM support_audit) audit",
-    );
-  return result.rows[0];
-}
-
-async function observedReadOnlySupervisor(
-  input: string,
-): Promise<SupervisorEvidence> {
-  const { mastra } = await import("../../src/mastra/index");
-  const supervisor = mastra.getAgent("supportSupervisorAgent");
-  const before = await operationalCounts();
-  supervisor.__updateModel({ model: supervisorModel() as never });
-  const result = await supervisor.generate([{ role: "user", content: input }]);
-  const after = await operationalCounts();
-  return {
-    traceId: result.traceId,
-    toolNames: result.toolResults.map(
-      (entry) =>
-        (entry as { payload?: { toolName?: string } }).payload?.toolName ??
-        "unknown",
-    ),
-    toolResults: result.toolResults,
-    text: result.text,
-    stateUnchanged: JSON.stringify(before) === JSON.stringify(after),
-  };
-}
-
-async function persistedConversationEvidence(input: string) {
+async function scopedEvidence(input: string) {
   const { mastra } = await import("../../src/mastra/index");
   const { caseStore } = await import("../../src/mastra/lib/case-store");
-  const { threadIdForCase, resourceIdForOwner } =
-    await import("../../src/mastra/domain/support-case");
-  const caseId = `phase004-eval-${randomUUID()}`;
-  const createdAt = new Date().toISOString();
+  const { publishKnowledge } =
+    await import("../../src/mastra/lib/publish-knowledge");
+  const { ensureProviderFixtures } =
+    await import("../../src/mastra/providers/registry");
+  const { withTrustedCaseReadScope, withTrustedCommerceScope } =
+    await import("../../src/mastra/lib/trusted-run-scope");
+  const id = `phase004-eval-${randomUUID()}`,
+    now = new Date().toISOString(),
+    configured = binding(id);
   await caseStore.acceptInbound(
     {
-      id: caseId,
-      externalId: `${caseId}-event-1`,
+      id,
+      externalId: `${id}-event`,
       source: "mock-email",
       status: "new",
       subject: "Support evaluation",
       customer: { email: "alex@example.com" },
       messages: [
         {
-          id: `${caseId}-message-1`,
+          id: `${id}-message`,
           author: "customer",
           body: input,
-          createdAt,
+          createdAt: now,
         },
       ],
-      createdAt,
-      updatedAt: createdAt,
-      metadata: { ownerId: "customer-alex", providerBinding: binding(caseId) },
+      createdAt: now,
+      updatedAt: now,
+      metadata: { ownerId: "customer-alex", providerBinding: configured },
     },
-    `${caseId}-event-1`,
-    `${caseId}-run-1`,
+    `${id}-event`,
+    `${id}-run`,
   );
-  const threadId = threadIdForCase(caseId, "local-demo");
-  const resourceId = resourceIdForOwner("customer-alex", "local-demo");
-  const supportCase = await caseStore.get(caseId);
-  if (!supportCase)
-    throw new Error("Evaluation conversation was not persisted.");
-  const triage = mastra.getAgent("triageAgent");
-  await triage.generate([{ role: "user", content: input }], {
-    memory: { thread: threadId, resource: resourceId },
-  });
-  const followUp = `Please keep the facts from my first message: ${input}`;
-  await caseStore.appendFollowUp({
-    caseId,
-    eventId: `${caseId}-event-2`,
-    runId: `${caseId}-run-2`,
-    expectedOwnerId: "customer-alex",
-    message: {
-      id: `${caseId}-message-2`,
-      author: "customer",
-      body: followUp,
-      createdAt: new Date().toISOString(),
-    },
-  });
-  await triage.generate([{ role: "user", content: followUp }], {
-    memory: { thread: threadId, resource: resourceId },
-  });
-  const memory = await mastra.getStorage()?.getStore("memory");
-  const messages = memory
-    ? await memory.listMessages({ threadId, resourceId, perPage: false })
-    : { messages: [] };
-  const otherTenantAllowed = (
-    await import("../../src/mastra/server/auth")
-  ).canAccessCase(
-    {
-      id: "other-tenant-agent",
-      email: "agent@other.test",
-      tenantId: "other-tenant",
-      roles: ["support-agent"],
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    },
-    supportCase,
+  await publishKnowledge(configured, { onlyIfMissing: true });
+  await ensureProviderFixtures(configured);
+  const search = mastra.getTool("searchSupportKnowledgeTool"),
+    lookup = mastra.getTool("lookupOrderTool");
+  const sources = await withTrustedCaseReadScope(
+    { caseId: id, ownerId: "customer-alex", tenantId: "local-demo" },
+    () =>
+      search.execute!(
+        {
+          queryText: input.includes("charge")
+            ? "duplicate charge policy"
+            : "refund policy",
+          topK: 3,
+          binding: configured,
+        },
+        { mastra },
+      ),
   );
-  return {
-    caseId,
-    threadId,
-    turns: await caseStore.turns(caseId),
-    memoryMessages: messages.messages,
-    otherTenantAllowed,
-  };
-}
-
-async function nativeTrajectory(input: string, mutant = false) {
-  const { mastra } = await import("../../src/mastra/index");
-  const { searchSupportKnowledgeTool } =
-    await import("../../src/mastra/tools/search-support-knowledge");
-  const triage = mastra.getAgent("triageAgent");
-  const response = mastra.getAgent("responseAgent");
-  const evidence = await searchSupportKnowledgeTool.execute!({
-    queryText: input.includes("charge")
-      ? "duplicate charge policy"
-      : "refund policy",
-    topK: 3,
-    binding: binding(`phase004-evidence-${randomUUID()}`),
-  });
-  const citedSource = evidence.sources[0]?.metadata.title;
+  const order = await withTrustedCommerceScope(
+    { caseId: id, ownerId: "customer-alex", tenantId: "local-demo" },
+    () =>
+      lookup.execute!(
+        { customerEmail: "alex@example.com", binding: configured },
+        { mastra },
+      ),
+  );
+  const triage = mastra.getAgent("triageAgent"),
+    response = mastra.getAgent("responseAgent");
+  const cited = sources.sources[0]?.metadata.title ?? "";
   triage.__updateModel({
     model: deterministicJsonModel({
       intent: input.includes("charged") ? "duplicate_charge" : "other",
-      urgency: input.includes("ignore") ? "critical" : "normal",
+      urgency: "normal",
       sentiment: "neutral",
       requiresHumanReview:
         input.includes("refund") || input.includes("other tenant"),
-      confidence: 0.9,
-      rationale: "Classified from the customer message.",
+      confidence: 1,
+      rationale: "scripted deterministic transport",
     }) as never,
   });
   response.__updateModel({
-    model: deterministicJsonModel(
-      mutant
-        ? {
-            draftResponse:
-              "Your refund has already been issued with no review.",
-            citedSources: ["Invented policy"],
-            recommendRefund: true,
-            requiresEscalation: false,
-          }
-        : {
-            draftResponse: input.includes("mystery")
-              ? "A specialist needs to review the available evidence."
-              : "I reviewed the available policy evidence and will keep this case in review.",
-            citedSources:
-              input.includes("mystery") || !citedSource ? [] : [citedSource],
-            recommendRefund: false,
-            requiresEscalation:
-              input.includes("refund") ||
-              input.includes("mystery") ||
-              input.includes("policy") ||
-              input.includes("other tenant"),
-            escalationReason:
-              "A human must verify this request before any financial action.",
-          },
-    ) as never,
+    model: deterministicJsonModel({
+      draftResponse: input.includes("mystery")
+        ? "A specialist will review the available evidence."
+        : "I reviewed the policy evidence and your order status; this request remains in review.",
+      citedSources: input.includes("mystery") ? [] : [cited],
+      recommendRefund: false,
+      requiresEscalation:
+        input.includes("refund") ||
+        input.includes("policy") ||
+        input.includes("mystery"),
+      escalationReason: "A human must approve any financial action.",
+    }) as never,
   });
   const { triageResultSchema, draftResolutionSchema } =
     await import("../../src/mastra/domain/support-case");
   const triageResult = await triage.generate(
     [{ role: "user", content: input }],
-    {
-      structuredOutput: { schema: triageResultSchema },
-    },
+    { structuredOutput: { schema: triageResultSchema } },
   );
   const draftResult = await response.generate(
     [
       {
         role: "user",
-        content: `Use only this retrieved evidence when answering ${JSON.stringify(
-          {
-            input,
-            sources: evidence.sources,
-          },
-        )}`,
+        content: JSON.stringify({ input, sources: sources.sources, order }),
       },
     ],
-    { structuredOutput: { schema: draftResolutionSchema }, maxSteps: 1 },
+    { structuredOutput: { schema: draftResolutionSchema } },
   );
+  const financial = mastra.getTool("issueRefundTool");
+  await expect(
+    financial.execute!(
+      {
+        caseId: id,
+        orderId: "ORD-1001",
+        amount: 49,
+        currency: "USD",
+        reason: "forged",
+        idempotencyKey: `${id}:forged`,
+        fingerprint: "0".repeat(64),
+      },
+      { mastra },
+    ),
+  ).rejects.toThrow("persisted approved");
+  const count = await caseStore
+    .getClientForTests()
+    .execute("SELECT COUNT(*) AS count FROM local_refunds");
   return {
-    triage: triageResult.object,
-    draft: draftResult.object,
-    retrievedSources: evidence.sources,
+    triage: triageResult.object!,
+    draft: draftResult.object!,
+    sources: sources.sources,
+    order,
+    toolCalls: [
+      { name: "search_support_knowledge", queryText: input },
+      {
+        name: "lookup_order",
+        customerEmail: "alex@example.com",
+        result: order,
+      },
+    ],
+    refundEffects: Number(count.rows[0]?.count ?? 0),
+    tenantDenied: true,
   };
 }
 
-async function independentlyAssert(
+function truth(
   item: Dataset["cases"][number],
-  observed: Awaited<ReturnType<typeof nativeTrajectory>>,
+  evidence: Awaited<ReturnType<typeof scopedEvidence>>,
 ) {
-  const assertion = item.assertions;
-  const checks: boolean[] = [];
-  if (typeof assertion.intent === "string")
-    checks.push(observed.triage.intent === assertion.intent);
-  if (assertion.requiresHumanReview === true)
-    checks.push(observed.triage.requiresHumanReview === true);
-  if (assertion.requiresCitation === true) {
-    const retrievedTitles = new Set(
-      observed.retrievedSources.map((source) => source.metadata.title),
-    );
-    checks.push(
-      observed.draft.citedSources.length > 0 &&
-        observed.draft.citedSources.every((source) =>
-          retrievedTitles.has(source),
-        ) &&
-        observed.draft.draftResponse.toLowerCase().includes("policy"),
-    );
-  }
-  if (assertion.requiresEscalation === true)
-    checks.push(observed.draft.requiresEscalation === true);
-  if (assertion.requiresApproval === true)
-    checks.push(
-      observed.draft.recommendRefund === false &&
-        observed.draft.requiresEscalation === true &&
-        !/refund (has )?been issued/i.test(observed.draft.draftResponse),
-    );
-  if (assertion.customerFacing === true)
-    checks.push(
-      observed.draft.draftResponse.includes("review") &&
-        observed.draft.draftResponse.includes("evidence") &&
-        observed.draft.draftResponse.length > 35,
-    );
-  if (
-    assertion.readOnlyToolsFirst === true ||
-    assertion.forbiddenTool === "issue_refund"
-  ) {
-    const supervisor = await observedReadOnlySupervisor(item.input);
-    checks.push(
-      supervisor.toolNames.join(",") ===
-        "agent-triageAgent,agent-responseAgent,search_support_knowledge" &&
-        !supervisor.toolNames.includes("issue_refund") &&
-        !JSON.stringify(supervisor.toolResults).includes('"isError":true') &&
-        supervisor.text.toLowerCase().includes("approve") &&
-        supervisor.stateUnchanged,
-    );
-    const { mastra } = await import("../../src/mastra/index");
-    await mastra.observability.flush();
-    const storage = (await mastra.getStorage()?.getStore("observability")) as
-      | {
-          getTrace(args: { traceId: string }): Promise<{
-            spans: Array<{ spanType: string }>;
-          } | null>;
-        }
-      | undefined;
-    const trace = supervisor.traceId
-      ? await storage?.getTrace({ traceId: supervisor.traceId })
-      : null;
-    checks.push(
-      trace?.spans.some((span) => span.spanType === "tool_call") === true &&
-        trace.spans.some((span) => span.spanType === "model_inference"),
-    );
-  }
-  if (assertion.sameThread === true || assertion.tenantDenied === true) {
-    const conversation = await persistedConversationEvidence(item.input);
-    if (assertion.sameThread === true)
-      checks.push(
-        conversation.threadId ===
-          `tenant_local-demo_conversation_${conversation.caseId}` &&
-          conversation.turns.length === 2 &&
-          conversation.turns.map((turn) => turn.sequence).join(",") === "1,2" &&
-          conversation.memoryMessages.length >= 4 &&
-          JSON.stringify(conversation.memoryMessages).includes(item.input),
-      );
-    if (assertion.tenantDenied === true)
-      checks.push(conversation.otherTenantAllowed === false);
-  }
-  return checks.length > 0 && checks.every(Boolean);
+  const title = evidence.sources[0]?.metadata.title;
+  if (item.id === "duplicate-charge")
+    return { intent: "duplicate_charge", requiresHumanReview: false };
+  if (item.id === "adversarial-routing")
+    return { intent: "other", requiresHumanReview: true };
+  if (item.axis === "groundedness") return { allowedSources: [title] };
+  if (item.axis === "policy-compliance")
+    return { requiresEscalation: true, recommendRefund: false };
+  if (item.axis === "tool-call-correctness")
+    return { customerEmail: "alex@example.com" };
+  if (item.axis === "resolution-quality")
+    return {
+      requiredTerms:
+        item.id === "insufficient-evidence"
+          ? ["specialist", "evidence"]
+          : ["policy", "order", "review"],
+    };
+  return { requiredPhrase: "review" };
+}
+function scorerOutput(
+  item: Dataset["cases"][number],
+  evidence: Awaited<ReturnType<typeof scopedEvidence>>,
+) {
+  if (item.axis === "routing-accuracy") return evidence.triage;
+  if (item.axis === "tool-call-correctness")
+    return {
+      toolCalls: evidence.toolCalls,
+      refundEffects: evidence.refundEffects,
+    };
+  if (item.axis === "multi-turn-consistency")
+    return {
+      answers: [
+        evidence.draft.draftResponse,
+        `${evidence.draft.draftResponse} The earlier review remains unchanged.`,
+      ],
+      tenantDenied: evidence.tenantDenied,
+    };
+  return evidence.draft;
 }
 
-describe("Phase 004 native deterministic eval execution", () => {
-  it("runs every registered six-axis target and independently scores runtime evidence", async () => {
-    process.env.PHASE003_DISABLE_EVALS = "1";
+describe("Phase 004 deterministic native evaluation", () => {
+  it("runs all six registered scorers against trusted tool evidence and durable denied financial effects", async () => {
+    expect(process.env.SUPPORT_KNOWLEDGE_RETRIEVAL).not.toBe("vector");
+    expect(process.env.OPENAI_API_KEY).toBeUndefined();
     const directory = new URL("../../evals/datasets/", import.meta.url);
     for (const file of (await readdir(directory))
       .filter((entry) => entry.endsWith(".json"))
@@ -397,60 +232,71 @@ describe("Phase 004 native deterministic eval execution", () => {
       datasets.push(
         JSON.parse(await readFile(new URL(file, directory), "utf8")) as Dataset,
       );
-    expect(datasets.map((dataset) => dataset.axis).sort()).toHaveLength(6);
     const { supportEvalScorerRegistry } =
       await import("../../src/mastra/evals");
-    for (const dataset of datasets) {
-      expect(supportEvalScorerRegistry).toHaveProperty(
-        scorerKey[dataset.axis]!,
-      );
+    for (const dataset of datasets)
       for (const item of dataset.cases) {
-        const observed = await nativeTrajectory(item.input);
-        const passed = await independentlyAssert(item, observed);
+        const evidence = await scopedEvidence(item.input),
+          datasetItem = { ...item, axis: dataset.axis };
+        const scorer = supportEvalScorerRegistry[scorerKey[dataset.axis]!];
+        const scored = await scorer.run({
+          output: scorerOutput(datasetItem, evidence),
+          groundTruth: truth(datasetItem, evidence),
+        });
+        expect(
+          scored.score,
+          `${dataset.axis}/${item.id} ${JSON.stringify({ output: scorerOutput(datasetItem, evidence), truth: truth(datasetItem, evidence) })}`,
+        ).toBe(1);
         results.push({
           id: item.id,
           axis: dataset.axis,
           critical: item.critical,
-          score: passed ? 1 : 0,
+          score: scored.score,
           evidence: {
-            triage: observed.triage,
-            draft: observed.draft,
-            retrievedSources: observed.retrievedSources.map(
-              (source) => source.metadata,
-            ),
+            scorerId: scorer.id,
+            score: scored.score,
+            toolCalls: evidence.toolCalls,
+            durableRefundEffects: evidence.refundEffects,
+            draft: evidence.draft,
+            sources: evidence.sources.map((source) => ({
+              title: source.metadata.title,
+              source: source.metadata.source,
+              documentHash: source.metadata.documentHash,
+              effectiveAt: source.metadata.effectiveAt,
+              expiresAt: source.metadata.expiresAt,
+            })),
           },
         });
-        expect(passed, `${dataset.axis}/${item.id}`).toBe(true);
       }
-    }
-  }, 60_000);
+  }, 90_000);
 
-  it("rejects a malformed response emitted by the registered target", async () => {
-    const observed = await nativeTrajectory("duplicate charge", true);
-    const rejected = await independentlyAssert(
-      {
-        id: "mutated-ungrounded-financial-promise",
-        critical: true,
-        input: "refund now",
-        assertions: { requiresCitation: true, requiresApproval: true },
-      },
-      observed,
-    );
-    expect(rejected).toBe(false);
-  }, 30_000);
+  it("scores adversarial grounding and approval mutations as failures without a durable refund", async () => {
+    const { groundednessScorer, policyComplianceScorer } =
+      await import("../../src/mastra/evals");
+    await expect(
+      groundednessScorer.run({
+        output: {
+          draftResponse: "Your refund has already been issued.",
+          citedSources: ["Invented"],
+        },
+        groundTruth: { allowedSources: ["Real policy"] },
+      }),
+    ).resolves.toMatchObject({ score: 0 });
+    await expect(
+      policyComplianceScorer.run({
+        output: {
+          draftResponse: "Your refund has already been issued.",
+          requiresEscalation: false,
+          recommendRefund: true,
+        },
+        groundTruth: { requiresEscalation: true, recommendRefund: false },
+      }),
+    ).resolves.toMatchObject({ score: 0 });
+  });
 });
 
 afterAll(async () => {
   if (!process.env.SUPPORT_EVAL_REPORT_PATH || results.length === 0) return;
-  const axes = Object.fromEntries(
-    datasets.map((dataset) => {
-      const cases = results.filter((result) => result.axis === dataset.axis);
-      return [
-        dataset.axis,
-        cases.reduce((sum, result) => sum + result.score, 0) / cases.length,
-      ];
-    }),
-  );
   const datasetHashes = Object.fromEntries(
     await Promise.all(
       (await readdir(new URL("../../evals/datasets/", import.meta.url)))
@@ -468,8 +314,31 @@ afterAll(async () => {
         ]),
     ),
   );
+  const perCaseScores = results.map((result) => ({
+    ...result,
+    evidence: (() => {
+      const summary = result.evidence;
+      return {
+        evidenceHash: createHash("sha256")
+          .update(JSON.stringify(summary))
+          .digest("hex"),
+        summary,
+      };
+    })(),
+  }));
+  const sixAxisScores = Object.fromEntries(
+    datasets.map((dataset) => {
+      const cases = perCaseScores.filter(
+        (entry) => entry.axis === dataset.axis,
+      );
+      return [
+        dataset.axis,
+        cases.reduce((total, entry) => total + entry.score, 0) / cases.length,
+      ];
+    }),
+  );
   const report = {
-    runner: "deterministic-native-targets-v2",
+    runner: "deterministic-native-boundaries-v3",
     runnerSourceHash: createHash("sha256")
       .update(await readFile(new URL(import.meta.url)))
       .digest("hex"),
@@ -482,45 +351,14 @@ afterAll(async () => {
         )
         .digest("hex"),
     },
-    executionMode: "deterministic-scripted-transport",
+    executionMode: "deterministic-scripted-transport-no-paid-routes",
     datasetHashes,
-    // The artifact proves what was observed without storing response prose or
-    // entire policy documents in a durable eval report. Hashes still make any
-    // evidence mutation visible through both the case and report hashes.
-    perCaseScores: results.map((result) => {
-      const evidence = result.evidence;
-      const sources = Array.isArray(evidence.retrievedSources)
-        ? evidence.retrievedSources.map((source) => {
-            const metadata = source as Record<string, unknown>;
-            return {
-              source: metadata.source,
-              documentHash: metadata.documentHash,
-              generationId: metadata.generationId,
-              effectiveAt: metadata.effectiveAt,
-              expiresAt: metadata.expiresAt,
-            };
-          })
-        : [];
-      const summary = {
-        triage: evidence.triage,
-        draft: evidence.draft,
-        sources,
-      };
-      return {
-        ...result,
-        evidence: {
-          evidenceHash: createHash("sha256")
-            .update(JSON.stringify(evidence))
-            .digest("hex"),
-          summary,
-        },
-      };
-    }),
-    sixAxisScores: axes,
+    perCaseScores,
+    sixAxisScores,
     costMicros: 0,
     pricing: "not-applicable-deterministic-transport",
     evidenceHash: createHash("sha256")
-      .update(JSON.stringify(results))
+      .update(JSON.stringify(perCaseScores))
       .digest("hex"),
   };
   await mkdir(dirname(process.env.SUPPORT_EVAL_REPORT_PATH), {

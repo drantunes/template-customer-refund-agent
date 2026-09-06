@@ -30,6 +30,11 @@ export class EvalBudgetLedger {
       budgetLimitMicros[this.mode]
     )
       throw new Error(`Evaluation budget exhausted for ${this.mode}.`);
+    if (
+      this.actual + this.reserved + estimatedMicros ===
+      budgetLimitMicros[this.mode]
+    )
+      throw new Error(`Evaluation budget exhausted for ${this.mode}.`);
     this.reserved += estimatedMicros;
     const id = crypto.randomUUID();
     this.reservations.set(id, estimatedMicros);
@@ -50,6 +55,8 @@ export class EvalBudgetLedger {
       throw new Error("Model request has unknown or invalid actual usage.");
     if (actualMicros > reservedMicros)
       throw new Error("Actual model usage exceeded the pre-call reservation.");
+    if (this.actual + actualMicros >= budgetLimitMicros[this.mode])
+      throw new Error(`Evaluation budget exhausted for ${this.mode}.`);
     this.actual += actualMicros;
     this.reserved -= reservedMicros;
     this.reservations.delete(reservation.id);

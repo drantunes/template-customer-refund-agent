@@ -17,7 +17,13 @@ try {
     ],
     {
       stdio: "inherit",
-      env: { ...process.env, SUPPORT_EVAL_REPORT_PATH: reportPath },
+      env: {
+        ...process.env,
+        SUPPORT_EVAL_REPORT_PATH: reportPath,
+        SUPPORT_KNOWLEDGE_RETRIEVAL: "",
+        OPENAI_API_KEY: "",
+        OPENAI_BASE_URL: "",
+      },
     },
   );
   const execution = JSON.parse(await readFile(reportPath, "utf8"));
