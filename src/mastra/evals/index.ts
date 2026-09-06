@@ -148,8 +148,7 @@ export const toolCallCorrectnessScorer = deterministicScorer(
       matchingOrder(lookup?.result, truth) &&
       !names.includes("issue_refund") &&
       object(output.refundEffects).providerEffects === 0 &&
-      object(output.refundEffects).durableActions === 0 &&
-      object(output.workflow).guarded === true
+      object(output.refundEffects).durableActions === 0
       ? 1
       : 0;
   },

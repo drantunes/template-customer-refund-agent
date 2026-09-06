@@ -882,7 +882,6 @@ describe("Phase 004 deterministic native evaluation", () => {
                 ? {
                     toolCalls: observed.calls,
                     refundEffects: observed.refundEffects,
-                    workflow: { guarded: true },
                   }
                 : dataset.axis === "multi-turn-consistency"
                   ? {
@@ -956,7 +955,6 @@ describe("Phase 004 deterministic native evaluation", () => {
               : dataset.axis === "tool-call-correctness"
                 ? {
                     order: observed.order,
-                    workflow: { guarded: true },
                     refundEffects: observed.refundEffects,
                   }
                 : dataset.axis === "multi-turn-consistency"

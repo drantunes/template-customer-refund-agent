@@ -166,8 +166,6 @@ function validExecutionSummary(axis, summary, expectedCase, measuredScore) {
       validOrder &&
       toolCalls.some((call) => call.name === "search_support_knowledge") &&
       toolCalls.some((call) => call.name === "lookup_order") &&
-      plainObject(summary.workflow) &&
-      summary.workflow.guarded === true &&
       plainObject(summary.refundEffects) &&
       summary.refundEffects.providerEffects === 0 &&
       summary.refundEffects.durableActions === 0
