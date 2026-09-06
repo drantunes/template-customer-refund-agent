@@ -1072,6 +1072,12 @@ describe("Phase 002 persistent local runtime", () => {
         }),
       }),
     );
+    // Recovery intentionally projects exhaustion as customer-visible
+    // escalation. Its immutable operational failure must still reach the
+    // workflow error counter rather than disappearing with the state change.
+    await expect(
+      store.monitoringOperationalFailures([exhausted.id]),
+    ).resolves.toMatchObject({ workflow: 1 });
     await store.close();
 
     const reopened = new CaseStore({ url: `file:${path}` });

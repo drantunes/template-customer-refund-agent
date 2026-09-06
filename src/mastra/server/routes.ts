@@ -792,6 +792,7 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
           caseId,
           "Native approval completed without a durable refund effect.",
           dispatch.leaseToken,
+          "escalated",
         );
         if (!failed)
           return c.json(
@@ -849,6 +850,7 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
         caseId,
         "Resolution failed after approval resume.",
         dispatch.leaseToken,
+        "escalated",
       );
       if (!failed)
         return c.json(
@@ -872,6 +874,7 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
         caseId,
         `Resolution returned ${result.status} after approval resume.`,
         dispatch.leaseToken,
+        "escalated",
       );
       if (!failed)
         return c.json(
@@ -902,7 +905,13 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
     }
     if (!lease.lostOwnership && nativeResumed) {
       const failed = await caseStore
-        .failDispatchAndCase(dispatch.id, caseId, error, dispatch.leaseToken)
+        .failDispatchAndCase(
+          dispatch.id,
+          caseId,
+          error,
+          dispatch.leaseToken,
+          "escalated",
+        )
         .catch(() => false);
       if (!failed)
         return c.json(

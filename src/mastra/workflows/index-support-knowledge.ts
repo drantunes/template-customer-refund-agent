@@ -15,8 +15,15 @@ const chunkAndEmbedStep = createStep({
     }),
   }),
   outputSchema: z.object({ indexed: z.number(), generationId: z.string() }),
-  execute: async ({ inputData }) => {
-    const candidate = await publishKnowledge(inputData.binding);
+  execute: async ({ inputData, mastra, tracingContext }) => {
+    if (!mastra)
+      throw new Error(
+        "Knowledge indexing must run through a registered Mastra instance.",
+      );
+    const candidate = await publishKnowledge(inputData.binding, {
+      mastra,
+      tracingContext,
+    });
     return candidate;
   },
 });

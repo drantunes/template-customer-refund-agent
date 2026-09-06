@@ -18,6 +18,17 @@ import { activePrincipalHasRole } from "../server/auth";
 import { traceOperationalPort } from "../lib/operational-spans";
 
 export const MAX_AUTO_APPROVABLE_REFUND = 1000;
+/**
+ * An exception alone cannot prove a financial effect failed: a transport can
+ * break after the provider commits. Only deterministic provider rejections
+ * are financial failures; all other no-effect observations remain durable
+ * uncertainty for recovery/staff review without raising a false refund alert.
+ */
+function isConfirmedRefundFailure(error: unknown) {
+  return /\b(?:400|401|403|404|409|422)\b|permanent|rejected|invalid|not found|exceeds the remaining balance|currency does not match/i.test(
+    String(error),
+  );
+}
 const commandSchema = z.object({
   approvalCaseId: z.string(),
   orderId: z.string(),
@@ -169,17 +180,19 @@ export const issueRefundTool = createTool({
       // local idempotency record is the durable fact used by recovery; do not
       // permanently report a financial failure when it already exists.
       const durable = await caseStore.idempotency(command.idempotencyKey);
-      if (!durable)
+      if (!durable) {
+        const confirmed = isConfirmedRefundFailure(error);
         await caseStore.saveAction(
           input.caseId,
-          "refund-failure",
+          confirmed ? "refund-failure" : "refund-uncertain",
           command.fingerprint,
           {
             category: "provider",
-            classification: "confirmed-failed",
+            classification: confirmed ? "confirmed-failed" : "uncertain",
             failedAt: new Date().toISOString(),
           },
         );
+      }
       throw error;
     }
     const result = {

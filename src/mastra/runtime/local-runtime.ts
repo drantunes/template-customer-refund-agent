@@ -895,7 +895,11 @@ export async function deliverOutbox(
 
 /** Restarts interrupted Mastra work; suspended approvals remain suspended. */
 export async function recoverLocalWorkflows(
-  mastra: { getWorkflow(id: string): any },
+  mastra: {
+    getWorkflow(id: string): any;
+    /** Present on the registered runtime; optional for narrow recovery fakes. */
+    observability?: Mastra["observability"];
+  },
   limit = 10,
   store: CaseStore = caseStore,
 ) {
@@ -961,6 +965,10 @@ export async function recoverLocalWorkflows(
       const { publishKnowledge } = await import("../lib/publish-knowledge");
       await publishKnowledge(bindingsForPersistedCase(supportCase).knowledge, {
         onlyIfMissing: true,
+        // The background worker is a real operational boundary. Its provider
+        // reads need the registered observability instance just like a
+        // foreground workflow, while lightweight recovery fakes remain pure.
+        ...(mastra.observability ? { mastra: mastra as Mastra } : {}),
       });
       const workflow = mastra.getWorkflow("resolveSupportCaseWorkflow");
       const existing = await workflow.getWorkflowRunById?.(dispatch.runId);
