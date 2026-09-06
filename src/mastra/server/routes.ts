@@ -1,5 +1,10 @@
 import { registerApiRoute, type ContextWithMastra } from "@mastra/core/server";
-import { caseStore, isRetentionTombstone } from "../lib/case-store";
+import {
+  caseStore,
+  isRetentionTombstone,
+  type DispatchRecord,
+} from "../lib/case-store";
+import { retryOrEscalateOperationalFailure } from "../lib/operational-alerts";
 import {
   renewDispatchLeaseWhileRunning,
   withDispatchLeaseScope,
@@ -68,6 +73,34 @@ function requireRole(
         errorResponseSchema.parse({ error: "Insufficient authority." }),
         403,
       );
+}
+
+/** Follow-up execution is an operational entrypoint, not merely an HTTP
+ * response. Classify its failure and leave a bounded durable retry or a human
+ * escalation; never terminalize a dispatch as an unclassified failure. */
+async function recoverFollowUpFailure(
+  dispatch: DispatchRecord,
+  caseId: string,
+  error: unknown,
+) {
+  return retryOrEscalateOperationalFailure({
+    signal: {
+      providerOrTool: "resolve-support-case",
+      occurredAt: new Date(),
+      durationMs: 0,
+      failed: true,
+    },
+    retry: () =>
+      caseStore.retryDispatch(dispatch.id, caseId, error, dispatch.leaseToken),
+    escalate: () =>
+      caseStore.failDispatchAndCase(
+        dispatch.id,
+        caseId,
+        error,
+        dispatch.leaseToken,
+        "escalated",
+      ),
+  });
 }
 function caseScope(
   c: ContextWithMastra,
@@ -375,13 +408,12 @@ export const supportCaseFollowUpRoute = registerApiRoute(
             409,
           );
         if (result.status === "failed") {
-          const failed = await caseStore.failDispatchAndCase(
-            dispatch.id,
+          const recovery = await recoverFollowUpFailure(
+            dispatch,
             caseId,
             "Follow-up resolution failed.",
-            dispatch.leaseToken,
           );
-          if (!failed)
+          if (!recovery.applied)
             return c.json(
               { error: "Follow-up lost its dispatch lease; reload the case." },
               409,
@@ -419,13 +451,12 @@ export const supportCaseFollowUpRoute = registerApiRoute(
               409,
             );
         } else {
-          const failed = await caseStore.failDispatchAndCase(
-            dispatch.id,
+          const recovery = await recoverFollowUpFailure(
+            dispatch,
             caseId,
             `Follow-up resolution returned ${result.status}.`,
-            dispatch.leaseToken,
           );
-          if (!failed)
+          if (!recovery.applied)
             return c.json(
               { error: "Follow-up lost its dispatch lease; reload the case." },
               409,
@@ -433,9 +464,16 @@ export const supportCaseFollowUpRoute = registerApiRoute(
           return c.json({ error: "Follow-up resolution failed." }, 500);
         }
       } catch (error) {
-        await caseStore
-          .failDispatchAndCase(dispatch.id, caseId, error, dispatch.leaseToken)
-          .catch(() => undefined);
+        const recovery = await recoverFollowUpFailure(
+          dispatch,
+          caseId,
+          error,
+        ).catch(() => undefined);
+        if (!recovery?.applied)
+          return c.json(
+            { error: "Follow-up lost its dispatch lease; reload the case." },
+            409,
+          );
         return c.json(
           errorResponseSchema.parse({
             error: error instanceof Error ? error.message : String(error),

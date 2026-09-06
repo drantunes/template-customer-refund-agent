@@ -32,6 +32,11 @@ export interface OutboxRecord {
   receipt?: unknown;
   lastError?: string;
   leaseToken?: string;
+  /** Immutable originating response correlation.  Legacy rows may be unknown. */
+  originatingTurnId?: string;
+  originatingRunId?: string;
+  originatingTraceId?: string;
+  correlationState?: "known" | "unknown";
 }
 export interface DispatchRecord {
   id: string;
@@ -59,6 +64,7 @@ export interface FeedbackRecord {
   id: string;
   caseId: string;
   feedback: CaseFeedback;
+  attributionState?: "known" | "legacy-unknown";
 }
 export const retentionDefaults = {
   rawPayloadDays: 7,
@@ -203,7 +209,7 @@ export class CaseStore {
   async close() {
     if (this.ownsClient) this.client.close();
   }
-  async migrate(target = 10): Promise<void> {
+  async migrate(target = 11): Promise<void> {
     await this.client.execute(
       "CREATE TABLE IF NOT EXISTS support_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
     );
@@ -211,7 +217,7 @@ export class CaseStore {
       "SELECT version FROM support_schema_migrations ORDER BY version",
     );
     let version = Number(applied.rows.at(-1)?.version ?? 0);
-    if (!Number.isInteger(target) || target < 0 || target > 10)
+    if (!Number.isInteger(target) || target < 0 || target > 11)
       throw new Error("Unsupported support schema target version.");
     // Versions 6 through 8 introduced append-only turn, decision, and audit
     // records. Their inverse would discard or weaken durable financial/replay
@@ -283,6 +289,10 @@ export class CaseStore {
     }
     if (version === 10) {
       await this.up10();
+      return;
+    }
+    if (version === 11) {
+      await this.up11();
       return;
     }
     await this.client.execute({
@@ -650,6 +660,120 @@ export class CaseStore {
       sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (10, ?)",
       args: [now()],
     });
+  }
+  /**
+   * Phase 004 makes both the response correlation and the feedback history
+   * durable. Existing outbox/feedback rows are retained: a row is backfilled
+   * only when its deterministic final-response id identifies exactly one turn;
+   * all other historical attribution is explicitly marked unknown.
+   */
+  private async up11() {
+    const outboxRows = await this.client.execute(
+      "SELECT id, case_id FROM support_outbox",
+    );
+    const feedbackRows = await this.client.execute(
+      "SELECT id, case_id, turn_id, actor_id, data, created_at FROM support_feedback",
+    );
+    const cases = await this.client.execute(
+      "SELECT id, data FROM support_cases",
+    );
+    const tx = await this.client.transaction("write");
+    try {
+      for (const sql of [
+        "ALTER TABLE support_outbox ADD COLUMN originating_turn_id TEXT",
+        "ALTER TABLE support_outbox ADD COLUMN originating_run_id TEXT",
+        "ALTER TABLE support_outbox ADD COLUMN originating_trace_id TEXT",
+        "ALTER TABLE support_outbox ADD COLUMN correlation_state TEXT NOT NULL DEFAULT 'unknown'",
+      ]) {
+        try {
+          await tx.execute(sql);
+        } catch (error) {
+          if (!String(error).includes("duplicate column")) throw error;
+        }
+      }
+      for (const row of outboxRows.rows) {
+        const caseId = String(row.case_id);
+        const turns = await tx.execute({
+          sql: "SELECT id, run_id, outcome_data FROM support_turns WHERE case_id = ?",
+          args: [caseId],
+        });
+        const turn = turns.rows.find(
+          (candidate) =>
+            String(row.id) === `outbox_${caseId}_${String(candidate.id)}_final`,
+        ) as Record<string, unknown> | undefined;
+        if (!turn) continue;
+        const outcome = turn.outcome_data
+          ? (JSON.parse(String(turn.outcome_data)) as {
+              telemetry?: { traceId?: unknown };
+            })
+          : undefined;
+        const traceId = outcome?.telemetry?.traceId;
+        await tx.execute({
+          sql: "UPDATE support_outbox SET originating_turn_id = ?, originating_run_id = ?, originating_trace_id = ?, correlation_state = ? WHERE id = ?",
+          args: [
+            String(turn.id),
+            turn.run_id ? String(turn.run_id) : null,
+            typeof traceId === "string" ? traceId : null,
+            typeof traceId === "string" ? "known" : "unknown",
+            String(row.id),
+          ],
+        });
+      }
+      await tx.executeMultiple(`
+        CREATE TABLE support_feedback_v11 (
+          id TEXT PRIMARY KEY,
+          case_id TEXT NOT NULL,
+          turn_id TEXT NOT NULL,
+          actor_id TEXT NOT NULL,
+          data TEXT NOT NULL,
+          created_at TEXT,
+          dedupe_key TEXT NOT NULL,
+          attribution_state TEXT NOT NULL DEFAULT 'known'
+        );
+      `);
+      for (const row of feedbackRows.rows) {
+        const feedback = JSON.parse(String(row.data)) as { rating?: unknown };
+        await tx.execute({
+          sql: "INSERT INTO support_feedback_v11(id, case_id, turn_id, actor_id, data, created_at, dedupe_key, attribution_state) VALUES (?, ?, ?, ?, ?, ?, ?, 'known')",
+          args: [
+            String(row.id),
+            String(row.case_id),
+            String(row.turn_id),
+            String(row.actor_id),
+            String(row.data),
+            row.created_at ? String(row.created_at) : null,
+            String(feedback.rating ?? "unknown"),
+          ],
+        });
+      }
+      await tx.executeMultiple(`
+        DROP TABLE support_feedback;
+        ALTER TABLE support_feedback_v11 RENAME TO support_feedback;
+        CREATE UNIQUE INDEX support_feedback_exact_rating
+          ON support_feedback(case_id, turn_id, actor_id, dedupe_key);
+        CREATE INDEX support_feedback_case_created
+          ON support_feedback(case_id, created_at DESC);
+      `);
+      for (const row of cases.rows) {
+        const supportCase = parse(row as Record<string, unknown>);
+        if (!supportCase.feedback) continue;
+        await this.insertLegacyFeedback(
+          tx,
+          supportCase.id,
+          supportCase.feedback,
+        );
+      }
+      await tx.execute({
+        sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (11, ?)",
+        args: [now()],
+      });
+      await tx.commit();
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
   }
   private async down(version: number) {
     if (version === 3) {
@@ -1348,13 +1472,17 @@ export class CaseStore {
   async enqueueDelivery(record: Omit<OutboxRecord, "state" | "attempts">) {
     await this.ensured();
     await this.client.execute({
-      sql: "INSERT INTO support_outbox(id, case_id, binding, body, status, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)",
+      sql: "INSERT INTO support_outbox(id, case_id, binding, body, status, state, originating_turn_id, originating_run_id, originating_trace_id, correlation_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
       args: [
         record.id,
         record.caseId,
         JSON.stringify(record.binding),
         record.body,
         record.status,
+        record.originatingTurnId ?? null,
+        record.originatingRunId ?? null,
+        record.originatingTraceId ?? null,
+        record.correlationState ?? "unknown",
         now(),
         now(),
       ],
@@ -1409,13 +1537,14 @@ export class CaseStore {
           );
       }
       const priorOutcome = await tx.execute({
-        sql: "SELECT outcome_data FROM support_turns WHERE id = ? AND case_id = ?",
+        sql: "SELECT run_id, outcome_data FROM support_turns WHERE id = ? AND case_id = ?",
         args: [input.turnId, input.caseId],
       });
       const existingOutcome = priorOutcome.rows[0]?.outcome_data
         ? (JSON.parse(String(priorOutcome.rows[0].outcome_data)) as {
             finalResponse?: string;
             status?: string;
+            telemetry?: { traceId?: unknown };
             [key: string]: unknown;
           })
         : undefined;
@@ -1492,7 +1621,7 @@ export class CaseStore {
         ],
       });
       const prior = await tx.execute({
-        sql: "SELECT case_id, binding, body, status FROM support_outbox WHERE id = ?",
+        sql: "SELECT case_id, binding, body, status, originating_turn_id, originating_run_id, originating_trace_id, correlation_state FROM support_outbox WHERE id = ?",
         args: [input.outbox.id],
       });
       if (prior.rows[0]) {
@@ -1508,13 +1637,23 @@ export class CaseStore {
           );
       } else {
         await tx.execute({
-          sql: "INSERT INTO support_outbox(id, case_id, binding, body, status, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)",
+          sql: "INSERT INTO support_outbox(id, case_id, binding, body, status, state, originating_turn_id, originating_run_id, originating_trace_id, correlation_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
           args: [
             input.outbox.id,
             input.caseId,
             JSON.stringify(input.outbox.binding),
             input.outbox.body,
             input.outbox.status,
+            input.turnId,
+            priorOutcome.rows[0]?.run_id
+              ? String(priorOutcome.rows[0].run_id)
+              : null,
+            typeof existingOutcome?.telemetry?.traceId === "string"
+              ? existingOutcome.telemetry.traceId
+              : null,
+            typeof existingOutcome?.telemetry?.traceId === "string"
+              ? "known"
+              : "unknown",
             now(),
             now(),
           ],
@@ -1533,7 +1672,7 @@ export class CaseStore {
     await this.ensured();
     const claimedAt = now();
     const exhausted = await this.client.execute({
-      sql: "SELECT case_id FROM support_dispatch WHERE state IN ('claimed', 'started') AND lease_until < ? AND attempts >= 3",
+      sql: "SELECT case_id, id FROM support_dispatch WHERE state IN ('claimed', 'started') AND lease_until < ? AND attempts >= 3",
       args: [claimedAt],
     });
     for (const row of exhausted.rows) {
@@ -1554,10 +1693,10 @@ export class CaseStore {
             if (current.status !== "waiting_approval") {
               const updated = this.withBindings({
                 ...current,
-                status: "failed" as const,
+                status: "escalated" as const,
                 escalationReason:
                   "Workflow recovery exhausted its durable lease attempts.",
-                metadata: { ...current.metadata, workflowStatus: "failed" },
+                metadata: { ...current.metadata, workflowStatus: "escalated" },
                 updatedAt: now(),
               });
               const write = await tx.execute({
@@ -1571,6 +1710,22 @@ export class CaseStore {
               });
               if (Number(write.rowsAffected) !== 1)
                 throw new StaleCaseWriteError(caseId);
+              await tx.execute({
+                sql: "UPDATE support_turns SET state = 'escalated', outcome_data = json_patch(COALESCE(outcome_data, '{}'), ?), updated_at = ? WHERE id = (SELECT turn_id FROM support_dispatch WHERE id = ?)",
+                args: [
+                  JSON.stringify({
+                    status: "escalated",
+                    escalationReason:
+                      "Workflow recovery exhausted its durable lease attempts.",
+                    operationalFailure: {
+                      disposition: "escalate",
+                      recordedAt: now(),
+                    },
+                  }),
+                  now(),
+                  String(row.id),
+                ],
+              });
             }
           }
         }
@@ -1655,8 +1810,8 @@ export class CaseStore {
         return false;
       }
       await tx.execute({
-        sql: "UPDATE support_turns SET state = ?, updated_at = ? WHERE id = (SELECT turn_id FROM support_dispatch WHERE id = ?)",
-        args: [state, now(), id],
+        sql: "UPDATE support_turns SET state = CASE WHEN ? = 'completed' AND state IN ('resolved', 'escalated') THEN state ELSE ? END, updated_at = ? WHERE id = (SELECT turn_id FROM support_dispatch WHERE id = ?)",
+        args: [state, state, now(), id],
       });
       await tx.commit();
       return true;
@@ -1949,6 +2104,49 @@ export class CaseStore {
   ): Promise<SupportTurnRecord | undefined> {
     return (await this.turns(caseId)).find((turn) => turn.id === turnId);
   }
+  private async insertLegacyFeedback(
+    tx: Pick<Client, "execute">,
+    caseId: string,
+    feedback: CaseFeedback,
+  ) {
+    const turn =
+      typeof feedback.turnId === "string"
+        ? await tx.execute({
+            sql: "SELECT id FROM support_turns WHERE id = ? AND case_id = ?",
+            args: [feedback.turnId, caseId],
+          })
+        : undefined;
+    const knownTurn = turn?.rows[0] ? String(turn.rows[0].id) : undefined;
+    const knownActor =
+      typeof feedback.actorId === "string" && feedback.actorId.length > 0
+        ? feedback.actorId
+        : undefined;
+    const knownTime =
+      typeof feedback.submittedAt === "string" &&
+      Number.isFinite(Date.parse(feedback.submittedAt));
+    const attributionState =
+      knownTurn && knownActor && knownTime ? "known" : "legacy-unknown";
+    const turnId = knownTurn ?? `legacy:unknown:${caseId}`;
+    const actorId = knownActor ?? "legacy:unknown";
+    const existing = await tx.execute({
+      sql: "SELECT id FROM support_feedback WHERE case_id = ? AND turn_id = ? AND actor_id = ? AND dedupe_key = ?",
+      args: [caseId, turnId, actorId, feedback.rating],
+    });
+    if (existing.rows[0]) return;
+    await tx.execute({
+      sql: "INSERT INTO support_feedback(id, case_id, turn_id, actor_id, data, created_at, dedupe_key, attribution_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      args: [
+        `feedback_legacy_${crypto.randomUUID()}`,
+        caseId,
+        turnId,
+        actorId,
+        JSON.stringify(feedback),
+        knownTime ? feedback.submittedAt : null,
+        feedback.rating,
+        attributionState,
+      ],
+    });
+  }
   async recordFeedback(input: {
     caseId: string;
     turnId: string;
@@ -1963,15 +2161,22 @@ export class CaseStore {
         args: [input.turnId, input.caseId],
       });
       const row = turn.rows[0] as Record<string, unknown> | undefined;
-      if (!row || !["resolved", "escalated"].includes(String(row.state)))
-        throw new Error("Feedback must target a completed response turn.");
-      const telemetry = row.outcome_data
-        ? (
-            JSON.parse(String(row.outcome_data)) as {
-              telemetry?: { traceId?: unknown };
-            }
-          ).telemetry
+      const outcome = row?.outcome_data
+        ? (JSON.parse(String(row.outcome_data)) as {
+            status?: unknown;
+            finalResponse?: unknown;
+            telemetry?: { traceId?: unknown };
+          })
         : undefined;
+      // Dispatch completion is a separate lifecycle. A finalized immutable
+      // response remains rateable even though its dispatch is "completed".
+      if (
+        !row ||
+        !["resolved", "escalated"].includes(String(outcome?.status)) ||
+        typeof outcome?.finalResponse !== "string"
+      )
+        throw new Error("Feedback must target a completed response turn.");
+      const telemetry = outcome?.telemetry;
       if (
         input.feedback.runId !==
           (row.run_id ? String(row.run_id) : undefined) ||
@@ -1983,16 +2188,31 @@ export class CaseStore {
         throw new Error(
           "Feedback correlation does not match the response turn.",
         );
+      const supportCase = await tx.execute({
+        sql: "SELECT data FROM support_cases WHERE id = ?",
+        args: [input.caseId],
+      });
+      const legacy = supportCase.rows[0]
+        ? parse(supportCase.rows[0] as Record<string, unknown>).feedback
+        : undefined;
+      // A projection can predate the feedback table or point to an earlier
+      // turn. Preserve it before the route replaces the active projection.
+      if (legacy) await this.insertLegacyFeedback(tx, input.caseId, legacy);
       const existing = await tx.execute({
-        sql: "SELECT data FROM support_feedback WHERE case_id = ? AND turn_id = ? AND actor_id = ?",
-        args: [input.caseId, input.turnId, input.actorId],
+        sql: "SELECT data FROM support_feedback WHERE case_id = ? AND turn_id = ? AND actor_id = ? AND dedupe_key = ?",
+        args: [
+          input.caseId,
+          input.turnId,
+          input.actorId,
+          input.feedback.rating,
+        ],
       });
       if (existing.rows[0]) {
         await tx.commit();
         return JSON.parse(String(existing.rows[0].data)) as CaseFeedback;
       }
       await tx.execute({
-        sql: "INSERT INTO support_feedback(id, case_id, turn_id, actor_id, data, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        sql: "INSERT INTO support_feedback(id, case_id, turn_id, actor_id, data, created_at, dedupe_key, attribution_state) VALUES (?, ?, ?, ?, ?, ?, ?, 'known')",
         args: [
           `feedback_${crypto.randomUUID()}`,
           input.caseId,
@@ -2000,6 +2220,7 @@ export class CaseStore {
           input.actorId,
           JSON.stringify(input.feedback),
           input.feedback.submittedAt,
+          input.feedback.rating,
         ],
       });
       await tx.commit();
@@ -2015,13 +2236,17 @@ export class CaseStore {
     await this.ensured();
     if (!caseIds.length) return [];
     const rows = await this.client.execute({
-      sql: `SELECT id, case_id, data FROM support_feedback WHERE case_id IN (${caseIds.map(() => "?").join(", ")}) ORDER BY created_at DESC`,
+      sql: `SELECT id, case_id, data, attribution_state FROM support_feedback WHERE case_id IN (${caseIds.map(() => "?").join(", ")}) ORDER BY created_at DESC`,
       args: caseIds,
     });
     return rows.rows.map((row) => ({
       id: String(row.id),
       caseId: String(row.case_id),
       feedback: JSON.parse(String(row.data)) as CaseFeedback,
+      attributionState:
+        String(row.attribution_state) === "legacy-unknown"
+          ? "legacy-unknown"
+          : "known",
     }));
   }
   /** Immutable turn correlation survives later follow-up projections. */
@@ -2361,6 +2586,17 @@ export class CaseStore {
       receipt: row.receipt ? JSON.parse(String(row.receipt)) : undefined,
       lastError: row.last_error ? String(row.last_error) : undefined,
       leaseToken: row.lease_token ? String(row.lease_token) : undefined,
+      originatingTurnId: row.originating_turn_id
+        ? String(row.originating_turn_id)
+        : undefined,
+      originatingRunId: row.originating_run_id
+        ? String(row.originating_run_id)
+        : undefined,
+      originatingTraceId: row.originating_trace_id
+        ? String(row.originating_trace_id)
+        : undefined,
+      correlationState:
+        String(row.correlation_state) === "known" ? "known" : "unknown",
     };
   }
   async saveAction(

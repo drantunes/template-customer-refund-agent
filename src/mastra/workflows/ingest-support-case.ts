@@ -10,6 +10,7 @@ import {
 } from "../providers/registry";
 import { ownerIdForCustomer } from "../server/auth";
 import { withDispatchLeaseScope } from "../lib/dispatch-lease-scope";
+import { retryOrEscalateOperationalFailure } from "../lib/operational-alerts";
 
 const ingressScopeSchema = z.object({
   id: z.string().min(1),
@@ -191,11 +192,33 @@ const startResolutionStep = createStep({
             caseId: inputData.caseId,
             error: "Workflow start failed.",
           });
-          await caseStore.failDispatchAndCase(
-            dispatch.id,
-            inputData.caseId,
-            "Workflow start failed.",
-            dispatch.leaseToken,
+          await retryOrEscalateOperationalFailure({
+            signal: {
+              providerOrTool: "resolve-support-case",
+              occurredAt: new Date(),
+              durationMs: 0,
+              failed: true,
+            },
+            retry: () =>
+              caseStore.retryDispatch(
+                dispatch.id,
+                inputData.caseId,
+                "Workflow start failed.",
+                dispatch.leaseToken,
+              ),
+            escalate: () =>
+              caseStore.failDispatchAndCase(
+                dispatch.id,
+                inputData.caseId,
+                "Workflow start failed.",
+                dispatch.leaseToken,
+                "escalated",
+              ),
+          }).catch((error) =>
+            mastra!.getLogger()?.error("Failed to persist workflow recovery.", {
+              caseId: inputData.caseId,
+              error,
+            }),
           );
           return;
         }
@@ -213,11 +236,33 @@ const startResolutionStep = createStep({
           error,
           caseId: inputData.caseId,
         });
-        await caseStore.failDispatchAndCase(
-          dispatch.id,
-          inputData.caseId,
-          error,
-          dispatch.leaseToken,
+        await retryOrEscalateOperationalFailure({
+          signal: {
+            providerOrTool: "resolve-support-case",
+            occurredAt: new Date(),
+            durationMs: 0,
+            failed: true,
+          },
+          retry: () =>
+            caseStore.retryDispatch(
+              dispatch.id,
+              inputData.caseId,
+              error,
+              dispatch.leaseToken,
+            ),
+          escalate: () =>
+            caseStore.failDispatchAndCase(
+              dispatch.id,
+              inputData.caseId,
+              error,
+              dispatch.leaseToken,
+              "escalated",
+            ),
+        }).catch((recoveryError) =>
+          mastra!.getLogger()?.error("Failed to persist workflow recovery.", {
+            caseId: inputData.caseId,
+            error: recoveryError,
+          }),
         );
       })
       .finally(() => clearInterval(heartbeat));

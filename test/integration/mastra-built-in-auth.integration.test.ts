@@ -310,6 +310,10 @@ describe("configured Mastra built-in API authorization", () => {
       binding,
       body: "slow synthetic delivery",
       status: "resolved",
+      originatingTurnId: "operational-span-slow-turn",
+      originatingRunId: "operational-span-run",
+      originatingTraceId: root.traceId,
+      correlationState: "known",
     });
     await caseStore.enqueueDelivery({
       id: "operational-span-failure-outbox",
@@ -317,6 +321,10 @@ describe("configured Mastra built-in API authorization", () => {
       binding,
       body: "failing synthetic delivery",
       status: "resolved",
+      originatingTurnId: "operational-span-failure-turn",
+      originatingRunId: "operational-span-run",
+      originatingTraceId: root.traceId,
+      correlationState: "known",
     });
     const support = localRuntime.support(binding);
     const registry = {
@@ -445,6 +453,10 @@ describe("configured Mastra built-in API authorization", () => {
       binding: bindingA,
       body: "tenant A reply",
       status: "resolved",
+      originatingTurnId: "tenant-a-origin-turn",
+      originatingRunId: "tenant-a-origin-run",
+      originatingTraceId: rootA.traceId,
+      correlationState: "known",
     });
     await caseStore.enqueueDelivery({
       id: "tenant-b-retry-delivery",
@@ -452,6 +464,10 @@ describe("configured Mastra built-in API authorization", () => {
       binding: bindingB,
       body: "tenant B reply",
       status: "resolved",
+      originatingTurnId: "tenant-b-origin-turn",
+      originatingRunId: "tenant-b-origin-run",
+      originatingTraceId: rootB.traceId,
+      correlationState: "known",
     });
     let tenantBFailures = 0;
     const registry: ProviderRegistry = {
@@ -654,7 +670,11 @@ describe("configured Mastra built-in API authorization", () => {
         sql: "UPDATE support_turns SET state = 'resolved', run_id = ?, outcome_data = ? WHERE id = ?",
         args: [
           runId,
-          JSON.stringify({ telemetry: { traceId: `${id}-trace` } }),
+          JSON.stringify({
+            status: "resolved",
+            finalResponse: "Synthetic final response.",
+            telemetry: { traceId: `${id}-trace` },
+          }),
           turn.id,
         ],
       });

@@ -40,7 +40,7 @@ import {
 } from "../providers/native-execution";
 import { activePrincipalHasRole, ownerIdForCustomer } from "../server/auth";
 import { traceOperationalPort } from "../lib/operational-spans";
-import { classifyFailure } from "../lib/operational-alerts";
+import { retryOrEscalateOperationalFailure } from "../lib/operational-alerts";
 
 // Keep this runtime boundary independent of the workflow module: the workflow
 // itself uses LocalRuntime through providers and importing it here would create
@@ -861,8 +861,12 @@ export async function deliverOutbox(
       heartbeat.unref();
       const receipt = await traceOperationalPort({
         mastra: observability?.mastra,
-        // Do not use the caller's context: it may belong to another tenant.
-        traceId: ownerCase?.traceId,
+        // Do not use the caller's context or the mutable case projection: a
+        // later follow-up can replace both. The outbox owns its response turn.
+        traceId:
+          item.correlationState === "known"
+            ? item.originatingTraceId
+            : undefined,
         kind: "provider",
         operation: "support.deliver",
         run: () =>
@@ -909,21 +913,25 @@ export async function recoverLocalWorkflows(
   ): Promise<"retried" | "escalate"> => {
     // This is the operational recovery path, not a dashboard-only
     // classification. Attempts are durably bounded by CaseStore at three.
-    const disposition = classifyFailure({
-      providerOrTool: "resolve-support-case",
-      occurredAt: new Date(),
-      durationMs: 0,
-      failed: true,
+    const result = await retryOrEscalateOperationalFailure({
+      signal: {
+        providerOrTool: "resolve-support-case",
+        occurredAt: new Date(),
+        durationMs: 0,
+        failed: true,
+      },
+      retry: () =>
+        store.retryDispatch(
+          dispatch.id,
+          dispatch.caseId,
+          error,
+          dispatch.leaseToken,
+        ),
+      // Recovery must defer its case projection until it knows the retry has
+      // exhausted. The caller owns the fenced escalation transition.
+      escalate: async () => false,
     });
-    const retried =
-      disposition === "retry" &&
-      (await store.retryDispatch(
-        dispatch.id,
-        dispatch.caseId,
-        error,
-        dispatch.leaseToken,
-      ));
-    return retried ? "retried" : "escalate";
+    return result.disposition === "retry" ? "retried" : "escalate";
   };
   let claimed = 0;
   while (claimed < limit) {

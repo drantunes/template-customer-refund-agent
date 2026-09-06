@@ -617,7 +617,7 @@ describe("native approval workflow recovery", () => {
     }
   });
 
-  it("fails a real portal follow-up when its registered response agent transport fails", async () => {
+  it("durably retries a real portal follow-up when its registered response agent transport fails", async () => {
     const caseId = `portal-agent-failure-${crypto.randomUUID()}`;
     let responseCalls = 0;
     const { app, caseStore } = await setup(
@@ -646,13 +646,13 @@ describe("native approval workflow recovery", () => {
     );
 
     expect(response.status).toBe(500);
-    expect(await caseStore.get(caseId)).toMatchObject({ status: "failed" });
+    expect(await caseStore.get(caseId)).toMatchObject({ status: "processing" });
     expect(await caseStore.turns(caseId)).toHaveLength(2);
     const dispatch = await caseStore.getClientForTests().execute({
       sql: "SELECT state FROM support_dispatch WHERE case_id = ? ORDER BY created_at DESC LIMIT 1",
       args: [caseId],
     });
-    expect(dispatch.rows[0]).toMatchObject({ state: "failed" });
+    expect(dispatch.rows[0]).toMatchObject({ state: "pending" });
   });
 
   it("renews a portal follow-up lease while the registered response agent transport is slow", async () => {

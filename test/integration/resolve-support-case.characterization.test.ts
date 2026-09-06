@@ -476,7 +476,7 @@ describe("resolve support case WIP characterization", () => {
     expect((await caseStore.get(supportCase.id))?.refundResult).toBeUndefined();
   });
 
-  it("marks a detached workflow start failed when its refund quote exceeds the remaining balance", async () => {
+  it("queues a detached workflow retry when its refund quote exceeds the remaining balance", async () => {
     const runtime = await loadCharacterizationRuntime({
       recommendRefund: true,
       requiresEscalation: false,
@@ -507,17 +507,16 @@ describe("resolve support case WIP characterization", () => {
     });
 
     expect(ingested.status).toBe("success");
-    await vi.waitFor(async () => {
-      expect(await caseStore.get(ingested.result.caseId)).toMatchObject({
-        status: "failed",
-        escalationReason: "Workflow start failed.",
-      });
-    });
-    const dispatch = await caseStore.getClientForTests().execute({
-      sql: "SELECT state FROM support_dispatch WHERE case_id = ?",
-      args: [ingested.result.caseId],
-    });
-    expect(dispatch.rows[0]).toMatchObject({ state: "failed" });
+    await vi.waitFor(async () =>
+      expect(
+        (
+          await caseStore.getClientForTests().execute({
+            sql: "SELECT state FROM support_dispatch WHERE case_id = ?",
+            args: [ingested.result.caseId],
+          })
+        ).rows[0],
+      ).toMatchObject({ state: "pending" }),
+    );
   });
 
   it("escalates a deterministic policy decision that does not require a refund", async () => {

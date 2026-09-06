@@ -16,6 +16,19 @@ export function classifyFailure(signal: OperationalSignal): FailureDisposition {
     : "retry";
 }
 
+/** Apply the classification where work actually fails. A retry is bounded by
+ * the durable dispatch lease; inability to requeue always becomes a durable
+ * human escalation instead of a terminal unclassified failure. */
+export async function retryOrEscalateOperationalFailure(input: {
+  signal: OperationalSignal;
+  retry(): Promise<boolean>;
+  escalate(): Promise<boolean>;
+}): Promise<{ disposition: FailureDisposition; applied: boolean }> {
+  if (classifyFailure(input.signal) === "retry" && (await input.retry()))
+    return { disposition: "retry", applied: true };
+  return { disposition: "escalate", applied: await input.escalate() };
+}
+
 export function alertReasons(signals: OperationalSignal[], now = new Date()) {
   const windowStart = now.getTime() - 15 * 60_000;
   const recent = signals.filter(
