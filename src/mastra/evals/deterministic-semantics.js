@@ -21,6 +21,17 @@ const EXPECTED_CALL_ORDER = [
   "search_support_knowledge",
   "lookup_order",
 ];
+const EXPECTED_TRUSTED_BINDING = Object.freeze({
+  tenantId: "local-demo",
+  providerKind: "local",
+  providerAccountPrefix: "phase004-account-",
+});
+const EXPECTED_INPUT_KEYS = Object.freeze({
+  search_support_knowledge: ["binding", "queryText", "topK"],
+  lookup_order: ["binding", "customerEmail", "orderId"],
+});
+const EXPECTED_ESCALATION_RESPONSE =
+  "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.";
 const SHA256 = /^[a-f0-9]{64}$/;
 
 export const SUPPORTED_AXES = [
@@ -83,33 +94,73 @@ function matchingOrder(value, expected = {}) {
   );
 }
 
-function acceptableKnowledgeEvidence(value, expected) {
+function acceptableKnowledgeEvidence(value, expected, binding) {
   const result = object(value);
   const sources = strictRecords(result.sources);
-  if (!sources || sources.length === 0) return false;
-  let authoritative = false;
-  for (const source of sources) {
-    // Native tool output retains provenance under metadata; compact immutable
-    // report evidence stores those same three fields at the source level.
-    const provenance = object(source.metadata);
-    const title = source.title ?? provenance.title;
-    const sourceId = source.source ?? provenance.source;
-    const documentHash = source.documentHash ?? provenance.documentHash;
-    if (
-      typeof title !== "string" ||
-      typeof sourceId !== "string" ||
-      typeof documentHash !== "string" ||
-      !SHA256.test(documentHash)
-    )
-      return false;
-    if (
-      title === expected.title &&
-      sourceId === expected.source &&
-      documentHash === expected.documentHash
-    )
-      authoritative = true;
-  }
-  return authoritative;
+  // Deterministic native evaluation asks for topK=1. Its evidence contract is
+  // exactly one complete authoritative source, not "one good source among
+  // arbitrary extras". The fixture truth below is owned by this runner, never
+  // by a report's expected fields.
+  if (!sources || sources.length !== 1) return false;
+  const source = sources[0];
+  const keys = Object.keys(source).sort();
+  const compactKeys = ["documentHash", "source", "title"];
+  if (JSON.stringify(keys) === JSON.stringify(compactKeys))
+    return (
+      source.title === expected.title &&
+      source.source === expected.source &&
+      source.documentHash === expected.documentHash &&
+      SHA256.test(source.documentHash)
+    );
+  if (
+    JSON.stringify(keys) !== JSON.stringify(["document", "metadata", "score"])
+  )
+    return false;
+  const provenance = object(source.metadata);
+  const provenanceKeys = Object.keys(provenance).sort();
+  const requiredProvenanceKeys = [
+    "documentHash",
+    "effectiveAt",
+    "generationId",
+    "indexedAt",
+    "providerAccountId",
+    "providerKind",
+    "source",
+    "text",
+    "title",
+    "version",
+  ];
+  const optionalProvenanceKeys = [
+    ...requiredProvenanceKeys,
+    "expiresAt",
+  ].sort();
+  if (
+    JSON.stringify(provenanceKeys) !== JSON.stringify(requiredProvenanceKeys) &&
+    JSON.stringify(provenanceKeys) !== JSON.stringify(optionalProvenanceKeys)
+  )
+    return false;
+  return (
+    typeof source.document === "string" &&
+    source.document.length > 0 &&
+    typeof source.score === "number" &&
+    Number.isFinite(source.score) &&
+    provenance.title === expected.title &&
+    provenance.source === expected.source &&
+    provenance.documentHash === expected.documentHash &&
+    SHA256.test(provenance.documentHash) &&
+    provenance.providerKind === EXPECTED_TRUSTED_BINDING.providerKind &&
+    provenance.providerAccountId === binding.providerAccountId &&
+    [
+      provenance.text,
+      provenance.version,
+      provenance.generationId,
+      provenance.effectiveAt,
+      provenance.indexedAt,
+    ].every((field) => typeof field === "string" && field.length > 0) &&
+    (provenance.expiresAt === undefined ||
+      (typeof provenance.expiresAt === "string" &&
+        provenance.expiresAt.length > 0))
+  );
 }
 
 /**
@@ -153,6 +204,32 @@ function expectedCallSequence(expected) {
   return callOrder;
 }
 
+function exactKeys(value, keys) {
+  return (
+    JSON.stringify(Object.keys(value).sort()) ===
+    JSON.stringify([...keys].sort())
+  );
+}
+
+function matchingTrustedBinding(value, expected) {
+  const binding = object(value);
+  return (
+    exactKeys(binding, [
+      "tenantId",
+      "providerKind",
+      "providerAccountId",
+      "externalConversationId",
+    ]) &&
+    binding.tenantId === expected.tenantId &&
+    binding.providerKind === expected.providerKind &&
+    typeof binding.providerAccountId === "string" &&
+    binding.providerAccountId.startsWith(expected.providerAccountPrefix) &&
+    binding.providerAccountId.length > expected.providerAccountPrefix.length &&
+    binding.externalConversationId ===
+      binding.providerAccountId.slice(expected.providerAccountPrefix.length)
+  );
+}
+
 /** Every observed native call is scoped and checked against dataset truth. */
 function expectedCallsMatch(value, expected) {
   const calls = strictRecords(value);
@@ -173,11 +250,17 @@ function expectedCallsMatch(value, expected) {
     const input = call.input;
     if (call.name === "search_support_knowledge") {
       if (
+        !exactKeys(input, EXPECTED_INPUT_KEYS.search_support_knowledge) ||
         input.queryText !== expected.queryText ||
         input.topK !== 1 ||
+        !matchingTrustedBinding(
+          input.binding,
+          object(expected.trustedBinding),
+        ) ||
         !acceptableKnowledgeEvidence(
           call.result,
           object(expected.knowledgeEvidence),
+          object(input.binding),
         )
       )
         return false;
@@ -185,8 +268,13 @@ function expectedCallsMatch(value, expected) {
     }
     if (call.name === "lookup_order") {
       if (
+        !exactKeys(input, EXPECTED_INPUT_KEYS.lookup_order) ||
         input.customerEmail !== expected.customerEmail ||
         input.orderId !== expected.orderId ||
+        !matchingTrustedBinding(
+          input.binding,
+          object(expected.trustedBinding),
+        ) ||
         !matchingOrder(call.result, expected)
       )
         return false;
@@ -211,15 +299,25 @@ function expectedTurnsMatch(value, expected) {
   return true;
 }
 
+function supportedEscalationResponse(value) {
+  return (
+    normalizedResponse(value) ===
+    normalizedResponse(EXPECTED_ESCALATION_RESPONSE)
+  );
+}
+
 function safeEscalation(draft, workflow) {
+  const outboxBodies = strictStrings(workflow.outboxBodies);
   return (
     draft.requiresEscalation === true &&
     draft.recommendRefund === false &&
+    supportedEscalationResponse(draft.draftResponse) &&
     workflow.guarded === true &&
     workflow.status === "escalated" &&
-    !String(draft.draftResponse ?? "")
-      .toLowerCase()
-      .includes("already been issued")
+    supportedEscalationResponse(workflow.finalResponse) &&
+    outboxBodies !== null &&
+    outboxBodies.length === 1 &&
+    supportedEscalationResponse(outboxBodies[0])
   );
 }
 
@@ -335,6 +433,7 @@ export function truthForDatasetCase(axis, assertions) {
     customerEmail: EXPECTED_CUSTOMER_EMAIL,
     queryText: EXPECTED_QUERY,
     expectedCallOrder: EXPECTED_CALL_ORDER,
+    trustedBinding: EXPECTED_TRUSTED_BINDING,
     historyEstablished: true,
   };
   if (axis === "routing-accuracy") {

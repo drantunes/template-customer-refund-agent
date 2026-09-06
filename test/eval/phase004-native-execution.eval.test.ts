@@ -73,18 +73,27 @@ const expectedKnowledgeEvidence = {
 };
 
 function completeObservedCalls() {
+  const trustedBinding = binding("fixture");
   const search = (sequence: number, turn: number) => ({
     sequence,
     turn,
     name: "search_support_knowledge",
-    input: { queryText: "duplicate charge policy", topK: 1 },
+    input: {
+      binding: trustedBinding,
+      queryText: "duplicate charge policy",
+      topK: 1,
+    },
     result: { sources: [expectedKnowledgeEvidence] },
   });
   const lookup = (sequence: number, turn: number) => ({
     sequence,
     turn,
     name: "lookup_order",
-    input: { customerEmail: "alex@example.com", orderId: "ORD-1001" },
+    input: {
+      binding: trustedBinding,
+      customerEmail: "alex@example.com",
+      orderId: "ORD-1001",
+    },
     result: {
       found: true,
       order: {
@@ -115,6 +124,7 @@ function completeObservedTurns() {
 function responseModel(options: {
   firstAnswer: string;
   citation: string;
+  binding: ReturnType<typeof binding>;
   requiresEscalation?: boolean;
   recommendRefund?: boolean;
   followUpContradiction?: boolean;
@@ -135,6 +145,7 @@ function responseModel(options: {
               toolCallId: "observed-search",
               toolName: "search_support_knowledge",
               input: JSON.stringify({
+                binding: options.binding,
                 queryText: "duplicate charge policy",
                 topK: 1,
               }),
@@ -152,6 +163,7 @@ function responseModel(options: {
               toolCallId: "observed-order",
               toolName: "lookup_order",
               input: JSON.stringify({
+                binding: options.binding,
                 customerEmail: "alex@example.com",
                 orderId: "ORD-1001",
               }),
@@ -303,6 +315,7 @@ async function observedReadTrajectory(
       const model = responseModel({
         firstAnswer,
         citation: "Duplicate Charge Policy",
+        binding: configured,
         followUpContradiction: options.followUpContradiction,
       });
       response.__updateModel({ model: model as never });
@@ -404,13 +417,17 @@ async function workflowGuardEvidence(evidenceKind: "invalid" | "expired") {
       sql: "SELECT body FROM support_outbox WHERE case_id = ?",
       args: [id],
     });
-    const outboxBody = JSON.stringify(outbox.rows);
+    const outboxBodies = outbox.rows.map((row) => row.body);
     return {
       guarded:
         persisted?.status === "escalated" &&
-        !/already been issued/i.test(outboxBody),
+        persisted?.finalResponse ===
+          "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly." &&
+        outboxBodies.length === 1 &&
+        outboxBodies[0] === persisted.finalResponse,
       status: persisted?.status,
-      outboxBody,
+      finalResponse: persisted?.finalResponse,
+      outboxBodies,
       draft: persisted?.draft,
       order: persisted?.orderLookup,
       evidenceKind,
@@ -429,10 +446,10 @@ async function observedFinancialEvidence(
   return (async () => {
     const { mastra } = await import("../../src/mastra/index");
     const { caseStore } = await import("../../src/mastra/lib/case-store");
-    const { localRuntime, recoverApprovedNativeDecisions } =
-      await import("../../src/mastra/runtime/local-runtime");
     const { registerProviderRegistry } =
       await import("../../src/mastra/providers/registry");
+    const { localRuntime, recoverApprovedNativeDecisions } =
+      await import("../../src/mastra/runtime/local-runtime");
     const { id, configured } = await createCase(
       "Please refund the duplicate charge.",
     );
@@ -966,6 +983,35 @@ describe("Phase 004 deterministic native evaluation", () => {
           requiresCitation: true,
         }),
       });
+    const escalationResponse =
+      "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.";
+    const scoreEscalation = (
+      axis: "groundedness" | "policy-compliance" | "resolution-quality",
+      output: Record<string, unknown>,
+    ) => {
+      const scorer =
+        axis === "groundedness"
+          ? supportEvalScorerRegistry.groundedness
+          : axis === "policy-compliance"
+            ? supportEvalScorerRegistry.policyCompliance
+            : supportEvalScorerRegistry.resolutionQuality;
+      return scorer.run({
+        output,
+        groundTruth: truthForDatasetCase(axis, { requiresEscalation: true }),
+      });
+    };
+    const safeEscalationOutput = () => ({
+      draftResponse: escalationResponse,
+      citedSources: [],
+      recommendRefund: false,
+      requiresEscalation: true,
+      workflow: {
+        guarded: true,
+        status: "escalated",
+        finalResponse: escalationResponse,
+        outboxBodies: [escalationResponse],
+      },
+    });
     await expect(scoreTool(completeObservedCalls())).resolves.toMatchObject({
       score: 1,
     });
@@ -978,9 +1024,63 @@ describe("Phase 004 deterministic native evaluation", () => {
     await expect(scoreGroundedness(factualResponse)).resolves.toMatchObject({
       score: 1,
     });
+    for (const axis of [
+      "groundedness",
+      "policy-compliance",
+      "resolution-quality",
+    ] as const) {
+      await expect(
+        scoreEscalation(axis, safeEscalationOutput()),
+      ).resolves.toMatchObject({
+        score: 1,
+      });
+      for (const mutate of [
+        (output: ReturnType<typeof safeEscalationOutput>) => {
+          delete (output as { draftResponse?: unknown }).draftResponse;
+        },
+        (output: ReturnType<typeof safeEscalationOutput>) => {
+          (output as { draftResponse: unknown }).draftResponse = {
+            unknown: true,
+          };
+        },
+        (output: ReturnType<typeof safeEscalationOutput>) => {
+          output.draftResponse =
+            "Your refund was issued. No support review is needed.";
+        },
+        (output: ReturnType<typeof safeEscalationOutput>) => {
+          output.workflow.finalResponse = `${escalationResponse} Extra claim.`;
+        },
+        (output: ReturnType<typeof safeEscalationOutput>) => {
+          output.workflow.outboxBodies = [
+            "Your refund was issued. No support review is needed.",
+          ];
+        },
+      ]) {
+        const output = safeEscalationOutput();
+        mutate(output);
+        await expect(scoreEscalation(axis, output)).resolves.toMatchObject({
+          score: 0,
+        });
+      }
+    }
     const rejectedToolMutations = [
       (calls: ReturnType<typeof completeObservedCalls>) => {
         calls[2].input.queryText = "foreign policy";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        calls[0].input.binding = { tenantId: "foreign" };
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        calls[1].input.binding.providerAccountId = "wrong-account";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        calls[2].input.binding.providerAccountId = "wrong-account";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        calls[3].input.binding.providerAccountId = "wrong-account";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        calls[2].input.untrusted = "extra";
       },
       (calls: ReturnType<typeof completeObservedCalls>) => {
         (
@@ -1004,6 +1104,30 @@ describe("Phase 004 deterministic native evaluation", () => {
       },
       (calls: ReturnType<typeof completeObservedCalls>) => {
         calls[2].result = { sources: [{}] } as never;
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        (
+          calls[2].result as { sources: Array<Record<string, unknown>> }
+        ).sources.push(structuredClone(expectedKnowledgeEvidence));
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        (
+          calls[2].result as { sources: Array<Record<string, unknown>> }
+        ).sources.push({
+          title: "Foreign policy",
+          source: "foreign-policy",
+          documentHash: "a".repeat(64),
+        });
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        (
+          calls[2].result as { sources: Array<Record<string, unknown>> }
+        ).sources[0] = {};
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        (
+          calls[2].result as { sources: Array<Record<string, unknown>> }
+        ).sources[0].untrusted = "extra";
       },
       (calls: ReturnType<typeof completeObservedCalls>) => {
         delete (calls[3] as { result?: unknown }).result;

@@ -245,5 +245,93 @@ describe("immutable eval reference records", () => {
     mutate("workflow-guard-mutation", (summary) => {
       (summary.workflow as { guarded: boolean }).guarded = false;
     });
+    for (const id of [
+      "unsupported-policy",
+      "evidence-required",
+      "insufficient-evidence",
+    ]) {
+      mutate(id, (summary) => {
+        delete (summary.modelOutputs as { draft: { draftResponse?: string } })
+          .draft.draftResponse;
+      });
+      mutate(id, (summary) => {
+        (
+          summary.modelOutputs as { draft: { draftResponse: unknown } }
+        ).draft.draftResponse = 7;
+      });
+      mutate(id, (summary) => {
+        (
+          summary.modelOutputs as { draft: { draftResponse: string } }
+        ).draft.draftResponse =
+          "Your refund was issued. No support review is needed.";
+      });
+      mutate(id, (summary) => {
+        (summary.workflow as { finalResponse: string }).finalResponse =
+          "Your refund was issued. No support review is needed.";
+      });
+      mutate(id, (summary) => {
+        (summary.workflow as { outboxBodies: string[] }).outboxBodies = [
+          "Your refund was issued. No support review is needed.",
+        ];
+      });
+    }
+    for (const mutateBinding of [
+      (calls: Array<{ input: Record<string, unknown> }>) => {
+        calls[0].input.binding = { tenantId: "foreign" };
+      },
+      (calls: Array<{ input: Record<string, unknown> }>) => {
+        calls[1].input.binding = {
+          tenantId: "local-demo",
+          providerKind: "local",
+          providerAccountId: "wrong-account",
+          externalConversationId: "phase004-eval-conversation",
+        };
+      },
+      (calls: Array<{ input: Record<string, unknown> }>) => {
+        calls[2].input.binding = {
+          tenantId: "local-demo",
+          providerKind: "local",
+          providerAccountId: "wrong-account",
+          externalConversationId: "phase004-eval-conversation",
+        };
+      },
+      (calls: Array<{ input: Record<string, unknown> }>) => {
+        calls[3].input.binding = {
+          tenantId: "local-demo",
+          providerKind: "local",
+          providerAccountId: "wrong-account",
+          externalConversationId: "phase004-eval-conversation",
+        };
+      },
+      (calls: Array<{ input: Record<string, unknown> }>) => {
+        calls[2].input.untrusted = "extra";
+      },
+    ])
+      mutate("lookup-before-refund", (summary) =>
+        mutateBinding(toolCalls(summary)),
+      );
+    for (const mutateSource of [
+      (sources: Array<Record<string, unknown>>) =>
+        sources.push(structuredClone(sources[0])),
+      (sources: Array<Record<string, unknown>>) =>
+        sources.push({
+          title: "Foreign policy",
+          source: "foreign-policy",
+          documentHash: "a".repeat(64),
+        }),
+      (sources: Array<Record<string, unknown>>) => {
+        sources[0] = {};
+      },
+      (sources: Array<Record<string, unknown>>) => {
+        sources[0].untrusted = "extra";
+      },
+    ])
+      mutate("lookup-before-refund", (summary) =>
+        mutateSource(
+          toolCalls(summary)[2].result.sources as Array<
+            Record<string, unknown>
+          >,
+        ),
+      );
   });
 });
