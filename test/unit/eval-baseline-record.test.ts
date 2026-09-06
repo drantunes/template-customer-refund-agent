@@ -1075,4 +1075,195 @@ describe("immutable eval reference records", () => {
       );
     }
   });
+
+  it("snapshots only canonical JSON output and truth before direct and registered scoring", async () => {
+    const record = measuredReference();
+    const pairFor = (id: string) => {
+      const item = caseScore(record, id);
+      return {
+        axis: item.axis,
+        output: scorerInputFromObservation(
+          item.axis,
+          observation(item.evidence.summary),
+        ),
+        truth: truthForDatasetCase(item.axis, assertionsForCase(id), id),
+      };
+    };
+    const cases = [
+      "duplicate-charge",
+      "grounded-policy",
+      "approval-required",
+      "lookup-before-refund",
+      "follow-up-stays-scoped",
+      "clear-resolution",
+    ];
+    const variants = [
+      {
+        name: "non-enumerable",
+        output: (value: Record<string, unknown>) => {
+          value.audit = {};
+          Object.defineProperty(value.audit, "bogus", {
+            value: true,
+            enumerable: false,
+            configurable: true,
+            writable: true,
+          });
+        },
+        truth: (value: Record<string, unknown>) => {
+          Object.defineProperty(value.knowledgeEvidence, "bogus", {
+            value: true,
+            enumerable: false,
+            configurable: true,
+            writable: true,
+          });
+        },
+      },
+      {
+        name: "Symbol key",
+        output: (value: Record<string, unknown>) => {
+          value.audit = { [Symbol("untrusted")]: true };
+        },
+        truth: (value: Record<string, unknown>) => {
+          (value.knowledgeEvidence as Record<symbol, unknown>)[
+            Symbol("untrusted")
+          ] = true;
+        },
+      },
+      {
+        name: "accessor",
+        output: (value: Record<string, unknown>) => {
+          value.audit = {};
+          Object.defineProperty(value.audit, "bogus", {
+            get: () => true,
+            enumerable: true,
+            configurable: true,
+          });
+        },
+        truth: (value: Record<string, unknown>) => {
+          Object.defineProperty(value.knowledgeEvidence, "title", {
+            get: () => "Duplicate Charge Policy",
+            enumerable: true,
+            configurable: true,
+          });
+        },
+      },
+      {
+        name: "exotic descriptor",
+        output: (value: Record<string, unknown>) => {
+          value.audit = {};
+          Object.defineProperty(value.audit, "bogus", {
+            value: true,
+            enumerable: true,
+            configurable: true,
+            writable: false,
+          });
+        },
+        truth: (value: Record<string, unknown>) => {
+          const knowledge = value.knowledgeEvidence as Record<string, unknown>;
+          Object.defineProperty(knowledge, "title", {
+            value: knowledge.title,
+            enumerable: true,
+            configurable: true,
+            writable: false,
+          });
+        },
+      },
+      {
+        name: "Proxy",
+        output: (value: Record<string, unknown>) => {
+          value.audit = new Proxy({}, {});
+        },
+        truth: (value: Record<string, unknown>) => {
+          value.knowledgeEvidence = new Proxy(
+            value.knowledgeEvidence as Record<string, unknown>,
+            {},
+          );
+        },
+      },
+    ];
+    for (const id of cases)
+      for (const variant of variants) {
+        const pair = pairFor(id);
+        const output = structuredClone(pair.output);
+        variant.output(output);
+        expect(
+          scoreAxis(pair.axis, output, pair.truth),
+          `${pair.axis}/${variant.name} nested output direct`,
+        ).toBe(0);
+        await expect(
+          registeredScorer(pair.axis).run({
+            output,
+            groundTruth: pair.truth,
+          }),
+          `${pair.axis}/${variant.name} nested output registered`,
+        ).resolves.toMatchObject({ score: 0 });
+
+        const truth = structuredClone(pair.truth);
+        variant.truth(truth);
+        expect(
+          scoreAxis(pair.axis, pair.output, truth),
+          `${pair.axis}/${variant.name} nested truth direct`,
+        ).toBe(0);
+        await expect(
+          registeredScorer(pair.axis).run({
+            output: pair.output,
+            groundTruth: truth,
+          }),
+          `${pair.axis}/${variant.name} nested truth registered`,
+        ).resolves.toMatchObject({ score: 0 });
+      }
+  });
+
+  it("keeps factory authorities isolated after a contaminated trajectory", async () => {
+    const record = measuredReference();
+    const item = caseScore(record, "lookup-before-refund");
+    const output = scorerInputFromObservation(
+      item.axis,
+      observation(item.evidence.summary),
+    );
+    const first = truthForDatasetCase(
+      item.axis,
+      assertionsForCase(item.id),
+      item.id,
+    );
+    first.expectedCallOrder.reverse();
+    first.knowledgeEvidence.title = "Tampered title";
+    const second = truthForDatasetCase(
+      item.axis,
+      assertionsForCase(item.id),
+      item.id,
+    );
+    expect(second.expectedCallOrder).toEqual([
+      "search_support_knowledge",
+      "lookup_order",
+      "search_support_knowledge",
+      "lookup_order",
+    ]);
+    expect(second.knowledgeEvidence.title).toBe("Duplicate Charge Policy");
+    expect(second.expectedCallOrder).not.toBe(first.expectedCallOrder);
+    expect(second.knowledgeEvidence).not.toBe(first.knowledgeEvidence);
+
+    const contaminatedOutput = structuredClone(output);
+    contaminatedOutput.toolCalls.reverse();
+    for (const call of contaminatedOutput.toolCalls)
+      if (call.name === "search_support_knowledge")
+        call.result.sources[0].metadata.title = "Tampered title";
+    expect(scoreAxis(item.axis, contaminatedOutput, second)).toBe(0);
+    await expect(
+      registeredScorer(item.axis).run({
+        output: contaminatedOutput,
+        groundTruth: second,
+      }),
+    ).resolves.toMatchObject({ score: 0 });
+
+    const later = truthForDatasetCase(
+      item.axis,
+      assertionsForCase(item.id),
+      item.id,
+    );
+    expect(scoreAxis(item.axis, output, later)).toBe(1);
+    await expect(
+      registeredScorer(item.axis).run({ output, groundTruth: later }),
+    ).resolves.toMatchObject({ score: 1 });
+  });
 });

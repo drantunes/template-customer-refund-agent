@@ -4,9 +4,17 @@
  * an immutable report can be replayed without trusting its claimed flags.
  */
 import { createHash } from "node:crypto";
+import { types as utilTypes } from "node:util";
+
+function deepFreeze(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value))
+    return value;
+  for (const entry of Object.values(value)) deepFreeze(entry);
+  return Object.freeze(value);
+}
 
 const EXPECTED_ORDER_ID = "ORD-1001";
-const EXPECTED_ORDER = Object.freeze({
+const EXPECTED_ORDER = deepFreeze({
   orderId: EXPECTED_ORDER_ID,
   customerEmail: "alex@example.com",
   product: "Pro Plan - Monthly",
@@ -48,27 +56,28 @@ EXPECTED_KNOWLEDGE_EVIDENCE.documentHash = createHash("sha256")
     ]),
   )
   .digest("hex");
-const EXPECTED_CALL_ORDER = [
+deepFreeze(EXPECTED_KNOWLEDGE_EVIDENCE);
+const EXPECTED_CALL_ORDER = deepFreeze([
   "search_support_knowledge",
   "lookup_order",
   "search_support_knowledge",
   "lookup_order",
-];
-const EXPECTED_TRUSTED_BINDING = Object.freeze({
+]);
+const EXPECTED_TRUSTED_BINDING = deepFreeze({
   tenantId: "local-demo",
   providerKind: "local",
   providerAccountId: "phase004-eval-authority-registered-scorer-fixture",
   externalConversationId:
     "phase004-eval-conversation-registered-scorer-fixture",
 });
-const EXPECTED_INPUT_KEYS = Object.freeze({
+const EXPECTED_INPUT_KEYS = deepFreeze({
   search_support_knowledge: ["binding", "queryText", "topK"],
   lookup_order: ["binding", "customerEmail", "orderId"],
 });
 const EXPECTED_ESCALATION_RESPONSE =
   "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.";
 const SHA256 = /^[a-f0-9]{64}$/;
-const ORDER_KEYS = Object.freeze(Object.keys(EXPECTED_ORDER).sort());
+const ORDER_KEYS = deepFreeze(Object.keys(EXPECTED_ORDER).sort());
 
 function canonicalInstant(value) {
   if (typeof value !== "string") return false;
@@ -85,6 +94,96 @@ export const SUPPORTED_AXES = [
   "resolution-quality",
 ];
 
+const INVALID_JSON_SNAPSHOT = Symbol("invalid-json-snapshot");
+
+function ordinaryDataDescriptor(descriptor) {
+  return (
+    descriptor !== undefined &&
+    Object.hasOwn(descriptor, "value") &&
+    !Object.hasOwn(descriptor, "get") &&
+    !Object.hasOwn(descriptor, "set") &&
+    descriptor.enumerable === true &&
+    descriptor.configurable === true &&
+    descriptor.writable === true
+  );
+}
+
+/**
+ * Copy untrusted values once into immutable JSON data before evaluating them.
+ * Reflect descriptors let us reject accessors without invoking them, and the
+ * Node proxy check happens before any reflective operation can trigger a trap.
+ */
+function canonicalJsonSnapshot(value, ancestors = new WeakSet()) {
+  if (value === null) return null;
+  if (
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value))
+  )
+    return value;
+  if (typeof value !== "object" || utilTypes.isProxy(value))
+    return INVALID_JSON_SNAPSHOT;
+  if (ancestors.has(value)) return INVALID_JSON_SNAPSHOT;
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const keys = Reflect.ownKeys(value);
+      const length = value.length;
+      const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+      if (
+        !Number.isSafeInteger(length) ||
+        !lengthDescriptor ||
+        lengthDescriptor.value !== length ||
+        lengthDescriptor.enumerable !== false ||
+        lengthDescriptor.configurable !== false ||
+        lengthDescriptor.writable !== true ||
+        keys.length !== length + 1
+      )
+        return INVALID_JSON_SNAPSHOT;
+      const snapshot = [];
+      for (let index = 0; index < length; index += 1) {
+        const key = String(index);
+        if (!keys.includes(key)) return INVALID_JSON_SNAPSHOT;
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!ordinaryDataDescriptor(descriptor)) return INVALID_JSON_SNAPSHOT;
+        const entry = canonicalJsonSnapshot(descriptor.value, ancestors);
+        if (entry === INVALID_JSON_SNAPSHOT) return INVALID_JSON_SNAPSHOT;
+        snapshot.push(entry);
+      }
+      return deepFreeze(snapshot);
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null)
+      return INVALID_JSON_SNAPSHOT;
+    const keys = Reflect.ownKeys(value);
+    if (keys.some((key) => typeof key !== "string"))
+      return INVALID_JSON_SNAPSHOT;
+    const snapshot = Object.create(prototype);
+    for (const key of keys.sort()) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!ordinaryDataDescriptor(descriptor)) return INVALID_JSON_SNAPSHOT;
+      const entry = canonicalJsonSnapshot(descriptor.value, ancestors);
+      if (entry === INVALID_JSON_SNAPSHOT) return INVALID_JSON_SNAPSHOT;
+      Object.defineProperty(snapshot, key, {
+        value: entry,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    return deepFreeze(snapshot);
+  } catch {
+    return INVALID_JSON_SNAPSHOT;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function canonicalJsonRecord(value) {
+  const snapshot = canonicalJsonSnapshot(value);
+  return isPlainJsonRecord(snapshot) ? snapshot : null;
+}
+
 /**
  * Evidence is a JSON contract, not a convenient object-like value. Direct
  * scorer and reference-validator callers can preserve prototypes, unlike a
@@ -93,12 +192,46 @@ export const SUPPORTED_AXES = [
  */
 export function isPlainJsonRecord(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (utilTypes.isProxy(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }
 
 function plainRecord(value) {
   return isPlainJsonRecord(value) ? value : {};
+}
+
+function definedRecord(value) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => entry !== undefined),
+  );
+}
+
+/** Native tool schemas express `expiresAt` as optional, while JSON represents
+ * an absent optional value by omitting the key rather than assigning undefined.
+ */
+function scorerCallsFromObservation(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((call) => {
+    const record = plainRecord(call);
+    if (record.name !== "search_support_knowledge") return record;
+    const result = plainRecord(record.result);
+    const sources = strictRecords(result.sources);
+    if (!sources) return record;
+    return {
+      ...record,
+      result: {
+        ...result,
+        sources: sources.map((source) => {
+          const metadata = plainRecord(source.metadata);
+          if (metadata.expiresAt !== undefined) return source;
+          const normalizedMetadata = { ...metadata };
+          delete normalizedMetadata.expiresAt;
+          return { ...source, metadata: normalizedMetadata };
+        }),
+      },
+    };
+  });
 }
 
 /**
@@ -325,7 +458,8 @@ function matchingTrustedBinding(value, expected) {
  * called during reference replay. It is the scenario authority source, never
  * an observed call field or report-provided expected binding. */
 function trustedBindingForCase(caseId) {
-  if (caseId === "registered-scorer-fixture") return EXPECTED_TRUSTED_BINDING;
+  if (caseId === "registered-scorer-fixture")
+    return structuredClone(EXPECTED_TRUSTED_BINDING);
   return {
     tenantId: "local-demo",
     providerKind: "local",
@@ -431,11 +565,11 @@ function fixtureTruth(evaluationCaseId) {
     orderId: EXPECTED_ORDER_ID,
     orderStatus: EXPECTED_ORDER_STATUS,
     allowedSources: ["Duplicate Charge Policy"],
-    knowledgeEvidence: EXPECTED_KNOWLEDGE_EVIDENCE,
+    knowledgeEvidence: structuredClone(EXPECTED_KNOWLEDGE_EVIDENCE),
     caseId: evaluationCaseId,
     customerEmail: EXPECTED_CUSTOMER_EMAIL,
     queryText: EXPECTED_QUERY,
-    expectedCallOrder: EXPECTED_CALL_ORDER,
+    expectedCallOrder: [...EXPECTED_CALL_ORDER],
     trustedBinding: trustedBindingForCase(evaluationCaseId),
     historyEstablished: true,
   };
@@ -548,19 +682,21 @@ export function truthForDatasetCase(
 ) {
   if (!SUPPORTED_AXES.includes(axis))
     throw new Error(`Dataset axis has no deterministic semantics: ${axis}`);
-  if (!isPlainJsonRecord(assertions))
+  const assertionSnapshot = canonicalJsonRecord(assertions);
+  if (!assertionSnapshot)
     throw new Error("Dataset assertions must be a plain JSON record");
   const truth = {
     ...fixtureTruth(evaluationCaseId),
-    ...assertions,
+    ...assertionSnapshot,
   };
   if (axis === "routing-accuracy") {
     truth.intent ??= "other";
     truth.requiresHumanReview ??= false;
   }
-  if (!hasExactAxisTruth(axis, truth))
+  const truthSnapshot = canonicalJsonRecord(truth);
+  if (!truthSnapshot || !hasExactAxisTruth(axis, truthSnapshot))
     throw new Error(`Dataset truth does not match ${axis}'s supported modes`);
-  return truth;
+  return structuredClone(truthSnapshot);
 }
 
 export function scorerInputFromObservation(axis, observed) {
@@ -570,36 +706,36 @@ export function scorerInputFromObservation(axis, observed) {
   const draft = plainRecord(observation.draft);
   if (axis === "routing-accuracy") return plainRecord(observation.triage);
   if (axis === "groundedness")
-    return {
+    return definedRecord({
       ...draft,
       order: observation.order,
       workflow: observation.workflow,
-    };
+    });
   if (axis === "tool-call-correctness")
-    return {
-      toolCalls: Array.isArray(observation.calls) ? observation.calls : [],
+    return definedRecord({
+      toolCalls: scorerCallsFromObservation(observation.calls),
       refundEffects: observation.refundEffects,
-    };
+    });
   if (axis === "multi-turn-consistency")
-    return {
+    return definedRecord({
       turns: observation.turns,
       toolCalls: Array.isArray(observation.calls)
-        ? observation.calls
+        ? scorerCallsFromObservation(observation.calls)
         : observation.toolCalls,
       historyEstablished: observation.historyEstablished,
       authorization: observation.authorization,
-    };
+    });
   if (axis === "policy-compliance")
-    return {
+    return definedRecord({
       ...draft,
       financial: observation.financial,
       workflow: observation.workflow,
-    };
-  return {
+    });
+  return definedRecord({
     ...draft,
     order: observation.order,
     workflow: observation.workflow,
-  };
+  });
 }
 
 /**
@@ -726,9 +862,9 @@ export function scoreAxis(axis, output, truth) {
     throw new Error(`Dataset axis has no deterministic semantics: ${axis}`);
   // Preserve invalid values rather than coercing them to `{}`: coercion made
   // absent policy/routing evidence look like a passing comparison.
-  if (!isPlainJsonRecord(output) || !isPlainJsonRecord(truth)) return 0;
-  const observed = output;
-  const expected = truth;
+  const observed = canonicalJsonRecord(output);
+  const expected = canonicalJsonRecord(truth);
+  if (!observed || !expected) return 0;
   if (!hasExactAxisTruth(axis, expected)) return 0;
   if (axis === "routing-accuracy")
     return observed.intent === expected.intent &&
