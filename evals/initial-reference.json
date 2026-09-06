@@ -2,11 +2,11 @@
   "kind": "support-eval-initial-reference",
   "runner": "deterministic-native-observed-runtime-v4",
   "executionMode": "deterministic-scripted-transport-no-paid-routes",
-  "implementationSha": "9a6c4e02a3773ce4dbfb9ce52ae5dc018549991c",
+  "implementationSha": "5e57542d6ce5aa8ccbd9addbcce57db1bb213929",
   "runnerSourceHash": "c49d40299f1497ff12ff536a0b58217b3b0faf8c748ca6d712d6059079de8ddb",
   "scorerSourceHashes": {
     "src/mastra/evals/index.ts": "f0cf1cdda304bc1ed09d461d86d28ac86a1c16b80374b475d5f33401d03cfd57",
-    "src/mastra/evals/deterministic-semantics.js": "4123b0a6c70ba9fd3884a53fb8316ed4319cea380fb775dbeb061ce0120f67b9"
+    "src/mastra/evals/deterministic-semantics.js": "21bc23a1a01ad34c7f8ef6052af4563a3ed19b251e53b902759fc8d0401b356f"
   },
   "datasetHashes": {
     "groundedness.v1.json": "204385f1588c7846c631afd6233400950a632cb0f285d21562e564249d6d1dfc",
@@ -1328,7 +1328,7 @@
   "pricing": "not-applicable-deterministic-transport",
   "evidenceHash": "8b870c610ce42892c84570110d89dacf24ae4b639025b48fee3fcf7aa1adf1a1",
   "regression": "compare-against-fixed-initial-reference",
-  "reportHash": "59dd72b7fa58bbaf032965f5899b565e23dcb285ccf1d009969fc1dcbd211182",
+  "reportHash": "0447449860f60a069188e248efdb244a1ab908369554efcdb58cc910ca1c7fbb",
   "initialReference": true,
   "historicalComparison": null
 }
