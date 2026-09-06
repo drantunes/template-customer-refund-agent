@@ -2,8 +2,8 @@
   "kind": "support-eval-initial-reference",
   "runner": "deterministic-native-boundaries-v3",
   "executionMode": "deterministic-scripted-transport-no-paid-routes",
-  "implementationSha": "6b3e616dda5db25c0e526ec97a434bb6ed4e1ba8",
-  "runnerSourceHash": "b266b9925f431a68cc2c4ac74b0529efd3470515ce58d801da9a5d97430abb8b",
+  "implementationSha": "e30679a364779f66526829e7bcd76b7d8bb28335",
+  "runnerSourceHash": "0f043077c7286b4c17bf5a978c4896afd24bdfba0c7842845ed9c6072cef24bd",
   "scorerSourceHashes": {
     "src/mastra/evals/index.ts": "c599d5d43ad366a6658b3872391aaf626b7d504b80f82f56d266b634eada9705"
   },
@@ -797,7 +797,7 @@
   "pricing": "not-applicable-deterministic-transport",
   "evidenceHash": "cd90a71e26be6a5045ddd06058c217dd1b0cfc30b6959e4ac71c4e28f9c95b2e",
   "regression": "initial-reference-measured-deterministic-boundaries-no-human-baseline-approval",
-  "reportHash": "99a7657a0c7f6f294c1704bffac8bcdcd9bdfc421006c37249057b5e43af39b9",
+  "reportHash": "d5eb29e76ea0422ee2a3dec6ff77beac2f3301f7b53fcedb5f6c34e72c99bff2",
   "initialReference": true,
   "historicalComparison": null
 }
