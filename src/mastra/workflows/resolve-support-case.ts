@@ -143,7 +143,11 @@ const retrievePolicyStep = createStep({
       );
     // The operational workflow is a trusted publication boundary. It may
     // establish the initial local generation; the read tool below never can.
-    await publishKnowledge(bindings.knowledge, { onlyIfMissing: true });
+    await publishKnowledge(bindings.knowledge, {
+      onlyIfMissing: true,
+      mastra,
+      tracingContext,
+    });
 
     const result = await withTrustedCaseReadScope(
       {
@@ -828,7 +832,7 @@ const resolveCaseStep = createStep({
     turnId: z.string(),
     status: z.enum(["resolved", "escalated"]),
   }),
-  execute: async ({ inputData, mastra, tracingContext }) => {
+  execute: async ({ inputData, mastra }) => {
     const { supportCase } = await getCaseOrThrow(
       inputData.caseId,
       inputData.turnId,
@@ -898,10 +902,7 @@ const resolveCaseStep = createStep({
         status,
       },
     });
-    await deliverOutbox(undefined, 10, caseStore, {
-      mastra,
-      tracingContext,
-    }).catch((error) =>
+    await deliverOutbox(undefined, 10, caseStore, { mastra }).catch((error) =>
       mastra
         ?.getLogger()
         ?.warn("Local outbox delivery failed; recovery will retry it.", {

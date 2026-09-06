@@ -1120,7 +1120,10 @@ describe("Phase 002 persistent local runtime", () => {
     );
     expect(start).not.toHaveBeenCalled();
     expect(restart).not.toHaveBeenCalled();
-    expect(await store.get(terminal.id)).toMatchObject({ status: "failed" });
+    expect(await store.get(terminal.id)).toMatchObject({
+      status: "escalated",
+      escalationReason: "Workflow recovery failed: failed",
+    });
     await store.close();
   });
 

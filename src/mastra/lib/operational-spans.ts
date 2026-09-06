@@ -10,6 +10,8 @@ import { SpanType, type TracingContext } from "@mastra/core/observability";
 export async function traceOperationalPort<T>(input: {
   mastra?: MastraUnion;
   tracingContext?: TracingContext;
+  /** Durable owner trace for work performed by a background worker. */
+  traceId?: string;
   kind: "provider" | "tool";
   operation: string;
   run: () => Promise<T>;
@@ -25,7 +27,11 @@ export async function traceOperationalPort<T>(input: {
   } as const;
   const span = input.tracingContext?.currentSpan
     ? input.tracingContext.currentSpan.createChildSpan(options)
-    : observability?.startSpan(options);
+    : observability?.startSpan({
+        ...options,
+        // A worker must never inherit an unrelated caller's current span.
+        ...(input.traceId ? { traceId: input.traceId } : {}),
+      });
   try {
     const result = await input.run();
     span?.end({ attributes: { success: true }, output: { completed: true } });

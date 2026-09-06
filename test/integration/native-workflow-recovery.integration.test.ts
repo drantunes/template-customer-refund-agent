@@ -1759,7 +1759,7 @@ describe("native approval workflow recovery", () => {
     providerFailure.mockRestore();
     expect(await localRefundCount(caseStore)).toBe(0);
     expect(await caseStore.get(caseId)).toMatchObject({
-      status: "failed",
+      status: "escalated",
       escalationReason:
         "Native approval completed without a durable refund effect.",
     });
@@ -1771,7 +1771,7 @@ describe("native approval workflow recovery", () => {
       decisions: 1,
       effects: 0,
       dispatch_state: "failed",
-      turn_state: "failed",
+      turn_state: "escalated",
     });
     expect(
       await recoverApprovedNativeDecisions(mastra, caseStore, {
@@ -2106,7 +2106,7 @@ describe("native approval workflow recovery", () => {
       }),
     ).toBe(0);
     expect(await localRefundCount(caseStore)).toBe(0);
-    expect(await caseStore.get(caseId)).toMatchObject({ status: "failed" });
+    expect(await caseStore.get(caseId)).toMatchObject({ status: "escalated" });
   });
 });
 

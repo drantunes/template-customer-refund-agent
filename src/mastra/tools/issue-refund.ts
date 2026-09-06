@@ -165,15 +165,21 @@ export const issueRefundTool = createTool({
           }),
       );
     } catch (error) {
-      await caseStore.saveAction(
-        input.caseId,
-        "refund-failure",
-        command.fingerprint,
-        {
-          category: "provider",
-          failedAt: new Date().toISOString(),
-        },
-      );
+      // A transport error is not proof that the provider did not commit. The
+      // local idempotency record is the durable fact used by recovery; do not
+      // permanently report a financial failure when it already exists.
+      const durable = await caseStore.idempotency(command.idempotencyKey);
+      if (!durable)
+        await caseStore.saveAction(
+          input.caseId,
+          "refund-failure",
+          command.fingerprint,
+          {
+            category: "provider",
+            classification: "confirmed-failed",
+            failedAt: new Date().toISOString(),
+          },
+        );
       throw error;
     }
     const result = {

@@ -178,7 +178,7 @@ async function readTrustedSpanMetrics(mastra: Mastra, cases: SupportCase[]) {
     result.status === "fulfilled" && result.value ? [result.value] : [],
   );
   const traceReadFailures = traceResults.filter(
-    (result) => result.status === "rejected",
+    (result) => result.status === "rejected" || !result.value,
   ).length;
   const spans = traces.flatMap((trace) => trace.spans ?? []) as StoredSpan[];
   const operational = spans.filter((span) => {
@@ -464,14 +464,21 @@ async function computeHistoricalFeedbackMetrics(
 ): Promise<FeedbackMetrics> {
   const byCase = new Map(cases.map((item) => [item.id, item]));
   const records = await caseStore.feedback(cases.map((item) => item.id));
-  return records.length
-    ? feedbackMetrics(
-        records.map((record) => ({
-          supportCase: byCase.get(record.caseId)!,
-          value: record.feedback,
-        })),
-      )
-    : computeFeedbackMetrics(cases);
+  // A migration may leave a retained legacy projection without a correlatable
+  // response turn. Keep it for that case even after newer records arrive for
+  // other cases; only a durable record for the same case supersedes it.
+  const coveredCases = new Set(records.map((record) => record.caseId));
+  return feedbackMetrics([
+    ...records.map((record) => ({
+      supportCase: byCase.get(record.caseId)!,
+      value: record.feedback,
+    })),
+    ...cases.flatMap((supportCase) =>
+      !coveredCases.has(supportCase.id) && supportCase.feedback
+        ? [{ supportCase, value: supportCase.feedback }]
+        : [],
+    ),
+  ]);
 }
 export async function computeMonitoringSummary(
   mastra: Mastra,

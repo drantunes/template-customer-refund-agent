@@ -2538,7 +2538,9 @@ export class CaseStore {
         args: caseIds,
       }),
       this.client.execute({
-        sql: `SELECT COUNT(*) AS total FROM support_turns WHERE state = 'failed' AND case_id IN (${placeholders})`,
+        // Exhausted retries deliberately become customer-visible escalations;
+        // their immutable operationalFailure is still a workflow failure.
+        sql: `SELECT COUNT(*) AS total FROM support_turns WHERE (state = 'failed' OR (state = 'escalated' AND json_extract(outcome_data, '$.operationalFailure.disposition') = 'escalate')) AND case_id IN (${placeholders})`,
         args: caseIds,
       }),
       this.client.execute({

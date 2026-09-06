@@ -836,6 +836,19 @@ export async function deliverOutbox(
       }
     };
     try {
+      // Outbox processing is global, but every attempt belongs to the durable
+      // case that enqueued it. Never attach an arbitrary queue item to the
+      // workflow that happened to trigger this sweep.
+      const ownerCase = await store.get(item.caseId);
+      const ownerBinding = ownerCase
+        ? bindingsForPersistedCase(ownerCase).support
+        : undefined;
+      if (
+        ownerBinding &&
+        (ownerBinding.tenantId !== item.binding.tenantId ||
+          ownerBinding.providerAccountId !== item.binding.providerAccountId)
+      )
+        throw new Error("Outbox item binding does not match its durable case.");
       const selected =
         registry ??
         (await import("../providers/registry")).providerRegistry(item.binding);
@@ -848,7 +861,8 @@ export async function deliverOutbox(
       heartbeat.unref();
       const receipt = await traceOperationalPort({
         mastra: observability?.mastra,
-        tracingContext: observability?.tracingContext,
+        // Do not use the caller's context: it may belong to another tenant.
+        traceId: ownerCase?.traceId,
         kind: "provider",
         operation: "support.deliver",
         run: () =>
@@ -994,6 +1008,7 @@ export async function recoverLocalWorkflows(
           dispatch.caseId,
           `Workflow recovery failed: ${existing.status}`,
           dispatch.leaseToken,
+          "escalated",
         );
         continue;
       }
@@ -1308,6 +1323,7 @@ export async function recoverApprovedNativeDecisions(
           item.caseId,
           "Native approval completed without a durable refund effect.",
           dispatch.leaseToken,
+          "escalated",
         );
         continue;
       }
@@ -1341,6 +1357,7 @@ export async function recoverApprovedNativeDecisions(
           item.caseId,
           "Workflow recovery failed after the native decision.",
           dispatch.leaseToken,
+          "escalated",
         );
       else if (result.status === "success")
         await store.completeDispatch(
@@ -1368,6 +1385,7 @@ export async function recoverApprovedNativeDecisions(
             item.caseId,
             error,
             dispatch.leaseToken,
+            "escalated",
           )
           .catch(() => undefined);
       else
@@ -1426,7 +1444,7 @@ export function startLocalRuntimeWorkers(
         logger?.warn("Native approval recovery failed.", { error }),
       );
       await recoverLocalWorkflows(mastra);
-      await deliverOutbox();
+      await deliverOutbox(undefined, 10, caseStore, { mastra });
       if (Date.now() - lastRetentionSweep >= retentionInterval) {
         const caseRetention = await caseStore.enforceRetention();
         const storage = mastra.getStorage?.();
