@@ -1012,7 +1012,9 @@ describe("Phase 004 deterministic native evaluation", () => {
   it("makes registered scorers reject mutated observed arguments, results, and answers", async () => {
     const { supportEvalScorerRegistry } =
       await import("../../src/mastra/evals");
-    const toolTruth = truthForDatasetCase("tool-call-correctness", {});
+    const toolTruth = truthForDatasetCase("tool-call-correctness", {
+      readOnlyToolsFirst: true,
+    });
     const multiTurnTruth = truthForDatasetCase("multi-turn-consistency", {
       sameThread: true,
     });
@@ -1432,7 +1434,7 @@ describe("Phase 004 deterministic native evaluation", () => {
     const futureExpiryCalls = completeObservedCalls(futureExpiryId);
     const futureToolTruth = truthForDatasetCase(
       "tool-call-correctness",
-      {},
+      { readOnlyToolsFirst: true },
       futureExpiryId,
     );
     const futureMultiTurnTruth = truthForDatasetCase(

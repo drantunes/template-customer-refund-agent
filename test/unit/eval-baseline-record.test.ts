@@ -11,8 +11,10 @@ import {
   truthForDatasetCase,
 } from "../../src/mastra/evals/deterministic-semantics.js";
 import {
+  responseAgentScorers,
   scoreDraftResolutionFields,
   supportEvalScorerRegistry,
+  triageAgentScorers,
 } from "../../src/mastra/evals/index";
 
 function measuredReference() {
@@ -815,5 +817,129 @@ describe("immutable eval reference records", () => {
     expect(
       scoreDraftResolutionFields('{"draftResponse":"top-level model text"}'),
     ).toMatchObject({ hasDraftResponse: true });
+  });
+
+  it("fails closed for missing or malformed scorer evidence and truth", async () => {
+    const record = measuredReference();
+    const axes = [
+      "groundedness",
+      "policy-compliance",
+      "routing-accuracy",
+      "tool-call-correctness",
+      "multi-turn-consistency",
+      "resolution-quality",
+    ];
+    const validPairs = axes.map((axis) => {
+      const item = (record.perCaseScores as CaseScore[]).find(
+        (candidate) => candidate.axis === axis,
+      );
+      if (!item) throw new Error(`Missing valid ${axis} dataset case`);
+      return {
+        axis,
+        output: scorerInputFromObservation(
+          axis,
+          observation(item.evidence.summary),
+        ),
+        truth: truthForDatasetCase(axis, assertionsForCase(item.id), item.id),
+      };
+    });
+
+    for (const { axis, output, truth } of validPairs) {
+      const scorer = registeredScorer(axis);
+      expect(scoreAxis(axis, output, truth), `${axis} direct`).toBe(1);
+      await expect(
+        scorer.run({ output, groundTruth: truth }),
+        `${axis} registered`,
+      ).resolves.toMatchObject({ score: 1 });
+      await expect(
+        scorer.run({ output: JSON.stringify(output), groundTruth: truth }),
+        `${axis} registered top-level JSON`,
+      ).resolves.toMatchObject({ score: 1 });
+      expect(
+        scoreAxis(axis, JSON.stringify(output), truth),
+        `${axis} direct does not parse text`,
+      ).toBe(0);
+    }
+
+    for (const { axis, output, truth } of validPairs) {
+      const nonPlainOutput = cloneAsRecordWithPrototype(
+        output,
+        class OutputEvidence {},
+      );
+      const nonPlainTruth = cloneAsRecordWithPrototype(
+        truth,
+        class TruthEvidence {},
+      );
+      const invalidOutputs = [
+        undefined,
+        null,
+        {},
+        [],
+        7,
+        true,
+        "{}",
+        "{",
+        nonPlainOutput,
+      ];
+      const invalidTruths = [
+        undefined,
+        null,
+        {},
+        [],
+        7,
+        true,
+        "{}",
+        "{",
+        nonPlainTruth,
+      ];
+      const scorer = registeredScorer(axis);
+      for (const invalidOutput of invalidOutputs) {
+        expect(
+          scoreAxis(axis, invalidOutput, truth),
+          `${axis} direct invalid output`,
+        ).toBe(0);
+        await expect(
+          scorer.run({ output: invalidOutput, groundTruth: truth }),
+          `${axis} registered invalid output`,
+        ).resolves.toMatchObject({ score: 0 });
+      }
+      for (const invalidTruth of invalidTruths) {
+        expect(
+          scoreAxis(axis, output, invalidTruth),
+          `${axis} direct invalid truth`,
+        ).toBe(0);
+        await expect(
+          scorer.run({ output, groundTruth: invalidTruth }),
+          `${axis} registered invalid truth`,
+        ).resolves.toMatchObject({ score: 0 });
+      }
+    }
+  });
+
+  it("does not approve operational policy or routing runs without ground truth", async () => {
+    const record = measuredReference();
+    const policy = caseScore(record, "approval-required");
+    const routing = caseScore(record, "duplicate-charge");
+    const policyOutput = scorerInputFromObservation(
+      policy.axis,
+      observation(policy.evidence.summary),
+    );
+    const routingOutput = scorerInputFromObservation(
+      routing.axis,
+      observation(routing.evidence.summary),
+    );
+
+    expect(responseAgentScorers.policyCompliance?.scorer).toBe(
+      supportEvalScorerRegistry.policyCompliance,
+    );
+    expect(triageAgentScorers.routingAccuracy?.scorer).toBe(
+      supportEvalScorerRegistry.routingAccuracy,
+    );
+    await expect(
+      supportEvalScorerRegistry.policyCompliance.run({ output: policyOutput }),
+    ).resolves.toMatchObject({ score: 0 });
+    await expect(
+      supportEvalScorerRegistry.routingAccuracy.run({ output: routingOutput }),
+    ).resolves.toMatchObject({ score: 0 });
   });
 });

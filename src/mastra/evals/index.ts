@@ -1,5 +1,5 @@
 import { createScorer, type MastraScorers } from "@mastra/core/evals";
-import { scoreAxis } from "./deterministic-semantics.js";
+import { isPlainJsonRecord, scoreAxis } from "./deterministic-semantics.js";
 
 /**
  * CI evaluates executable, deterministic safety behavior. These registered
@@ -9,33 +9,23 @@ import { scoreAxis } from "./deterministic-semantics.js";
 type EvalOutput = Record<string, unknown>;
 
 function plainRecord(value: unknown): EvalOutput {
-  if (
-    value &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    (Object.getPrototypeOf(value) === Object.prototype ||
-      Object.getPrototypeOf(value) === null)
-  )
-    return value as EvalOutput;
+  if (isPlainJsonRecord(value)) return value as EvalOutput;
   return {};
 }
 
 /** Parse only Mastra's explicit top-level model-output text boundary. */
-function topLevelModelOutput(value: unknown): EvalOutput {
-  if (plainRecord(value) !== value) {
-    if (typeof value !== "string") return {};
-    try {
-      return plainRecord(JSON.parse(value));
-    } catch {
-      return {};
-    }
+function topLevelModelOutput(value: unknown): unknown {
+  if (isPlainJsonRecord(value) || typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
   }
-  return value as EvalOutput;
 }
 function deterministicScorer(
   id: string,
   name: string,
-  score?: (output: EvalOutput, truth: EvalOutput) => number,
+  score?: (output: unknown, truth: unknown) => number,
 ) {
   return createScorer({
     id,
@@ -45,18 +35,22 @@ function deterministicScorer(
   })
     .preprocess(({ run }) => ({
       output: topLevelModelOutput(run.output),
-      truth: plainRecord(run.groundTruth),
+      truth: run.groundTruth,
     }))
     .generateScore(({ results }) =>
       score
         ? score(
-            results.preprocessStepResult?.output ?? {},
-            results.preprocessStepResult?.truth ?? {},
+            results.preprocessStepResult?.output,
+            results.preprocessStepResult?.truth,
           )
         : scoreAxis(
             id,
-            results.preprocessStepResult?.output ?? {},
-            results.preprocessStepResult?.truth ?? {},
+            results.preprocessStepResult?.output as Parameters<
+              typeof scoreAxis
+            >[1],
+            results.preprocessStepResult?.truth as Parameters<
+              typeof scoreAxis
+            >[2],
           ),
     )
     .generateReason(
@@ -107,7 +101,7 @@ export const supportEvalScorers: MastraScorers = {
 };
 
 export function scoreDraftResolutionFields(output: unknown) {
-  const parsed = topLevelModelOutput(output),
+  const parsed = plainRecord(topLevelModelOutput(output)),
     citedSources = Array.isArray(parsed.citedSources)
       ? parsed.citedSources.filter(
           (source): source is string => typeof source === "string",
@@ -131,12 +125,14 @@ export const responseStructureSanityScorer = deterministicScorer(
 export const conversationCoverageScorer = deterministicScorer(
   "conversation-coverage",
   "Conversation Coverage",
-  (output) =>
-    (Array.isArray(output.answers) ? output.answers : []).filter(
+  (output) => {
+    const answers = plainRecord(output).answers;
+    return (Array.isArray(answers) ? answers : []).filter(
       (answer) => typeof answer === "string",
     ).length > 1
       ? 1
-      : 0,
+      : 0;
+  },
 );
 responseAgentScorers.responseStructureSanity = {
   scorer: responseStructureSanityScorer,

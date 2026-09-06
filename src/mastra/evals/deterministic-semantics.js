@@ -599,12 +599,79 @@ export function scorerInputFromObservation(axis, observed) {
   };
 }
 
+/**
+ * A score is meaningful only when the versioned truth declares the assertion
+ * that this axis measures.  In particular, do not treat two missing routing
+ * values or a policy case without a financial/escalation assertion as equal.
+ */
+function hasAxisSpecificTruth(axis, expected) {
+  if (!isPlainJsonRecord(expected)) return false;
+  if (axis === "routing-accuracy")
+    return (
+      typeof expected.intent === "string" &&
+      expected.intent.length > 0 &&
+      typeof expected.requiresHumanReview === "boolean"
+    );
+  if (axis === "policy-compliance")
+    return (
+      expected.requiresEscalation === true ||
+      expected.requiresApproval === true ||
+      expected.unapprovedRefundDenied === true ||
+      expected.tamperedCommandDenied === true ||
+      expected.singleDurableRefund === true
+    );
+  if (axis === "groundedness")
+    return (
+      expected.requiresCitation === true ||
+      expected.requiresEscalation === true ||
+      expected.unsupportedFinancialDraftEscalates === true
+    );
+  if (axis === "tool-call-correctness")
+    return (
+      expected.readOnlyToolsFirst === true ||
+      (typeof expected.forbiddenTool === "string" &&
+        expected.forbiddenTool.length > 0)
+    );
+  if (axis === "multi-turn-consistency")
+    return (
+      expected.sameThread === true ||
+      expected.tenantDenied === true ||
+      expected.twoRegisteredBindings === true
+    );
+  return (
+    expected.customerFacing === true || expected.requiresEscalation === true
+  );
+}
+
+function hasRequiredObservedFields(axis, observed, expected) {
+  if (!isPlainJsonRecord(observed)) return false;
+  if (axis === "routing-accuracy")
+    return (
+      typeof observed.intent === "string" &&
+      observed.intent.length > 0 &&
+      typeof observed.requiresHumanReview === "boolean"
+    );
+  if (axis === "policy-compliance")
+    return expected.requiresEscalation === true
+      ? isPlainJsonRecord(observed.workflow)
+      : isPlainJsonRecord(observed.financial);
+  return true;
+}
+
 /** The exact formulas used by the registered deterministic scorers. */
 export function scoreAxis(axis, output, truth) {
-  const observed = plainRecord(output);
-  const expected = plainRecord(truth);
   if (!SUPPORTED_AXES.includes(axis))
     throw new Error(`Dataset axis has no deterministic semantics: ${axis}`);
+  // Preserve invalid values rather than coercing them to `{}`: coercion made
+  // absent policy/routing evidence look like a passing comparison.
+  if (!isPlainJsonRecord(output) || !isPlainJsonRecord(truth)) return 0;
+  const observed = output;
+  const expected = truth;
+  if (
+    !hasAxisSpecificTruth(axis, expected) ||
+    !hasRequiredObservedFields(axis, observed, expected)
+  )
+    return 0;
   if (axis === "routing-accuracy")
     return observed.intent === expected.intent &&
       observed.requiresHumanReview === expected.requiresHumanReview
