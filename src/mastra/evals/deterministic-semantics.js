@@ -3,6 +3,8 @@
  * owns both the dataset assertion meanings and registered scorer formulas so
  * an immutable report can be replayed without trusting its claimed flags.
  */
+import { createHash } from "node:crypto";
+
 const EXPECTED_ORDER_ID = "ORD-1001";
 const EXPECTED_ORDER_STATUS = "fulfilled";
 const EXPECTED_CUSTOMER_EMAIL = "alex@example.com";
@@ -10,11 +12,29 @@ const EXPECTED_QUERY = "duplicate charge policy";
 const EXPECTED_KNOWLEDGE_EVIDENCE = {
   title: "Duplicate Charge Policy",
   source: "duplicate-charge-policy",
-  // This is the versioned local fixture's authoritative document digest, not
-  // a value learned from an eval report.
-  documentHash:
-    "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+  text: `# Duplicate Charge Policy
+
+Duplicate charges happen when a payment retries due to a network error, or when a customer accidentally submits an order twice.
+
+- If a customer's order or subscription shows more than one charge for the same billing period, the duplicate charge is eligible for a **full refund of the extra charge only**. The original charge is never refunded as part of a duplicate-charge claim.
+- Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.
+- Duplicate-charge refunds do not require the customer to return anything, since no extra product/service was fulfilled.
+- These refunds are considered clear-cut and eligible for standard approval (not automatic execution - a human must still approve every refund).`,
+  version: "local-v1",
+  effectiveAt: "2026-01-01T00:00:00.000Z",
+  // This is a fixed fixture authority, not a value learned from a tool call
+  // or an expected value carried in a replay report.
+  providerKind: "local",
 };
+EXPECTED_KNOWLEDGE_EVIDENCE.documentHash = createHash("sha256")
+  .update(
+    JSON.stringify([
+      EXPECTED_KNOWLEDGE_EVIDENCE.source,
+      EXPECTED_KNOWLEDGE_EVIDENCE.version,
+      EXPECTED_KNOWLEDGE_EVIDENCE.text,
+    ]),
+  )
+  .digest("hex");
 const EXPECTED_CALL_ORDER = [
   "search_support_knowledge",
   "lookup_order",
@@ -24,7 +44,9 @@ const EXPECTED_CALL_ORDER = [
 const EXPECTED_TRUSTED_BINDING = Object.freeze({
   tenantId: "local-demo",
   providerKind: "local",
-  providerAccountPrefix: "phase004-account-",
+  providerAccountId: "phase004-eval-authority-registered-scorer-fixture",
+  externalConversationId:
+    "phase004-eval-conversation-registered-scorer-fixture",
 });
 const EXPECTED_INPUT_KEYS = Object.freeze({
   search_support_knowledge: ["binding", "queryText", "topK"],
@@ -33,6 +55,14 @@ const EXPECTED_INPUT_KEYS = Object.freeze({
 const EXPECTED_ESCALATION_RESPONSE =
   "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.";
 const SHA256 = /^[a-f0-9]{64}$/;
+const GENERATION_ID =
+  /^knowledge_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function canonicalInstant(value) {
+  if (typeof value !== "string") return false;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
 
 export const SUPPORTED_AXES = [
   "groundedness",
@@ -96,26 +126,19 @@ function matchingOrder(value, expected = {}) {
 
 function acceptableKnowledgeEvidence(value, expected, binding) {
   const result = object(value);
+  if (!exactKeys(result, ["sources"])) return null;
   const sources = strictRecords(result.sources);
   // Deterministic native evaluation asks for topK=1. Its evidence contract is
   // exactly one complete authoritative source, not "one good source among
   // arbitrary extras". The fixture truth below is owned by this runner, never
   // by a report's expected fields.
-  if (!sources || sources.length !== 1) return false;
+  if (!sources || sources.length !== 1) return null;
   const source = sources[0];
   const keys = Object.keys(source).sort();
-  const compactKeys = ["documentHash", "source", "title"];
-  if (JSON.stringify(keys) === JSON.stringify(compactKeys))
-    return (
-      source.title === expected.title &&
-      source.source === expected.source &&
-      source.documentHash === expected.documentHash &&
-      SHA256.test(source.documentHash)
-    );
   if (
     JSON.stringify(keys) !== JSON.stringify(["document", "metadata", "score"])
   )
-    return false;
+    return null;
   const provenance = object(source.metadata);
   const provenanceKeys = Object.keys(provenance).sort();
   const requiredProvenanceKeys = [
@@ -138,29 +161,38 @@ function acceptableKnowledgeEvidence(value, expected, binding) {
     JSON.stringify(provenanceKeys) !== JSON.stringify(requiredProvenanceKeys) &&
     JSON.stringify(provenanceKeys) !== JSON.stringify(optionalProvenanceKeys)
   )
-    return false;
-  return (
-    typeof source.document === "string" &&
-    source.document.length > 0 &&
-    typeof source.score === "number" &&
-    Number.isFinite(source.score) &&
-    provenance.title === expected.title &&
-    provenance.source === expected.source &&
-    provenance.documentHash === expected.documentHash &&
-    SHA256.test(provenance.documentHash) &&
-    provenance.providerKind === EXPECTED_TRUSTED_BINDING.providerKind &&
-    provenance.providerAccountId === binding.providerAccountId &&
-    [
-      provenance.text,
-      provenance.version,
-      provenance.generationId,
-      provenance.effectiveAt,
-      provenance.indexedAt,
-    ].every((field) => typeof field === "string" && field.length > 0) &&
-    (provenance.expiresAt === undefined ||
-      (typeof provenance.expiresAt === "string" &&
-        provenance.expiresAt.length > 0))
-  );
+    return null;
+  const documentHash = createHash("sha256")
+    .update(JSON.stringify([expected.source, expected.version, expected.text]))
+    .digest("hex");
+  if (
+    typeof source.document !== "string" ||
+    typeof source.score !== "number" ||
+    !Number.isFinite(source.score) ||
+    source.score < 0 ||
+    source.score > 1 ||
+    source.document !== expected.text ||
+    provenance.text !== source.document ||
+    provenance.title !== expected.title ||
+    provenance.source !== expected.source ||
+    provenance.version !== expected.version ||
+    provenance.documentHash !== documentHash ||
+    provenance.documentHash !== expected.documentHash ||
+    !SHA256.test(provenance.documentHash) ||
+    provenance.providerKind !== expected.providerKind ||
+    provenance.providerAccountId !== binding.providerAccountId ||
+    provenance.effectiveAt !== expected.effectiveAt ||
+    !canonicalInstant(provenance.effectiveAt) ||
+    !canonicalInstant(provenance.indexedAt) ||
+    Date.parse(provenance.indexedAt) < Date.parse(provenance.effectiveAt) ||
+    typeof provenance.generationId !== "string" ||
+    !GENERATION_ID.test(provenance.generationId) ||
+    (provenance.expiresAt !== undefined &&
+      (!canonicalInstant(provenance.expiresAt) ||
+        Date.parse(provenance.expiresAt) <= Date.parse(provenance.effectiveAt)))
+  )
+    return null;
+  return provenance;
 }
 
 /**
@@ -222,12 +254,22 @@ function matchingTrustedBinding(value, expected) {
     ]) &&
     binding.tenantId === expected.tenantId &&
     binding.providerKind === expected.providerKind &&
-    typeof binding.providerAccountId === "string" &&
-    binding.providerAccountId.startsWith(expected.providerAccountPrefix) &&
-    binding.providerAccountId.length > expected.providerAccountPrefix.length &&
-    binding.externalConversationId ===
-      binding.providerAccountId.slice(expected.providerAccountPrefix.length)
+    binding.providerAccountId === expected.providerAccountId &&
+    binding.externalConversationId === expected.externalConversationId
   );
+}
+
+/** Case identity is checked against the versioned dataset before this is
+ * called during reference replay. It is the scenario authority source, never
+ * an observed call field or report-provided expected binding. */
+function trustedBindingForCase(caseId) {
+  if (caseId === "registered-scorer-fixture") return EXPECTED_TRUSTED_BINDING;
+  return {
+    tenantId: "local-demo",
+    providerKind: "local",
+    providerAccountId: `phase004-eval-authority-${caseId}`,
+    externalConversationId: `phase004-eval-conversation-${caseId}`,
+  };
 }
 
 /** Every observed native call is scoped and checked against dataset truth. */
@@ -235,6 +277,7 @@ function expectedCallsMatch(value, expected) {
   const calls = strictRecords(value);
   const callOrder = expectedCallSequence(expected);
   if (!calls || !callOrder || calls.length !== callOrder.length) return false;
+  let generationId;
   for (let index = 0; index < calls.length; index += 1) {
     const call = calls[index];
     if (
@@ -264,6 +307,14 @@ function expectedCallsMatch(value, expected) {
         )
       )
         return false;
+      const sourceGeneration = acceptableKnowledgeEvidence(
+        call.result,
+        object(expected.knowledgeEvidence),
+        object(input.binding),
+      ).generationId;
+      if (generationId !== undefined && sourceGeneration !== generationId)
+        return false;
+      generationId = sourceGeneration;
       continue;
     }
     if (call.name === "lookup_order") {
@@ -322,7 +373,11 @@ function safeEscalation(draft, workflow) {
 }
 
 /** Throws for an unsupported dataset assertion instead of treating it as pass. */
-export function evaluateDatasetAssertions(assertions, observed) {
+export function evaluateDatasetAssertions(
+  assertions,
+  observed,
+  evaluationCaseId = "registered-scorer-fixture",
+) {
   const draft = object(observed.draft);
   const financial = object(observed.financial);
   const authorization = object(observed.authorization);
@@ -393,7 +448,7 @@ export function evaluateDatasetAssertions(assertions, observed) {
           expected === true &&
           expectedCallsMatch(
             calls,
-            truthForDatasetCase("tool-call-correctness", {}),
+            truthForDatasetCase("tool-call-correctness", {}, evaluationCaseId),
           ) &&
           refundEffects.providerEffects === 0 &&
           refundEffects.durableActions === 0;
@@ -418,12 +473,16 @@ export function evaluateDatasetAssertions(assertions, observed) {
   return evaluated;
 }
 
-export function truthForDatasetCase(axis, assertions) {
+export function truthForDatasetCase(
+  axis,
+  assertions,
+  evaluationCaseId = "registered-scorer-fixture",
+) {
   if (!SUPPORTED_AXES.includes(axis))
     throw new Error(`Dataset axis has no deterministic semantics: ${axis}`);
   // Evaluate once with no observations to reject unknown declarations. The
   // constants below are controlled by the dataset runner, never report data.
-  evaluateDatasetAssertions(assertions, {});
+  evaluateDatasetAssertions(assertions, {}, evaluationCaseId);
   const truth = {
     ...object(assertions),
     orderId: EXPECTED_ORDER_ID,
@@ -433,7 +492,7 @@ export function truthForDatasetCase(axis, assertions) {
     customerEmail: EXPECTED_CUSTOMER_EMAIL,
     queryText: EXPECTED_QUERY,
     expectedCallOrder: EXPECTED_CALL_ORDER,
-    trustedBinding: EXPECTED_TRUSTED_BINDING,
+    trustedBinding: trustedBindingForCase(evaluationCaseId),
     historyEstablished: true,
   };
   if (axis === "routing-accuracy") {

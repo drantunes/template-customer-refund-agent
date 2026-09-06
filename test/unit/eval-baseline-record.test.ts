@@ -25,6 +25,15 @@ function rehashEvidence(record: {
   evidenceHash: string;
 }) {
   for (const item of record.perCaseScores)
+    for (const call of (
+      item.evidence.summary as {
+        toolCalls?: Array<{ result: unknown; rawResultHash: string }>;
+      }
+    ).toolCalls ?? [])
+      call.rawResultHash = createHash("sha256")
+        .update(JSON.stringify(call.result))
+        .digest("hex");
+  for (const item of record.perCaseScores)
     item.evidence.evidenceHash = createHash("sha256")
       .update(JSON.stringify(item.evidence.summary))
       .digest("hex");
@@ -200,10 +209,10 @@ describe("immutable eval reference records", () => {
       toolCalls(summary)[2].input.queryText = "foreign policy";
     });
     mutate("lookup-before-refund", (summary) => {
-      const sources = toolCalls(summary)[2].result.sources as Array<
-        Record<string, unknown>
-      >;
-      sources[0].documentHash = "0".repeat(64);
+      const sources = toolCalls(summary)[2].result.sources as Array<{
+        metadata: Record<string, unknown>;
+      }>;
+      sources[0].metadata.documentHash = "0".repeat(64);
     });
     mutate("lookup-before-refund", (summary) => {
       toolCalls(summary)[3].input.customerEmail = "mallory@example.com";
@@ -333,5 +342,97 @@ describe("immutable eval reference records", () => {
           >,
         ),
       );
+    const completeSource = (summary: Record<string, unknown>) =>
+      (
+        toolCalls(summary)[2].result.sources as Array<{
+          document: string;
+          metadata: Record<string, unknown>;
+        }>
+      )[0];
+    const switchExactAuthority = (
+      summary: Record<string, unknown>,
+      index: 2 | 3,
+    ) => {
+      toolCalls(summary)[index].input.binding = {
+        tenantId: "local-demo",
+        providerKind: "local",
+        providerAccountId: "phase004-eval-authority-lookup-before-refund-other",
+        externalConversationId:
+          "phase004-eval-conversation-lookup-before-refund-other",
+      };
+    };
+    for (const apply of [
+      (summary: Record<string, unknown>) => switchExactAuthority(summary, 2),
+      (summary: Record<string, unknown>) => switchExactAuthority(summary, 3),
+      (summary: Record<string, unknown>) => {
+        completeSource(summary).document = "Refunds are unconditional.";
+      },
+      (summary: Record<string, unknown>) => {
+        completeSource(summary).metadata.text = "Refunds are unconditional.";
+      },
+      (summary: Record<string, unknown>) => {
+        const entry = completeSource(summary);
+        entry.document = "Attacker-controlled replacement.";
+        entry.metadata.text = entry.document;
+      },
+      (summary: Record<string, unknown>) => {
+        const entry = completeSource(summary);
+        entry.document = "Attacker-controlled replacement.";
+        entry.metadata.text = entry.document;
+        entry.metadata.documentHash = createHash("sha256")
+          .update(
+            JSON.stringify([
+              "duplicate-charge-policy",
+              "local-v1",
+              entry.document,
+            ]),
+          )
+          .digest("hex");
+      },
+      (summary: Record<string, unknown>) => {
+        completeSource(summary).metadata.version = "invented-v99";
+      },
+      (summary: Record<string, unknown>) => {
+        completeSource(summary).metadata.generationId =
+          "knowledge_11111111-1111-4111-8111-111111111111";
+      },
+      (summary: Record<string, unknown>) => {
+        completeSource(summary).metadata.effectiveAt = "not-a-date";
+      },
+      (summary: Record<string, unknown>) => {
+        completeSource(summary).metadata.indexedAt = "2026-01-01T00:00:00Z";
+      },
+      (summary: Record<string, unknown>) => {
+        completeSource(summary).metadata.expiresAt = "2026-01-01T00:00:00.000Z";
+      },
+      (summary: Record<string, unknown>) => {
+        completeSource(summary).metadata.providerAccountId = "foreign-account";
+      },
+      (summary: Record<string, unknown>) => {
+        const documentHash = completeSource(summary).metadata.documentHash;
+        toolCalls(summary)[2].result = {
+          sources: [
+            {
+              title: "Duplicate Charge Policy",
+              source: "duplicate-charge-policy",
+              documentHash,
+            },
+          ],
+        };
+      },
+      (summary: Record<string, unknown>) => {
+        delete completeSource(summary).metadata.version;
+      },
+      (summary: Record<string, unknown>) => {
+        completeSource(summary).metadata.untrusted = true;
+      },
+      (summary: Record<string, unknown>) => {
+        const calls = toolCalls(summary);
+        (calls[2].result.sources as Array<Record<string, unknown>>).push(
+          structuredClone(completeSource(summary)),
+        );
+      },
+    ])
+      mutate("lookup-before-refund", apply);
   });
 });

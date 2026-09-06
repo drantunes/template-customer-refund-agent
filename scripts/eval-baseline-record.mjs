@@ -57,6 +57,7 @@ function expectedDatasetCases() {
       if (expected.has(item.id))
         throw new Error("eval datasets contain duplicate case identifiers");
       expected.set(item.id, {
+        id: item.id,
         axis: dataset.axis,
         critical: item.critical,
         assertions: item.assertions,
@@ -125,6 +126,8 @@ function validExecutionSummary(axis, summary, expectedCase, measuredScore) {
     Object.hasOwn(call, "result") &&
     typeof call.rawResultHash === "string" &&
     sha256.test(call.rawResultHash) &&
+    call.rawResultHash ===
+      createHash("sha256").update(JSON.stringify(call.result)).digest("hex") &&
     typeof call.sequence === "number" &&
     Number.isInteger(call.sequence) &&
     call.sequence > 0 &&
@@ -149,6 +152,7 @@ function validExecutionSummary(axis, summary, expectedCase, measuredScore) {
     const recomputedAssertions = evaluateDatasetAssertions(
       expectedCase.assertions,
       observation,
+      expectedCase.id,
     );
     if (
       JSON.stringify(summary.assertions) !==
@@ -159,7 +163,7 @@ function validExecutionSummary(axis, summary, expectedCase, measuredScore) {
     const recomputedScore = scoreAxis(
       axis,
       scorerInputFromObservation(axis, observation),
-      truthForDatasetCase(axis, expectedCase.assertions),
+      truthForDatasetCase(axis, expectedCase.assertions, expectedCase.id),
     );
     return (
       recomputedScore === summary.score && recomputedScore === measuredScore

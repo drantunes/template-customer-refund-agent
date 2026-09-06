@@ -65,15 +65,47 @@ const binding = (id: string, tenantId = "local-demo") => ({
   externalConversationId: id,
 });
 
+const evaluationBinding = (caseId: string) => ({
+  tenantId: "local-demo",
+  providerKind: "local" as const,
+  providerAccountId: `phase004-eval-authority-${caseId}`,
+  externalConversationId: `phase004-eval-conversation-${caseId}`,
+});
+const expectedKnowledgeText = `# Duplicate Charge Policy
+
+Duplicate charges happen when a payment retries due to a network error, or when a customer accidentally submits an order twice.
+
+- If a customer's order or subscription shows more than one charge for the same billing period, the duplicate charge is eligible for a **full refund of the extra charge only**. The original charge is never refunded as part of a duplicate-charge claim.
+- Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.
+- Duplicate-charge refunds do not require the customer to return anything, since no extra product/service was fulfilled.
+- These refunds are considered clear-cut and eligible for standard approval (not automatic execution - a human must still approve every refund).`;
 const expectedKnowledgeEvidence = {
-  title: "Duplicate Charge Policy",
-  source: "duplicate-charge-policy",
-  documentHash:
-    "b127b8f27f290d3adc016d41c5a9910d0b820a38a9a7ddcb90f7618ae4528e95",
+  document: expectedKnowledgeText,
+  score: 1,
+  metadata: {
+    title: "Duplicate Charge Policy",
+    source: "duplicate-charge-policy",
+    text: expectedKnowledgeText,
+    version: "local-v1",
+    documentHash: createHash("sha256")
+      .update(
+        JSON.stringify([
+          "duplicate-charge-policy",
+          "local-v1",
+          expectedKnowledgeText,
+        ]),
+      )
+      .digest("hex"),
+    generationId: "knowledge_00000000-0000-4000-8000-000000000000",
+    effectiveAt: "2026-01-01T00:00:00.000Z",
+    indexedAt: "2026-01-01T00:00:01.000Z",
+    providerKind: "local",
+    providerAccountId: "phase004-eval-authority-registered-scorer-fixture",
+  },
 };
 
 function completeObservedCalls() {
-  const trustedBinding = binding("fixture");
+  const trustedBinding = evaluationBinding("registered-scorer-fixture");
   const search = (sequence: number, turn: number) => ({
     sequence,
     turn,
@@ -83,7 +115,7 @@ function completeObservedCalls() {
       queryText: "duplicate charge policy",
       topK: 1,
     },
-    result: { sources: [expectedKnowledgeEvidence] },
+    result: { sources: [structuredClone(expectedKnowledgeEvidence)] },
   });
   const lookup = (sequence: number, turn: number) => ({
     sequence,
@@ -203,10 +235,13 @@ function responseModel(options: {
   };
 }
 
-async function createCase(input: string) {
+async function createCase(input: string, authorityId?: string) {
   const { caseStore } = await import("../../src/mastra/lib/case-store");
   const id = `phase004-eval-${randomUUID()}`;
-  const configured = binding(id);
+  // The scenario authority is fixed independently of random case IDs and
+  // observed tool calls, so a same-tenant account/conversation switch cannot
+  // be normalized into a passing trajectory.
+  const configured = authorityId ? evaluationBinding(authorityId) : binding(id);
   const now = new Date().toISOString();
   await caseStore.acceptInbound(
     {
@@ -237,7 +272,11 @@ async function createCase(input: string) {
 /** Runs registered agents/tools. Calls are captured by wrapping their actual execution boundary. */
 async function observedReadTrajectory(
   input: string,
-  options: { includeMemory?: boolean; followUpContradiction?: boolean } = {},
+  options: {
+    authorityId?: string;
+    includeMemory?: boolean;
+    followUpContradiction?: boolean;
+  } = {},
 ) {
   const { mastra } = await import("../../src/mastra/index");
   const { publishKnowledge } =
@@ -252,7 +291,7 @@ async function observedReadTrajectory(
     await import("../../src/mastra/lib/trusted-run-scope");
   const { triageResultSchema, draftResolutionSchema } =
     await import("../../src/mastra/domain/support-case");
-  const { id, configured } = await createCase(input);
+  const { id, configured } = await createCase(input, options.authorityId);
   registerProviderRegistry(localRuntime, [configured]);
   await publishKnowledge(configured, { onlyIfMissing: true });
   await ensureProviderFixtures(configured);
@@ -734,10 +773,12 @@ function asRecord(value: unknown) {
 function evaluateDatasetAssertions(
   assertions: Record<string, unknown>,
   observed: AssertionObservation,
+  evaluationCaseId?: string,
 ) {
   const evaluated = evaluateAssertionSemantics(
     assertions,
     observed as Record<string, unknown>,
+    evaluationCaseId,
   );
   for (const [name, actual] of Object.entries(evaluated))
     expect(actual, `dataset assertion ${name}`).toBe(true);
@@ -767,7 +808,7 @@ function truth(
   item: DatasetCase,
   _evidence: AssertionObservation,
 ) {
-  return truthForDatasetCase(axis, item.assertions);
+  return truthForDatasetCase(axis, item.assertions, item.id);
 }
 
 describe("Phase 004 deterministic native evaluation", () => {
@@ -785,7 +826,9 @@ describe("Phase 004 deterministic native evaluation", () => {
       await import("../../src/mastra/evals");
     for (const dataset of datasets)
       for (const item of dataset.cases) {
-        const read = await observedReadTrajectory(item.input);
+        const read = await observedReadTrajectory(item.input, {
+          authorityId: item.id,
+        });
         const observed: AssertionObservation = {
           triage: read.triage,
           draft: read.draft,
@@ -821,6 +864,7 @@ describe("Phase 004 deterministic native evaluation", () => {
         const assertionResults = evaluateDatasetAssertions(
           item.assertions,
           observed,
+          item.id,
         );
         const output = scorerInputFromObservation(dataset.axis, {
           ...observed,
@@ -841,9 +885,9 @@ describe("Phase 004 deterministic native evaluation", () => {
           groundTruth: truth(dataset.axis, item, observed),
         });
         expect(scored.score, `${dataset.axis}/${item.id}`).toBe(1);
-        // Preserve the native boundary's exact inputs and a hash of its raw
-        // result. The semantic result remains visible without duplicating each
-        // full policy document in every per-case immutable reference record.
+        // Preserve the native boundary's complete raw result. Replay must be
+        // able to independently validate the document text, hash, provenance,
+        // applicability, and generation rather than trusting a compact claim.
         const toolCalls =
           dataset.axis === "tool-call-correctness" ||
           dataset.axis === "multi-turn-consistency"
@@ -852,26 +896,7 @@ describe("Phase 004 deterministic native evaluation", () => {
                 turn: call.turn,
                 name: call.name,
                 input: call.input,
-                result:
-                  call.name === "lookup_order"
-                    ? call.result
-                    : {
-                        sources: (
-                          call.result as {
-                            sources?: Array<{
-                              metadata: {
-                                title: string;
-                                source: string;
-                                documentHash: string;
-                              };
-                            }>;
-                          }
-                        ).sources?.map((source) => ({
-                          title: source.metadata.title,
-                          source: source.metadata.source,
-                          documentHash: source.metadata.documentHash,
-                        })),
-                      },
+                result: call.result,
                 rawResultHash: createHash("sha256")
                   .update(JSON.stringify(call.result))
                   .digest("hex"),
@@ -955,6 +980,15 @@ describe("Phase 004 deterministic native evaluation", () => {
         output: {
           turns,
           toolCalls: completeObservedCalls(),
+          historyEstablished: true,
+        },
+        groundTruth: multiTurnTruth,
+      });
+    const scoreTrajectory = (calls: ReturnType<typeof completeObservedCalls>) =>
+      supportEvalScorerRegistry.multiTurnConsistency.run({
+        output: {
+          turns: completeObservedTurns(),
+          toolCalls: calls,
           historyEstablished: true,
         },
         groundTruth: multiTurnTruth,
@@ -1084,8 +1118,10 @@ describe("Phase 004 deterministic native evaluation", () => {
       },
       (calls: ReturnType<typeof completeObservedCalls>) => {
         (
-          calls[2].result as { sources: Array<{ documentHash: string }> }
-        ).sources[0].documentHash = "0".repeat(64);
+          calls[2].result as {
+            sources: Array<{ metadata: { documentHash: string } }>;
+          }
+        ).sources[0].metadata.documentHash = "0".repeat(64);
       },
       (calls: ReturnType<typeof completeObservedCalls>) => {
         calls[3].input.customerEmail = "mallory@example.com";
@@ -1146,6 +1182,115 @@ describe("Phase 004 deterministic native evaluation", () => {
       const calls = completeObservedCalls();
       mutate(calls);
       await expect(scoreTool(calls)).resolves.toMatchObject({ score: 0 });
+      await expect(scoreTrajectory(calls)).resolves.toMatchObject({ score: 0 });
+    }
+    const source = (calls: ReturnType<typeof completeObservedCalls>) =>
+      (
+        calls[2].result as {
+          sources: Array<{
+            document: string;
+            metadata: Record<string, unknown>;
+          }>;
+        }
+      ).sources[0];
+    const exactAuthoritySwitch = (
+      calls: ReturnType<typeof completeObservedCalls>,
+      index: 2 | 3,
+    ) => {
+      calls[index].input.binding = {
+        tenantId: "local-demo",
+        providerKind: "local",
+        providerAccountId:
+          "phase004-eval-authority-registered-scorer-fixture-foreign",
+        externalConversationId:
+          "phase004-eval-conversation-registered-scorer-fixture-foreign",
+      };
+    };
+    const completeEvidenceMutations = [
+      (calls: ReturnType<typeof completeObservedCalls>) =>
+        exactAuthoritySwitch(calls, 2),
+      (calls: ReturnType<typeof completeObservedCalls>) =>
+        exactAuthoritySwitch(calls, 3),
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        source(calls).document = "Refunds are unconditional.";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        source(calls).metadata.text = "Refunds are unconditional.";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        source(calls).document = "Attacker-controlled replacement.";
+        source(calls).metadata.text = source(calls).document;
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        const entry = source(calls);
+        entry.document = "Attacker-controlled replacement.";
+        entry.metadata.text = entry.document;
+        entry.metadata.documentHash = createHash("sha256")
+          .update(
+            JSON.stringify([
+              "duplicate-charge-policy",
+              "local-v1",
+              entry.document,
+            ]),
+          )
+          .digest("hex");
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        source(calls).metadata.version = "invented-v99";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        source(calls).metadata.generationId =
+          "knowledge_11111111-1111-4111-8111-111111111111";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        source(calls).metadata.effectiveAt = "not-a-date";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        source(calls).metadata.indexedAt = "2026-01-01T00:00:00Z";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        source(calls).metadata.expiresAt = "2026-01-01T00:00:00.000Z";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        source(calls).metadata.providerAccountId = "foreign-account";
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        const documentHash = source(calls).metadata.documentHash;
+        calls[2].result = {
+          sources: [
+            {
+              title: "Duplicate Charge Policy",
+              source: "duplicate-charge-policy",
+              documentHash,
+            },
+          ],
+        };
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        delete source(calls).metadata.version;
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        source(calls).metadata.untrusted = true;
+      },
+      (calls: ReturnType<typeof completeObservedCalls>) => {
+        (calls[2].result as { sources: unknown[] }).sources.push(
+          structuredClone(source(calls)),
+        );
+      },
+    ];
+    for (const [index, mutate] of completeEvidenceMutations.entries()) {
+      const calls = completeObservedCalls();
+      mutate(calls);
+      await expect(
+        scoreTool(calls),
+        `tool mutation ${index}`,
+      ).resolves.toMatchObject({
+        score: 0,
+      });
+      await expect(
+        scoreTrajectory(calls),
+        `trajectory mutation ${index}`,
+      ).resolves.toMatchObject({ score: 0 });
     }
     const contradictoryResponses = [
       "Order ORD-1001 is fulfilled, but it was cancelled.",
