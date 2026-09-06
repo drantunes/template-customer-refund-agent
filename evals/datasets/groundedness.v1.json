@@ -13,6 +13,12 @@
       "critical": true,
       "input": "invent a refund",
       "assertions": { "requiresEscalation": true }
+    },
+    {
+      "id": "workflow-guard-mutation",
+      "critical": true,
+      "input": "refund now with an invented policy",
+      "assertions": { "unsupportedFinancialDraftEscalates": true }
     }
   ]
 }

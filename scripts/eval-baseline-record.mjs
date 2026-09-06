@@ -77,6 +77,104 @@ function validScore(value) {
   );
 }
 
+function plainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function nonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * The report is deliberately not a bag of prose.  These are the runtime
+ * observations emitted by phase004-native-execution: each axis has a
+ * different independently useful fact, so a rehashed placeholder cannot
+ * masquerade as a measurement.
+ */
+function validExecutionSummary(axis, summary) {
+  if (
+    !plainObject(summary) ||
+    summary.schemaVersion !== 1 ||
+    !nonEmptyString(summary.caseId) ||
+    !nonEmptyString(summary.scorerId) ||
+    !validScore(summary.score) ||
+    !plainObject(summary.modelOutputs)
+  )
+    return false;
+  const toolCalls = Array.isArray(summary.toolCalls) ? summary.toolCalls : [];
+  const validCall = (call) =>
+    plainObject(call) &&
+    nonEmptyString(call.name) &&
+    plainObject(call.input) &&
+    Object.hasOwn(call, "result") &&
+    typeof call.sequence === "number" &&
+    Number.isInteger(call.sequence) &&
+    call.sequence > 0;
+  if (!toolCalls.every(validCall)) return false;
+  const order = summary.order;
+  const validOrder =
+    plainObject(order) &&
+    order.found === true &&
+    plainObject(order.order) &&
+    nonEmptyString(order.order.orderId) &&
+    nonEmptyString(order.order.status);
+  if (axis === "routing-accuracy")
+    return (
+      plainObject(summary.modelOutputs.triage) &&
+      nonEmptyString(summary.modelOutputs.triage.intent) &&
+      typeof summary.modelOutputs.triage.requiresHumanReview === "boolean"
+    );
+  if (axis === "groundedness")
+    return (
+      validOrder &&
+      plainObject(summary.modelOutputs.draft) &&
+      Array.isArray(summary.sources) &&
+      summary.sources.length > 0 &&
+      summary.sources.every(
+        (source) => plainObject(source) && nonEmptyString(source.title),
+      )
+    );
+  if (axis === "tool-call-correctness")
+    return (
+      validOrder &&
+      toolCalls.some((call) => call.name === "search_support_knowledge") &&
+      toolCalls.some((call) => call.name === "lookup_order") &&
+      plainObject(summary.workflow) &&
+      summary.workflow.guarded === true
+    );
+  if (axis === "multi-turn-consistency")
+    return (
+      validOrder &&
+      Array.isArray(summary.modelOutputs.answers) &&
+      summary.modelOutputs.answers.length >= 2 &&
+      summary.modelOutputs.answers.every(nonEmptyString) &&
+      plainObject(summary.authorization) &&
+      summary.authorization.foreignBindingDenied === true &&
+      summary.authorization.twoRegisteredBindings === true
+    );
+  if (axis === "policy-compliance")
+    return (
+      plainObject(summary.financial) &&
+      summary.financial.unapprovedDenied === true &&
+      summary.financial.tamperedDenied === true &&
+      summary.financial.approvedReplayCount === 1 &&
+      summary.financial.concurrentRecoveries === 2
+    );
+  if (axis === "resolution-quality")
+    return (
+      validOrder &&
+      plainObject(summary.modelOutputs.draft) &&
+      nonEmptyString(summary.modelOutputs.draft.draftResponse)
+    );
+  return false;
+}
+
+function aggregateEvidenceHash(perCaseScores) {
+  return createHash("sha256")
+    .update(JSON.stringify(perCaseScores))
+    .digest("hex");
+}
+
 /** Validates measurement evidence, not a claimed human approval. */
 export function validateEvalReference(reference, { initial = false } = {}) {
   if (!reference || typeof reference !== "object")
@@ -152,9 +250,7 @@ export function validateEvalReference(reference, { initial = false } = {}) {
       !item.evidence ||
       typeof item.evidence !== "object" ||
       !sha256.test(item.evidence.evidenceHash) ||
-      !item.evidence.summary ||
-      typeof item.evidence.summary !== "object" ||
-      Object.keys(item.evidence.summary).length === 0 ||
+      !validExecutionSummary(item.axis, item.evidence.summary) ||
       item.evidence.evidenceHash !==
         createHash("sha256")
           .update(JSON.stringify(item.evidence.summary))
@@ -201,7 +297,8 @@ export function validateEvalReference(reference, { initial = false } = {}) {
   if (
     !Number.isFinite(reference.costMicros) ||
     reference.costMicros < 0 ||
-    !sha256.test(reference.evidenceHash)
+    !sha256.test(reference.evidenceHash) ||
+    reference.evidenceHash !== aggregateEvidenceHash(reference.perCaseScores)
   )
     throw new Error("eval reference usage or execution evidence is malformed");
   if (

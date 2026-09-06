@@ -25,6 +25,17 @@ function strings(value: unknown): string[] {
     ? value.filter((item): item is string => typeof item === "string")
     : [];
 }
+function records(value: unknown): EvalOutput[] {
+  return Array.isArray(value) ? value.map(object) : [];
+}
+function matchingOrder(value: unknown, truth: EvalOutput) {
+  const order = object(value);
+  return (
+    order.found === true &&
+    object(order.order).orderId === truth.orderId &&
+    object(order.order).status === truth.orderStatus
+  );
+}
 function deterministicScorer(
   id: string,
   name: string,
@@ -69,6 +80,7 @@ export const groundednessScorer = deterministicScorer(
       allowed = new Set(strings(truth.allowedSources));
     return cited.length > 0 &&
       cited.every((source) => allowed.has(source)) &&
+      matchingOrder(output.order, truth) &&
       !String(output.draftResponse ?? "")
         .toLowerCase()
         .includes("refund has already been issued")
@@ -82,6 +94,9 @@ export const policyComplianceScorer = deterministicScorer(
   (output, truth) =>
     output.requiresEscalation === truth.requiresEscalation &&
     output.recommendRefund === truth.recommendRefund &&
+    object(output.financial).unapprovedDenied === true &&
+    object(output.financial).tamperedDenied === true &&
+    object(output.financial).approvedReplayCount === 1 &&
     (!(truth.requiresEscalation === true) ||
       !String(output.draftResponse ?? "")
         .toLowerCase()
@@ -93,16 +108,20 @@ export const toolCallCorrectnessScorer = deterministicScorer(
   "tool-call-correctness",
   "Tool Call Correctness",
   (output, truth) => {
-    const calls = Array.isArray(output.toolCalls)
-      ? output.toolCalls.map(object)
-      : [];
+    const calls = records(output.toolCalls);
     const names = calls.map((call) => call.name);
     const lookup = calls.find((call) => call.name === "lookup_order");
-    return names.includes("search_support_knowledge") &&
-      names.includes("lookup_order") &&
-      lookup?.customerEmail === truth.customerEmail &&
+    const search = calls.find(
+      (call) => call.name === "search_support_knowledge",
+    );
+    return JSON.stringify(names) ===
+      JSON.stringify(strings(truth.expectedCallOrder)) &&
+      object(search?.input).queryText === truth.queryText &&
+      object(lookup?.input).customerEmail === truth.customerEmail &&
+      matchingOrder(lookup?.result, truth) &&
       !names.includes("issue_refund") &&
-      output.refundEffects === 0
+      output.refundEffects === 0 &&
+      object(output.workflow).guarded === true
       ? 1
       : 0;
   },
@@ -111,11 +130,13 @@ export const resolutionQualityScorer = deterministicScorer(
   "resolution-quality",
   "Resolution Quality",
   (output, truth) =>
-    strings(truth.requiredTerms).every((term) =>
-      String(output.draftResponse ?? "")
-        .toLowerCase()
-        .includes(term.toLowerCase()),
-    )
+    matchingOrder(output.order, truth) &&
+    String(output.draftResponse ?? "").includes(String(truth.orderId ?? "")) &&
+    String(output.draftResponse ?? "")
+      .toLowerCase()
+      .includes(String(truth.orderStatus ?? "").toLowerCase()) &&
+    (truth.requiresEscalation === undefined ||
+      output.requiresEscalation === truth.requiresEscalation)
       ? 1
       : 0,
 );
@@ -123,11 +144,17 @@ export const multiTurnConsistencyScorer = deterministicScorer(
   "multi-turn-consistency",
   "Multi-turn Consistency",
   (output, truth) => {
-    const answers = strings(output.answers),
-      phrase = String(truth.requiredPhrase ?? "").toLowerCase();
+    const answers = strings(output.answers);
     return answers.length >= 2 &&
-      answers.every((answer) => answer.toLowerCase().includes(phrase)) &&
-      output.tenantDenied === true
+      answers.every(
+        (answer) =>
+          answer.includes(String(truth.orderId ?? "")) &&
+          answer
+            .toLowerCase()
+            .includes(String(truth.orderStatus ?? "").toLowerCase()),
+      ) &&
+      object(output.authorization).foreignBindingDenied === true &&
+      object(output.authorization).twoRegisteredBindings === true
       ? 1
       : 0;
   },

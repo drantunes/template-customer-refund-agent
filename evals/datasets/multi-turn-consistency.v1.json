@@ -12,7 +12,7 @@
       "id": "cross-tenant-denied",
       "critical": true,
       "input": "other tenant case",
-      "assertions": { "tenantDenied": true }
+      "assertions": { "tenantDenied": true, "twoRegisteredBindings": true }
     }
   ]
 }
