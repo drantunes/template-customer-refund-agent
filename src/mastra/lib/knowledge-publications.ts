@@ -143,8 +143,13 @@ export class KnowledgePublicationStore {
       return {
         ...document,
         documentHash,
-        effectiveAt: document.effectiveAt!,
-        expiresAt: document.expiresAt,
+        // SQLite compares TEXT lexically. Store canonical UTC instants so its
+        // query predicate has the same meaning as the validation above.
+        effectiveAt: new Date(effectiveAt).toISOString(),
+        expiresAt:
+          expiresAt === undefined
+            ? undefined
+            : new Date(expiresAt).toISOString(),
         providerKind: binding.providerKind,
         providerAccountId: binding.providerAccountId,
       };
@@ -277,9 +282,10 @@ export class KnowledgePublicationStore {
     await this.ensured();
     const generationId = await this.activeGeneration(binding);
     if (!generationId) return [];
+    const now = new Date().toISOString();
     const rows = await this.client.execute({
-      sql: "SELECT * FROM support_knowledge_documents WHERE generation_id = ? AND (expires_at IS NULL OR expires_at > ?)",
-      args: [generationId, new Date().toISOString()],
+      sql: "SELECT * FROM support_knowledge_documents WHERE generation_id = ? AND effective_at <= ? AND (expires_at IS NULL OR expires_at > ?)",
+      args: [generationId, now, now],
     });
     return rows.rows
       .map((row) => {
@@ -302,6 +308,37 @@ export class KnowledgePublicationStore {
       .filter((entry) => entry.score > 0)
       .sort((a, b) => b.score - a.score || a.source.localeCompare(b.source))
       .slice(0, topK);
+  }
+
+  /** Read the authoritative source row for a selected generation. Vector
+   * metadata is an index hint only; serving provenance always comes from here. */
+  async document(
+    binding: ProviderBinding,
+    generationId: string,
+    source: string,
+    documentHash: string,
+  ): Promise<PublishedEvidence | undefined> {
+    await this.ensured();
+    const row = await this.client.execute({
+      sql: "SELECT d.* FROM support_knowledge_documents d JOIN support_knowledge_generations g ON g.id = d.generation_id WHERE d.generation_id = ? AND d.source = ? AND d.document_hash = ? AND g.account_key = ?",
+      args: [generationId, source, documentHash, accountKey(binding)],
+    });
+    const value = row.rows[0] as Record<string, unknown> | undefined;
+    if (!value) return undefined;
+    return {
+      title: String(value.title),
+      text: String(value.text),
+      source: String(value.source),
+      version: String(value.version),
+      score: 1,
+      documentHash: String(value.document_hash),
+      generationId,
+      effectiveAt: String(value.effective_at),
+      indexedAt: String(value.indexed_at),
+      expiresAt: value.expires_at ? String(value.expires_at) : undefined,
+      providerKind: String(value.provider_kind),
+      providerAccountId: String(value.provider_account_id),
+    };
   }
 }
 

@@ -3,7 +3,9 @@ import { z } from "zod";
 import { resolveConfiguredBinding } from "../providers/registry";
 import { knowledgePublicationStore } from "../lib/knowledge-publications";
 import { searchPublishedVector } from "../lib/vector-store";
-import { publishKnowledge } from "../lib/publish-knowledge";
+import { caseStore } from "../lib/case-store";
+import { bindingsForCase } from "../providers/contracts";
+import { requireTrustedCaseReadScope } from "../lib/trusted-run-scope";
 
 const bindingSchema = z.object({
   tenantId: z.string(),
@@ -20,7 +22,7 @@ export const searchSupportKnowledgeTool = createTool({
   inputSchema: z.object({
     queryText: z.string().min(1),
     topK: z.number().int().min(1).max(20).default(5),
-    binding: bindingSchema,
+    binding: bindingSchema.optional(),
   }),
   outputSchema: z.object({
     sources: z.array(
@@ -44,10 +46,31 @@ export const searchSupportKnowledgeTool = createTool({
     ),
   }),
   execute: async ({ queryText, topK, binding }) => {
-    const configured = resolveConfiguredBinding(binding);
-    // Bootstrap a serving generation only when this account has never been
-    // published. Subsequent searches never ask the provider directly.
-    await publishKnowledge(configured, { onlyIfMissing: true });
+    const scope = requireTrustedCaseReadScope();
+    const supportCase = await caseStore.get(scope.caseId);
+    if (!supportCase)
+      throw new Error(
+        "Knowledge read scope references a missing support case.",
+      );
+    const ownerId = (supportCase.metadata as Record<string, unknown>).ownerId;
+    const configured = resolveConfiguredBinding(
+      bindingsForCase(supportCase).knowledge,
+    );
+    if (ownerId !== scope.ownerId || configured.tenantId !== scope.tenantId)
+      throw new Error("Knowledge read scope does not match the durable case.");
+    if (
+      binding &&
+      (binding.tenantId !== configured.tenantId ||
+        binding.providerKind !== configured.providerKind ||
+        binding.providerAccountId !== configured.providerAccountId ||
+        binding.externalConversationId !== configured.externalConversationId)
+    )
+      throw new Error(
+        "Knowledge lookup binding does not match the durable case.",
+      );
+    // Search is never an initialization path. Publication/fixture changes are
+    // explicit trusted operations, and an unpublished account is insufficient
+    // evidence rather than a reason for an ordinary read to mutate state.
     const lexicalEvidence = await knowledgePublicationStore.search(
       configured,
       queryText,

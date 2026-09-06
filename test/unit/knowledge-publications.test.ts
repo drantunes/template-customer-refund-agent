@@ -1,5 +1,5 @@
 import { createClient } from "@libsql/client";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { KnowledgePublicationStore } from "../../src/mastra/lib/knowledge-publications";
 
 const binding = {
@@ -18,6 +18,7 @@ const document = (text: string, version: string) => ({
 });
 
 describe("knowledge publication generations", () => {
+  afterEach(() => vi.useRealTimers());
   it("serves only the activated tenant generation, keeps failures and stale writers from replacing it, and rolls back", async () => {
     const store = new KnowledgePublicationStore(
       createClient({ url: process.env.TURSO_DATABASE_URL! }),
@@ -91,5 +92,33 @@ describe("knowledge publication generations", () => {
         document("two", "v5"),
       ]),
     ).rejects.toThrow("conflicting source versions");
+  });
+
+  it("normalizes offset expiry instants and excludes evidence at the exact expiry boundary", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-05T22:00:00.000Z"));
+    const offsetBinding = {
+      ...binding,
+      tenantId: `offset-${crypto.randomUUID()}`,
+      providerAccountId: `offset-${crypto.randomUUID()}`,
+    };
+    const store = new KnowledgePublicationStore(
+      createClient({ url: process.env.TURSO_DATABASE_URL! }),
+    );
+    const candidate = await store.buildCandidate(offsetBinding, [
+      {
+        ...document("offset expiry", "offset-v1"),
+        expiresAt: "2026-09-06T03:00:00+03:00",
+      },
+    ]);
+    await store.activate(offsetBinding, candidate.generationId, {
+      generationId: undefined,
+      revision: 0,
+    });
+    expect((await store.search(offsetBinding, "offset", 1))[0]?.expiresAt).toBe(
+      "2026-09-06T00:00:00.000Z",
+    );
+    vi.setSystemTime(new Date("2026-09-06T00:00:00.000Z"));
+    expect(await store.search(offsetBinding, "offset", 1)).toEqual([]);
   });
 });

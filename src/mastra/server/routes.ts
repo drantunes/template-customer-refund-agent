@@ -7,6 +7,9 @@ import {
 import { resumeApprovedNativeTool } from "../providers/native-execution";
 import { reconcileApprovedRefundEffect } from "../runtime/local-runtime";
 import { REQUEST_APPROVAL_STEP_ID } from "../workflows/resolve-support-case";
+import { bindingsForCase } from "../providers/contracts";
+import { withTrustedCaseReadScope } from "../lib/trusted-run-scope";
+import { resourceIdForOwner, threadIdForCase } from "../domain/support-case";
 import { computeMonitoringSummary } from "../lib/monitoring";
 import type { CaseFeedback, SupportCase } from "../domain/support-case";
 import {
@@ -19,6 +22,8 @@ import {
   monitoringSummarySchema,
   mockEmailPayloadSchema,
   reindexResponseSchema,
+  supervisorExecutionRequestSchema,
+  supervisorExecutionResponseSchema,
   supportOpenApiDocument,
 } from "./contracts";
 import {
@@ -469,6 +474,88 @@ export const supportCaseDetailRoute = registerApiRoute(
       const current = caseScope(c, supportCase);
       if (current instanceof Response) return current;
       return c.json(scopedCaseDto(supportCase, current));
+    },
+  },
+);
+
+/** A tenant/case-qualified alternative to generic Studio agent execution.
+ * Generic built-in routes cannot establish this application's resource scope;
+ * this endpoint authenticates a staff user, checks the durable case, and gives
+ * the registered supervisor only read authority for that one case. */
+export const supportCaseSupervisorRoute = registerApiRoute(
+  "/support/cases/:caseId/supervisor",
+  {
+    method: "POST",
+    handler: async (c) => {
+      const current = requirePrincipal(c);
+      if (current instanceof Response) return current;
+      if (!hasRole(current, "support-agent") && !hasRole(current, "admin"))
+        return c.json(
+          errorResponseSchema.parse({ error: "Insufficient authority." }),
+          403,
+        );
+      const supportCase = await caseStore.get(c.req.param("caseId"));
+      if (!supportCase) return c.json({ error: "Case not found." }, 404);
+      if (!canAccessCase(current, supportCase))
+        return c.json(
+          errorResponseSchema.parse({ error: "Case access denied." }),
+          403,
+        );
+      let input: unknown;
+      try {
+        input = await c.req.json();
+      } catch {
+        return c.json(
+          errorResponseSchema.parse({ error: "Invalid supervisor request." }),
+          400,
+        );
+      }
+      const parsed = supervisorExecutionRequestSchema.safeParse(input);
+      if (!parsed.success)
+        return c.json(
+          errorResponseSchema.parse({ error: "Invalid supervisor request." }),
+          400,
+        );
+      const ownerId = (supportCase.metadata as Record<string, unknown>).ownerId;
+      if (typeof ownerId !== "string" || !ownerId)
+        return c.json(
+          errorResponseSchema.parse({ error: "Case has no verified owner." }),
+          409,
+        );
+      const binding = bindingsForCase(supportCase).support;
+      const result = await withTrustedCaseReadScope(
+        { caseId: supportCase.id, ownerId, tenantId: binding.tenantId },
+        () =>
+          c
+            .get("mastra")
+            .getAgent("supportSupervisorAgent")
+            .generate(
+              [
+                {
+                  role: "user",
+                  content: `Investigate this existing support case read-only. Case subject: ${supportCase.subject}. Customer: ${supportCase.customer.email}. Request: ${parsed.data.message}`,
+                },
+              ],
+              {
+                memory: {
+                  thread: threadIdForCase(supportCase.id, binding.tenantId),
+                  resource: resourceIdForOwner(ownerId, binding.tenantId),
+                },
+                requestContext: c.get("requestContext"),
+              },
+            ),
+      );
+      return c.json(
+        supervisorExecutionResponseSchema.parse({
+          text: result.text,
+          traceId: result.traceId,
+          toolNames: result.toolResults.map(
+            (entry) =>
+              (entry as { payload?: { toolName?: string } }).payload
+                ?.toolName ?? "unknown",
+          ),
+        }),
+      );
     },
   },
 );
@@ -994,6 +1081,7 @@ export const supportRoutes = [
   supportInboundRoute,
   supportCasesListRoute,
   supportCaseDetailRoute,
+  supportCaseSupervisorRoute,
   supportCaseApproveRoute,
   supportCaseRejectRoute,
   supportCaseFollowUpRoute,

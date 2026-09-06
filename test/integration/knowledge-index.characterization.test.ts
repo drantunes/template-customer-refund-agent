@@ -40,10 +40,57 @@ describe("support knowledge index", () => {
       };
     });
 
-    const [{ mastra }, { searchSupportKnowledgeTool }] = await Promise.all([
+    const [
+      { mastra },
+      { searchSupportKnowledgeTool },
+      { caseStore },
+      { withTrustedCaseReadScope },
+    ] = await Promise.all([
       import("../../src/mastra/index"),
       import("../../src/mastra/tools/search-support-knowledge"),
+      import("../../src/mastra/lib/case-store"),
+      import("../../src/mastra/lib/trusted-run-scope"),
     ]);
+    const caseId = `knowledge-read-${crypto.randomUUID()}`;
+    const readBinding = {
+      tenantId: "local-demo",
+      providerKind: "local" as const,
+      providerAccountId: "local-demo",
+      externalConversationId: "index-characterization",
+    };
+    await caseStore.acceptInbound(
+      {
+        id: caseId,
+        externalId: `knowledge-event-${crypto.randomUUID()}`,
+        source: "mock-email",
+        status: "new",
+        subject: "Knowledge read",
+        customer: { email: "alex@example.com" },
+        messages: [
+          {
+            id: `knowledge-message-${crypto.randomUUID()}`,
+            author: "customer",
+            authorName: "Alex",
+            body: "Please find policy evidence.",
+            createdAt: new Date().toISOString(),
+          },
+        ],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        metadata: {
+          ownerId: "customer-alex",
+          providerBinding: readBinding,
+          providerBindings: {
+            support: readBinding,
+            commerce: readBinding,
+            transactions: readBinding,
+            knowledge: readBinding,
+          },
+        },
+      },
+      `knowledge-event-${crypto.randomUUID()}`,
+      `knowledge-run-${crypto.randomUUID()}`,
+    );
     const run = await mastra
       .getWorkflow("indexSupportKnowledgeWorkflow")
       .createRun();
@@ -64,17 +111,36 @@ describe("support knowledge index", () => {
     expect(
       indexed.status === "success" && indexed.result.indexed,
     ).toBeGreaterThan(0);
-    const results = await searchSupportKnowledgeTool.execute({
-      queryText: "duplicate charge refund policy",
-      topK: 3,
-      binding: {
-        tenantId: "local-demo",
-        providerKind: "local",
-        providerAccountId: "local-demo",
-        externalConversationId: "test",
-      },
-    });
+    await expect(
+      searchSupportKnowledgeTool.execute({
+        queryText: "duplicate charge refund policy",
+        topK: 3,
+        binding: readBinding,
+      }),
+    ).rejects.toThrow("verified workflow turn scope");
+    const read = () =>
+      withTrustedCaseReadScope(
+        { caseId, ownerId: "customer-alex", tenantId: "local-demo" },
+        () =>
+          searchSupportKnowledgeTool.execute({
+            queryText: "duplicate charge refund policy",
+            topK: 3,
+            binding: readBinding,
+          }),
+      );
+    const results = await read();
     expect(results.sources).not.toHaveLength(0);
+    await expect(
+      withTrustedCaseReadScope(
+        { caseId, ownerId: "customer-alex", tenantId: "local-demo" },
+        () =>
+          searchSupportKnowledgeTool.execute({
+            queryText: "duplicate charge refund policy",
+            topK: 1,
+            binding: { ...readBinding, tenantId: "other-tenant" },
+          }),
+      ),
+    ).rejects.toThrow("does not match the durable case");
     expect(results.sources[0]?.metadata).toMatchObject({
       source: expect.any(String),
       generationId: expect.any(String),
@@ -83,6 +149,31 @@ describe("support knowledge index", () => {
       indexedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
     });
     const publishedGeneration = results.sources[0]!.metadata.generationId;
+    const { searchPublishedVector, vectorStore } =
+      await import("../../src/mastra/lib/vector-store");
+    const first = results.sources[0]!;
+    const query = vi.spyOn(vectorStore, "query").mockResolvedValue([
+      {
+        score: 1,
+        metadata: {
+          ...first.metadata,
+          tenantId: "local-demo",
+          // Preserve the selected generation and hash while altering content
+          // provenance: vector metadata is never serving authority.
+          title: "Tampered policy title",
+          text: first.document,
+        },
+      },
+    ] as never);
+    await expect(
+      searchPublishedVector(
+        readBinding,
+        publishedGeneration,
+        "duplicate charge refund policy",
+        1,
+      ),
+    ).rejects.toThrow("does not match the publication");
+    query.mockRestore();
     invalidEmbedding = true;
     const failed = await mastra
       .getWorkflow("indexSupportKnowledgeWorkflow")
@@ -101,16 +192,15 @@ describe("support knowledge index", () => {
       );
     expect(failed.status).toBe("failed");
     invalidEmbedding = false;
-    const preserved = await searchSupportKnowledgeTool.execute({
-      queryText: "duplicate charge refund policy",
-      topK: 1,
-      binding: {
-        tenantId: "local-demo",
-        providerKind: "local",
-        providerAccountId: "local-demo",
-        externalConversationId: "test-after-failure",
-      },
-    });
+    const preserved = await withTrustedCaseReadScope(
+      { caseId, ownerId: "customer-alex", tenantId: "local-demo" },
+      () =>
+        searchSupportKnowledgeTool.execute({
+          queryText: "duplicate charge refund policy",
+          topK: 1,
+          binding: readBinding,
+        }),
+    );
     expect(preserved.sources[0]?.metadata.generationId).toBe(
       publishedGeneration,
     );

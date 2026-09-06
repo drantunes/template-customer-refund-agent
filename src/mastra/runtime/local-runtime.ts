@@ -139,6 +139,16 @@ export class LocalRuntime
       } catch (error) {
         if (!String(error).includes("duplicate column")) throw error;
       }
+    // Phase 003 fixture rows predate applicability metadata. Only the known,
+    // versioned local fixture identities are migrated; unknown imported rows
+    // deliberately remain unpublished rather than receiving invented dates.
+    await this.client.batch(
+      POLICY_DOCUMENTS.map((document) => ({
+        sql: "UPDATE local_knowledge SET effective_at = '2026-01-01T00:00:00.000Z' WHERE source = ? AND title = ? AND text = ? AND version = 'local-v1' AND effective_at IS NULL",
+        args: [document.source, document.title, document.text],
+      })),
+      "write",
+    );
   }
   private assertLocalBinding(binding: ProviderBinding) {
     if (
@@ -898,6 +908,13 @@ export async function recoverLocalWorkflows(
         );
         continue;
       }
+      // Publication is a trusted worker responsibility, never a read-tool
+      // side effect. This preserves the ordinary search capability as a pure
+      // read while keeping the local quickstart operational after startup.
+      const { publishKnowledge } = await import("../lib/publish-knowledge");
+      await publishKnowledge(bindingsForPersistedCase(supportCase).knowledge, {
+        onlyIfMissing: true,
+      });
       const workflow = mastra.getWorkflow("resolveSupportCaseWorkflow");
       const existing = await workflow.getWorkflowRunById?.(dispatch.runId);
       if (

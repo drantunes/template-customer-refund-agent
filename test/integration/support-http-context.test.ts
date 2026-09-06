@@ -150,18 +150,10 @@ async function loadDeterministicRuntime() {
     usage: { inputTokens: 1, outputTokens: 1 },
     response: { modelId: "deterministic/response" },
   } as never);
-  vi.spyOn(searchSupportKnowledgeTool, "execute").mockResolvedValue({
-    sources: [
-      {
-        metadata: {
-          title: "Duplicate charge policy",
-          source: "duplicate-charge-policy",
-          text: "Synthetic policy evidence.",
-        },
-        score: 1,
-      },
-    ],
-  } as never);
+  // Keep the registered search implementation: the workflow must carry its
+  // trusted read scope and decision-time authoritative provenance checks.
+  // The spy still verifies RequestContext propagation below.
+  vi.spyOn(searchSupportKnowledgeTool, "execute");
   vi.spyOn(issueRefundTool, "execute");
   let refundModel: DeterministicRefundModel | undefined;
   const executionModel = async () => {
@@ -213,6 +205,10 @@ async function loadDeterministicRuntime() {
   app.post(
     "/support/cases/:caseId/feedback",
     routes.supportCaseFeedbackRoute.handler,
+  );
+  app.post(
+    "/support/cases/:caseId/supervisor",
+    routes.supportCaseSupervisorRoute.handler,
   );
   return {
     app,
@@ -880,5 +876,148 @@ describe("support workflow HTTP context propagation", () => {
     expect(
       approveNative.mock.calls[0]?.[0]?.requestContext?.getRaw("correlationId"),
     ).toBe("approval-correlation");
+  });
+
+  it("executes the registered supervisor through an authenticated case scope without mutating reachable domain state", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      mastra,
+    } = await loadDeterministicRuntime();
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `supervisor-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Duplicate charge",
+        body: "Please review order ORD-1001.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe(
+        "waiting_approval",
+      ),
+    );
+    let call = 0;
+    mastra.getAgent("supportSupervisorAgent").__updateModel({
+      model: {
+        specificationVersion: "v2",
+        provider: "phase004-test",
+        modelId: "trusted-supervisor",
+        supportedUrls: {},
+        async doGenerate() {
+          const tool = call++ === 0 ? "agent-triageAgent" : "lookup_order";
+          return call <= 2
+            ? {
+                content: [
+                  {
+                    type: "tool-call" as const,
+                    toolCallId: `supervisor-${call}`,
+                    toolName: tool,
+                    input: JSON.stringify(
+                      tool === "lookup_order"
+                        ? { orderId: "ORD-1001" }
+                        : { prompt: "Classify this case." },
+                    ),
+                  },
+                ],
+                finishReason: "tool-calls" as const,
+                usage: { inputTokens: 1, outputTokens: 1 },
+                warnings: [],
+              }
+            : {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: "I completed a read-only investigation; refund approval remains required.",
+                  },
+                ],
+                finishReason: "stop" as const,
+                usage: { inputTokens: 1, outputTokens: 1 },
+                warnings: [],
+              };
+        },
+        async doStream() {
+          throw new Error("deterministic test model only supports generate");
+        },
+      } as never,
+    });
+    const client = runtimeCaseStore.getClientForTests();
+    const counts = async () =>
+      client.execute(
+        "SELECT (SELECT COUNT(*) FROM support_cases) cases, (SELECT COUNT(*) FROM support_actions) actions, (SELECT COUNT(*) FROM support_outbox) outbox, (SELECT COUNT(*) FROM local_orders) orders, (SELECT COUNT(*) FROM local_knowledge) knowledge, (SELECT COUNT(*) FROM support_knowledge_generations) generations",
+      );
+    const before = JSON.stringify((await counts()).rows[0]);
+    const response = await app.request(
+      `http://support.test/support/cases/${caseId}/supervisor`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...supportAgentHeaders },
+        body: JSON.stringify({ message: "Inspect the order and classify it." }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      toolNames: ["agent-triageAgent", "lookup_order"],
+    });
+    expect(JSON.stringify((await counts()).rows[0])).toBe(before);
+    const denied = await app.request(
+      `http://support.test/support/cases/${caseId}/supervisor`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...otherTenantHeaders },
+        body: JSON.stringify({ message: "Inspect it." }),
+      },
+    );
+    expect(denied.status).toBe(403);
+  });
+
+  it("replaces unsupported refund prose before finalization and outbox delivery", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      responseAgent,
+    } = await loadDeterministicRuntime();
+    vi.mocked(responseAgent.generate).mockResolvedValueOnce({
+      object: {
+        draftResponse: "Your refund has already been issued.",
+        citedSources: [],
+        recommendRefund: true,
+        refundAmount: 49,
+        refundCurrency: "USD",
+        refundReason: "invented",
+        requiresEscalation: false,
+      },
+      usage: { inputTokens: 1, outputTokens: 1 },
+      response: { modelId: "deterministic/unsafe" },
+    } as never);
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `unsupported-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Refund request",
+        body: "Refund me.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("escalated"),
+    );
+    const supportCase = await runtimeCaseStore.get(caseId);
+    const outbox = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT body FROM support_outbox WHERE case_id = ?",
+      args: [caseId],
+    });
+    expect(supportCase?.finalResponse).toContain("specialist needs to review");
+    expect(supportCase?.finalResponse).not.toContain("already been issued");
+    expect(String(outbox.rows[0]?.body)).toBe(supportCase?.finalResponse);
+    const metadata = supportCase!.metadata as Record<string, unknown>;
+    expect(metadata.rejectedDraftForStaff).toMatchObject({
+      draftResponse: "Your refund has already been issued.",
+    });
   });
 });

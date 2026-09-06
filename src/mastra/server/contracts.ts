@@ -52,6 +52,14 @@ export const errorResponseSchema = z.object({ error: z.string() });
 export const reindexResponseSchema = z.object({
   indexed: z.number().int().nonnegative(),
 });
+export const supervisorExecutionRequestSchema = z.object({
+  message: z.string().min(1).max(10_000),
+});
+export const supervisorExecutionResponseSchema = z.object({
+  text: z.string(),
+  traceId: z.string().optional(),
+  toolNames: z.array(z.string()),
+});
 export const monitoringSummarySchema = z.object({
   generatedAt: z.iso.datetime(),
   casesConsidered: z.number().int().nonnegative(),
@@ -274,6 +282,35 @@ export const supportOpenApiDocument = {
             description: "Updated support case",
             content: {
               "application/json": { schema: jsonSchema(supportCaseSchema) },
+            },
+          },
+        },
+      },
+    },
+    "/support/cases/{caseId}/supervisor": {
+      post: {
+        parameters: [caseIdParameter],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: jsonSchema(supervisorExecutionRequestSchema),
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Authenticated read-only supervisor response",
+            content: {
+              "application/json": {
+                schema: jsonSchema(supervisorExecutionResponseSchema),
+              },
+            },
+          },
+          "400": {
+            description: "Invalid supervisor request",
+            content: {
+              "application/json": { schema: jsonSchema(errorResponseSchema) },
             },
           },
         },

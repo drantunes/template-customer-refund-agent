@@ -28,6 +28,9 @@ import {
   providerRegistry,
   resolveConfiguredBinding,
 } from "../providers/registry";
+import { knowledgePublicationStore } from "../lib/knowledge-publications";
+import { withTrustedCaseReadScope } from "../lib/trusted-run-scope";
+import { publishKnowledge } from "../lib/publish-knowledge";
 
 const caseIdSchema = z.object({ caseId: z.string(), turnId: z.string() });
 
@@ -137,14 +140,26 @@ const retrievePolicyStep = createStep({
       throw new Error(
         "Registered search_support_knowledge tool has no execute function.",
       );
+    // The operational workflow is a trusted publication boundary. It may
+    // establish the initial local generation; the read tool below never can.
+    await publishKnowledge(bindings.knowledge, { onlyIfMissing: true });
 
-    const result = await searchTool.execute(
+    const result = await withTrustedCaseReadScope(
       {
-        queryText,
-        topK: 5,
-        binding: resolveConfiguredBinding(bindings.knowledge),
+        caseId: supportCase.id,
+        ownerId: (supportCase.metadata as Record<string, unknown>)
+          .ownerId as string,
+        tenantId: bindings.knowledge.tenantId,
       },
-      { mastra, requestContext, tracingContext },
+      () =>
+        searchTool.execute!(
+          {
+            queryText,
+            topK: 5,
+            binding: resolveConfiguredBinding(bindings.knowledge),
+          },
+          { mastra, requestContext, tracingContext },
+        ),
     );
     const sources: Array<{
       metadata?: Record<string, unknown>;
@@ -231,6 +246,9 @@ const inspectOrderStep = createStep({
         "A registered commerce lookup tool has no execute function.",
       );
     }
+    // Fixture setup is an operational workflow concern. Read tools stay pure
+    // so a supervisor investigation cannot seed commerce state.
+    await ensureProviderFixtures(resolveConfiguredBinding(bindings.commerce));
     const executeOrder = orderTool.execute;
     const executeSubscription = subscriptionTool.execute;
     const executeRefundHistory = refundHistoryTool.execute;
@@ -351,16 +369,75 @@ const draftResponseStep = createStep({
       policyMatches.flatMap((entry) => [entry.title, entry.source]),
     );
     const missingEvidence = policyMatches.length === 0;
-    const invalidCitation = parsedDraft.citedSources.some(
-      (citation) => !validCitations.has(citation),
+    const requiresSupportingCitation =
+      parsedDraft.recommendRefund || !parsedDraft.requiresEscalation;
+    const invalidCitation =
+      (requiresSupportingCitation && parsedDraft.citedSources.length === 0) ||
+      parsedDraft.citedSources.some(
+        (citation) => !validCitations.has(citation),
+      );
+    // Retrieval is not a decision. Re-read the selected authoritative
+    // publication just before committing the draft so expiry, rollback, or a
+    // stale/tampered vector result cannot support a customer promise.
+    const applicableEvidence = await Promise.all(
+      parsedDraft.citedSources.map(async (citation) => {
+        const match = policyMatches.find(
+          (entry) => entry.title === citation || entry.source === citation,
+        );
+        if (
+          !match?.source ||
+          !match.documentHash ||
+          !match.generationId ||
+          !match.version ||
+          !match.effectiveAt ||
+          !match.indexedAt ||
+          !match.providerKind ||
+          !match.providerAccountId ||
+          match.providerKind !== bindings.knowledge.providerKind ||
+          match.providerAccountId !== bindings.knowledge.providerAccountId
+        )
+          return false;
+        try {
+          if (
+            (await knowledgePublicationStore.activeGeneration(
+              bindings.knowledge,
+            )) !== match.generationId
+          )
+            return false;
+          const authoritative = await knowledgePublicationStore.document(
+            bindings.knowledge,
+            match.generationId,
+            match.source,
+            match.documentHash,
+          );
+          const now = Date.now();
+          return Boolean(
+            authoritative &&
+            authoritative.title === match.title &&
+            authoritative.version === match.version &&
+            authoritative.effectiveAt === match.effectiveAt &&
+            authoritative.indexedAt === match.indexedAt &&
+            authoritative.expiresAt === match.expiresAt &&
+            Date.parse(authoritative.effectiveAt) <= now &&
+            (!authoritative.expiresAt ||
+              Date.parse(authoritative.expiresAt) > now),
+          );
+        } catch {
+          return false;
+        }
+      }),
     );
+    const staleOrUnauthoritativeEvidence =
+      requiresSupportingCitation && !applicableEvidence.every(Boolean);
     // A model cannot turn absent, stale, or conflicting evidence into an
     // executable promise. Preserve its text for staff review, but force the
     // durable case down the escalation path and suppress a refund proposal.
     const safeDraft =
-      missingEvidence || invalidCitation
+      missingEvidence || invalidCitation || staleOrUnauthoritativeEvidence
         ? {
             ...parsedDraft,
+            draftResponse:
+              "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
             recommendRefund: false,
             refundAmount: undefined,
             refundCurrency: undefined,
@@ -368,11 +445,22 @@ const draftResponseStep = createStep({
             requiresEscalation: true,
             escalationReason: missingEvidence
               ? "No published policy evidence was retrieved for this case."
-              : "Draft cited policy evidence that was not retrieved from the active generation.",
+              : "Draft lacks applicable evidence from the active publication.",
           }
         : parsedDraft;
     await caseStore.update(supportCase.id, {
       draft: safeDraft,
+      metadata:
+        missingEvidence || invalidCitation || staleOrUnauthoritativeEvidence
+          ? {
+              ...supportCase.metadata,
+              rejectedDraftForStaff: {
+                draftResponse: parsedDraft.draftResponse,
+                citedSources: parsedDraft.citedSources,
+                reason: safeDraft.escalationReason,
+              },
+            }
+          : supportCase.metadata,
       agentUsage: {
         inputTokens:
           (existingUsage?.inputTokens ?? 0) + (responseUsage.inputTokens ?? 0),

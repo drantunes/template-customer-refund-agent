@@ -4,7 +4,6 @@ import { moneyToLegacyAmount } from "../lib/money";
 import { caseStore } from "../lib/case-store";
 import { requireTrustedCommerceScope } from "../lib/trusted-run-scope";
 import {
-  ensureProviderFixtures,
   providerRegistry,
   resolveConfiguredBinding,
 } from "../providers/registry";
@@ -90,7 +89,6 @@ export const lookupOrderTool = createTool({
   execute: async ({ customerEmail, orderId, binding }) => {
     const scoped = await verifiedCommerceBinding(binding, customerEmail);
     const configured = scoped.configured;
-    await ensureProviderFixtures(configured);
     const order = await providerRegistry(configured)
       .commerce(configured)
       .findOrder(configured, scoped.customerEmail, orderId);
@@ -128,7 +126,6 @@ export const lookupSubscriptionTool = createTool({
   execute: async ({ customerEmail, binding }) => {
     const scoped = await verifiedCommerceBinding(binding, customerEmail);
     const configured = scoped.configured;
-    await ensureProviderFixtures(configured);
     const subscription = await providerRegistry(configured)
       .commerce(configured)
       .findSubscription(configured, scoped.customerEmail);
@@ -164,7 +161,6 @@ export const lookupCustomerRefundHistoryTool = createTool({
   execute: async ({ orderId, binding }) => {
     const scoped = await verifiedCommerceBinding(binding);
     const configured = scoped.configured;
-    await ensureProviderFixtures(configured);
     const order = await providerRegistry(configured)
       .commerce(configured)
       .findOrder(configured, scoped.customerEmail, orderId);
