@@ -99,8 +99,16 @@ function completeObservedCalls() {
 
 function completeObservedTurns() {
   return [
-    { turn: 1, answer: "Order ORD-1001 is fulfilled." },
-    { turn: 2, answer: "Order ORD-1001 remains fulfilled." },
+    {
+      turn: 1,
+      answer:
+        "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
+    },
+    {
+      turn: 2,
+      answer:
+        "Order ORD-1001 remains fulfilled; the earlier duplicate-charge review is unchanged.",
+    },
   ];
 }
 
@@ -934,10 +942,40 @@ describe("Phase 004 deterministic native evaluation", () => {
         },
         groundTruth: multiTurnTruth,
       });
+    const factualResponse =
+      "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.";
+    const scoreResolution = (draftResponse: string) =>
+      supportEvalScorerRegistry.resolutionQuality.run({
+        output: {
+          draftResponse,
+          order: completeObservedCalls()[1].result,
+          requiresEscalation: false,
+        },
+        groundTruth: truthForDatasetCase("resolution-quality", {
+          customerFacing: true,
+        }),
+      });
+    const scoreGroundedness = (draftResponse: string) =>
+      supportEvalScorerRegistry.groundedness.run({
+        output: {
+          draftResponse,
+          citedSources: ["Duplicate Charge Policy"],
+          order: completeObservedCalls()[1].result,
+        },
+        groundTruth: truthForDatasetCase("groundedness", {
+          requiresCitation: true,
+        }),
+      });
     await expect(scoreTool(completeObservedCalls())).resolves.toMatchObject({
       score: 1,
     });
     await expect(scoreTurns(completeObservedTurns())).resolves.toMatchObject({
+      score: 1,
+    });
+    await expect(scoreResolution(factualResponse)).resolves.toMatchObject({
+      score: 1,
+    });
+    await expect(scoreGroundedness(factualResponse)).resolves.toMatchObject({
       score: 1,
     });
     const rejectedToolMutations = [
@@ -985,16 +1023,37 @@ describe("Phase 004 deterministic native evaluation", () => {
       mutate(calls);
       await expect(scoreTool(calls)).resolves.toMatchObject({ score: 0 });
     }
-    for (const contradiction of [
+    const contradictoryResponses = [
       "Order ORD-1001 is fulfilled, but it was cancelled.",
       "Order ORD-1001 is fulfilled, but it is unfulfilled.",
       "Order ORD-1001 is fulfilled, but it is not fulfilled.",
       "Order ORD-1001 is fulfilled, but it is no longer fulfilled.",
       "Order ORD-1001 is fulfilled, but not fulfilled.",
-    ]) {
+      "Order ORD-1001 is fulfilled; actually its status is pending.",
+      "It is false that Order ORD-1001 is fulfilled.",
+      "Order ORD-1001 is fulfilled; it has never been fulfilled.",
+      `Please note: ${factualResponse}`,
+      `${factualResponse} Please contact support for more details.`,
+    ];
+    for (const contradiction of contradictoryResponses) {
       const turns = completeObservedTurns();
       turns[1].answer = contradiction;
       await expect(scoreTurns(turns)).resolves.toMatchObject({ score: 0 });
+      await expect(scoreResolution(contradiction)).resolves.toMatchObject({
+        score: 0,
+      });
+      await expect(scoreGroundedness(contradiction)).resolves.toMatchObject({
+        score: 0,
+      });
+      expect(
+        evaluateAssertionSemantics(
+          { customerFacing: true },
+          {
+            draft: { draftResponse: contradiction },
+            order: completeObservedCalls()[1].result,
+          },
+        ),
+      ).toEqual({ customerFacing: false });
     }
     for (const mutate of [
       (turns: ReturnType<typeof completeObservedTurns>) => {

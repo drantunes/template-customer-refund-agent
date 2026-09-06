@@ -146,11 +146,24 @@ describe("immutable eval reference records", () => {
       "Order ORD-1001 is fulfilled, but it is not fulfilled.",
       "Order ORD-1001 is fulfilled, but it is no longer fulfilled.",
       "Order ORD-1001 is fulfilled, but not fulfilled.",
+      "Order ORD-1001 is fulfilled; actually its status is pending.",
+      "It is false that Order ORD-1001 is fulfilled.",
+      "Order ORD-1001 is fulfilled; it has never been fulfilled.",
     ])
       mutate("follow-up-stays-scoped", (summary) => {
         (
           summary.modelOutputs as { turns: Array<{ answer: string }> }
         ).turns[1].answer = contradiction;
+      });
+    for (const contradiction of [
+      "Order ORD-1001 is fulfilled; actually its status is pending.",
+      "It is false that Order ORD-1001 is fulfilled.",
+      "Order ORD-1001 is fulfilled; it has never been fulfilled.",
+    ])
+      mutate("clear-resolution", (summary) => {
+        (
+          summary.modelOutputs as { draft: { draftResponse: string } }
+        ).draft.draftResponse = contradiction;
       });
     mutate("follow-up-stays-scoped", (summary) => {
       (

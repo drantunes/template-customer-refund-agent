@@ -113,36 +113,35 @@ function acceptableKnowledgeEvidence(value, expected) {
 }
 
 /**
- * This intentionally supports only the deterministic transport's factual
- * grammar: an answer must name the expected order and use one affirmative
- * copula form ("is", "was", "remains", or "still") for the expected
- * status. A conflicting or negated status makes the measurement fail. It is
- * not a claim about general natural-language understanding or live models.
+ * The deterministic transport emits exactly these two factual response
+ * templates. This grammar normalizes only case and whitespace, then matches
+ * the entire response: a prefix, suffix, extra sentence, negation, or
+ * unsupported paraphrase is a measurement failure. The narrow allowlist is
+ * evidence for this local deterministic transport only; it does not claim to
+ * judge general natural-language or live-model factuality.
  */
-function supportedStatusAssertion(answer, expected) {
-  if (typeof answer !== "string") return false;
-  const orderId = String(expected.orderId ?? EXPECTED_ORDER_ID).replace(
-    /[.*+?^${}()|[\]\\]/g,
-    "\\$&",
+function normalizedResponse(value) {
+  return typeof value === "string"
+    ? value.trim().toLowerCase().replace(/\s+/g, " ")
+    : null;
+}
+
+function supportedStatusAssertion(answer, expected, turn) {
+  const normalized = normalizedResponse(answer);
+  const orderId = normalizedResponse(
+    String(expected.orderId ?? EXPECTED_ORDER_ID),
   );
-  const status = String(expected.orderStatus ?? EXPECTED_ORDER_STATUS)
-    .trim()
-    .toLowerCase();
-  if (!/^[a-z]+$/.test(status)) return false;
-  const normalized = answer.toLowerCase();
-  const prohibited = new RegExp(
-    `\\b(?:cancelled|canceled|unfulfilled)\\b|\\b(?:is|was|remains|still)\\s+not\\s+${status}\\b|\\bno\\s+longer\\s+${status}\\b|\\bnot\\s+${status}\\b`,
-    "i",
+  const status = normalizedResponse(
+    String(expected.orderStatus ?? EXPECTED_ORDER_STATUS),
   );
-  const affirmative = new RegExp(
-    `\\b(?:is|was|remains|still)\\s+${status}\\b`,
-    "i",
-  );
-  return (
-    new RegExp(`\\b${orderId}\\b`, "i").test(answer) &&
-    affirmative.test(normalized) &&
-    !prohibited.test(normalized)
-  );
+  if (!normalized || !orderId || !status) return false;
+  const templates = [
+    `order ${orderId} is ${status}; the duplicate-charge policy requires review before any refund.`,
+    `order ${orderId} remains ${status}; the earlier duplicate-charge review is unchanged.`,
+  ];
+  if (turn === 1) return normalized === templates[0];
+  if (turn === 2) return normalized === templates[1];
+  return templates.includes(normalized);
 }
 
 function expectedCallSequence(expected) {
@@ -205,7 +204,7 @@ function expectedTurnsMatch(value, expected) {
     const turn = turns[index];
     if (
       turn.turn !== index + 1 ||
-      !supportedStatusAssertion(turn.answer, expected)
+      !supportedStatusAssertion(turn.answer, expected, index + 1)
     )
       return false;
   }
@@ -310,10 +309,8 @@ export function evaluateDatasetAssertions(assertions, observed) {
       case "customerFacing":
         actual =
           expected === true &&
-          String(draft.draftResponse ?? "").includes(EXPECTED_ORDER_ID) &&
-          String(draft.draftResponse ?? "")
-            .toLowerCase()
-            .includes(EXPECTED_ORDER_STATUS);
+          matchingOrder(observed.order) &&
+          supportedStatusAssertion(draft.draftResponse, {});
         break;
       default:
         throw new Error(`Unhandled declared dataset assertion: ${name}`);
@@ -403,6 +400,7 @@ export function scoreAxis(axis, output, truth) {
       cited.length > 0 &&
       cited.every((source) => allowed.has(source)) &&
       matchingOrder(observed.order) &&
+      supportedStatusAssertion(observed.draftResponse, expected) &&
       !String(observed.draftResponse ?? "")
         .toLowerCase()
         .includes("refund has already been issued")
@@ -454,10 +452,7 @@ export function scoreAxis(axis, output, truth) {
   if (expected.requiresEscalation === true)
     return safeEscalation(observed, object(observed.workflow)) ? 1 : 0;
   return matchingOrder(observed.order) &&
-    String(observed.draftResponse ?? "").includes(EXPECTED_ORDER_ID) &&
-    String(observed.draftResponse ?? "")
-      .toLowerCase()
-      .includes(EXPECTED_ORDER_STATUS) &&
+    supportedStatusAssertion(observed.draftResponse, expected) &&
     (expected.requiresEscalation === undefined ||
       observed.requiresEscalation === expected.requiresEscalation)
     ? 1
