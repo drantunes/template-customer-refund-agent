@@ -484,7 +484,38 @@ afterAll(async () => {
     },
     executionMode: "deterministic-scripted-transport",
     datasetHashes,
-    perCaseScores: results,
+    // The artifact proves what was observed without storing response prose or
+    // entire policy documents in a durable eval report. Hashes still make any
+    // evidence mutation visible through both the case and report hashes.
+    perCaseScores: results.map((result) => {
+      const evidence = result.evidence;
+      const sources = Array.isArray(evidence.retrievedSources)
+        ? evidence.retrievedSources.map((source) => {
+            const metadata = source as Record<string, unknown>;
+            return {
+              source: metadata.source,
+              documentHash: metadata.documentHash,
+              generationId: metadata.generationId,
+              effectiveAt: metadata.effectiveAt,
+              expiresAt: metadata.expiresAt,
+            };
+          })
+        : [];
+      const summary = {
+        triage: evidence.triage,
+        draft: evidence.draft,
+        sources,
+      };
+      return {
+        ...result,
+        evidence: {
+          evidenceHash: createHash("sha256")
+            .update(JSON.stringify(evidence))
+            .digest("hex"),
+          summary,
+        },
+      };
+    }),
     sixAxisScores: axes,
     costMicros: 0,
     pricing: "not-applicable-deterministic-transport",
