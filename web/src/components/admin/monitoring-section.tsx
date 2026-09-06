@@ -48,7 +48,7 @@ function formatMinutes(value: number | null): string {
   return `${(value / 60).toFixed(1)} hr`;
 }
 
-function OperationHealth({
+export function OperationHealth({
   title,
   entries,
 }: {

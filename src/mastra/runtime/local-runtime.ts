@@ -888,7 +888,7 @@ export async function recoverLocalWorkflows(
   const retryOperationalFailure = async (
     dispatch: DispatchRecord,
     error: unknown,
-  ) => {
+  ): Promise<"retried" | "escalate"> => {
     // This is the operational recovery path, not a dashboard-only
     // classification. Attempts are durably bounded by CaseStore at three.
     const disposition = classifyFailure({
@@ -897,15 +897,15 @@ export async function recoverLocalWorkflows(
       durationMs: 0,
       failed: true,
     });
-    return (
+    const retried =
       disposition === "retry" &&
       (await store.retryDispatch(
         dispatch.id,
         dispatch.caseId,
         error,
         dispatch.leaseToken,
-      ))
-    );
+      ));
+    return retried ? "retried" : "escalate";
   };
   let claimed = 0;
   while (claimed < limit) {
@@ -1030,13 +1030,17 @@ export async function recoverLocalWorkflows(
       );
       if (lostOwnership) break;
       if (result.status === "failed") {
-        if (await retryOperationalFailure(dispatch, "Workflow restart failed."))
-          continue;
+        const recovery = await retryOperationalFailure(
+          dispatch,
+          "Workflow restart failed.",
+        ).catch(() => "escalate" as const);
+        if (recovery === "retried") continue;
         await store.failDispatchAndCase(
           dispatch.id,
           dispatch.caseId,
           "Workflow restart failed.",
           dispatch.leaseToken,
+          "escalated",
         );
       } else
         await store.completeDispatch(
@@ -1047,16 +1051,17 @@ export async function recoverLocalWorkflows(
         );
     } catch (error) {
       if (!lostOwnership) {
-        const retried = await retryOperationalFailure(dispatch, error).catch(
-          () => false,
+        const recovery = await retryOperationalFailure(dispatch, error).catch(
+          () => "escalate" as const,
         );
-        if (!retried)
+        if (recovery !== "retried")
           await store
             .failDispatchAndCase(
               dispatch.id,
               dispatch.caseId,
               error,
               dispatch.leaseToken,
+              "escalated",
             )
             .catch(() => undefined);
       }

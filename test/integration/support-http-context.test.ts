@@ -829,6 +829,31 @@ describe("support workflow HTTP context propagation", () => {
       vi.mocked(searchSupportKnowledgeTool.execute).mock.calls[0]?.[1]
         ?.tracingContext,
     ).toBeDefined();
+    const caseTraceId = (await runtimeCaseStore.get(caseId))?.traceId;
+    expect(caseTraceId).toBeTruthy();
+    await mastra.observability.flush();
+    const observability = (await mastra
+      .getStorage()
+      ?.getStore("observability")) as {
+      getTrace(args: { traceId: string }): Promise<{
+        spans: Array<{ metadata?: Record<string, unknown> }>;
+      } | null>;
+    };
+    const trace = await observability.getTrace({ traceId: caseTraceId! });
+    const operationalNames = trace!.spans
+      .filter(
+        (span) =>
+          span.metadata?.operationalKind === "tool" ||
+          span.metadata?.operationalKind === "provider",
+      )
+      .map((span) => String(span.metadata?.operation));
+    expect(operationalNames).toEqual(
+      expect.arrayContaining([
+        "tool.search_support_knowledge",
+        "tool.lookup_order",
+        "commerce.find_order",
+      ]),
+    );
 
     const approveNative = vi.spyOn(
       mastra.getAgent("refundExecutionAgent"),
@@ -1019,5 +1044,134 @@ describe("support workflow HTTP context propagation", () => {
     expect(metadata.rejectedDraftForStaff).toMatchObject({
       draftResponse: "Your refund has already been issued.",
     });
+  });
+
+  it("authorizes delayed response feedback and retains two turn-bound ratings through export failure and reopen", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      mastra,
+    } = await loadDeterministicRuntime();
+    const caseId = `feedback-history-${crypto.randomUUID()}`;
+    const binding = {
+      tenantId: "local-demo",
+      providerKind: "local" as const,
+      providerAccountId: "local-demo",
+      externalConversationId: `feedback-history-conversation-${caseId}`,
+    };
+    const createdAt = new Date().toISOString();
+    await runtimeCaseStore.acceptInbound(
+      {
+        id: caseId,
+        externalId: `feedback-history-event-${caseId}`,
+        source: "mock-email",
+        customer: { email: "alex@example.com" },
+        subject: "Feedback history",
+        messages: [
+          {
+            id: `feedback-history-message-${caseId}`,
+            author: "customer",
+            body: "Please resolve this request.",
+            createdAt,
+          },
+        ],
+        status: "new",
+        createdAt,
+        updatedAt: createdAt,
+        metadata: { ownerId: "customer-alex", providerBinding: binding },
+      },
+      `feedback-history-event-${caseId}`,
+      "feedback-history-run-a",
+    );
+    const firstTurn = (await runtimeCaseStore.turns(caseId))[0]!;
+    const current = await runtimeCaseStore.get(caseId);
+    await runtimeCaseStore.update(caseId, {
+      status: "resolved",
+      metadata: { ...current!.metadata, activeTurnId: firstTurn.id },
+    });
+    await runtimeCaseStore.getClientForTests().execute({
+      sql: "UPDATE support_turns SET state = 'resolved', outcome_data = ? WHERE id = ? AND case_id = ?",
+      args: [
+        JSON.stringify({ telemetry: { traceId: "feedback-trace-a" } }),
+        firstTurn.id,
+        caseId,
+      ],
+    });
+    const second = await runtimeCaseStore.appendFollowUp({
+      caseId,
+      eventId: `feedback-history-follow-up-${caseId}`,
+      runId: "feedback-history-run-b",
+      expectedOwnerId: "customer-alex",
+      message: {
+        id: `feedback-history-follow-up-message-${caseId}`,
+        author: "customer",
+        body: "A second completed response.",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    const secondTurn = await runtimeCaseStore.turn(caseId, second.turnId!);
+    await runtimeCaseStore.getClientForTests().execute({
+      sql: "UPDATE support_turns SET state = 'resolved', outcome_data = ? WHERE id = ? AND case_id = ?",
+      args: [
+        JSON.stringify({ telemetry: { traceId: "feedback-trace-b" } }),
+        secondTurn!.id,
+        caseId,
+      ],
+    });
+    vi.spyOn(mastra.observability, "addFeedback").mockRejectedValue(
+      new Error("synthetic observability export failure"),
+    );
+
+    const delayed = await app.request(
+      `http://support.test/support/cases/${caseId}/feedback`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...customerHeaders },
+        body: JSON.stringify({
+          rating: "up",
+          comment: "This was for the original response.",
+          responseMessageId: `msg_${caseId}_${firstTurn.id}_final`,
+        }),
+      },
+    );
+    expect(delayed.status).toBe(200);
+    const currentTurn = await app.request(
+      `http://support.test/support/cases/${caseId}/feedback`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...customerHeaders },
+        body: JSON.stringify({
+          rating: "down",
+          comment: "This was for the new response.",
+          responseMessageId: `msg_${caseId}_${secondTurn!.id}_final`,
+        }),
+      },
+    );
+    expect(currentTurn.status).toBe(200);
+    expect(vi.mocked(mastra.observability.addFeedback)).toHaveBeenCalledTimes(
+      2,
+    );
+    expect(await runtimeCaseStore.feedback([caseId])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          feedback: expect.objectContaining({
+            turnId: firstTurn.id,
+            runId: "feedback-history-run-a",
+            traceId: "feedback-trace-a",
+          }),
+        }),
+        expect.objectContaining({
+          feedback: expect.objectContaining({
+            turnId: secondTurn!.id,
+            runId: "feedback-history-run-b",
+            traceId: "feedback-trace-b",
+          }),
+        }),
+      ]),
+    );
+    const { CaseStore } = await import("../../src/mastra/lib/case-store");
+    const reopened = new CaseStore({ url: process.env.TURSO_DATABASE_URL! });
+    expect(await reopened.feedback([caseId])).toHaveLength(2);
+    await reopened.close();
   });
 });

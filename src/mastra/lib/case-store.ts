@@ -1675,6 +1675,7 @@ export class CaseStore {
     caseId: string,
     error: unknown,
     leaseToken?: string,
+    terminalStatus: "failed" | "escalated" = "failed",
   ) {
     await this.ensured();
     const tx = await this.client.transaction("write");
@@ -1697,10 +1698,11 @@ export class CaseStore {
         ? parse(caseRow.rows[0] as Record<string, unknown>)
         : undefined;
       await tx.execute({
-        sql: "UPDATE support_turns SET state = 'failed', outcome_data = json_patch(COALESCE(outcome_data, '{}'), ?), updated_at = ? WHERE id = (SELECT turn_id FROM support_dispatch WHERE id = ?) AND case_id = ?",
+        sql: "UPDATE support_turns SET state = ?, outcome_data = json_patch(COALESCE(outcome_data, '{}'), ?), updated_at = ? WHERE id = (SELECT turn_id FROM support_dispatch WHERE id = ?) AND case_id = ?",
         args: [
+          terminalStatus,
           JSON.stringify({
-            status: "failed",
+            status: terminalStatus,
             triage: current?.triage,
             policyMatches: current?.policyMatches,
             orderLookup: current?.orderLookup,
@@ -1712,6 +1714,14 @@ export class CaseStore {
             finalResponse: current?.finalResponse,
             escalationReason: String(error),
             workflowRunId: current?.workflowRunId,
+            ...(terminalStatus === "escalated"
+              ? {
+                  operationalFailure: {
+                    disposition: "escalate",
+                    recordedAt: now(),
+                  },
+                }
+              : {}),
           }),
           now(),
           id,
@@ -1721,9 +1731,9 @@ export class CaseStore {
       if (caseRow.rows[0] && current) {
         const updated = this.withBindings({
           ...current,
-          status: "failed" as const,
+          status: terminalStatus,
           escalationReason: String(error),
-          metadata: { ...current.metadata, workflowStatus: "failed" },
+          metadata: { ...current.metadata, workflowStatus: terminalStatus },
           updatedAt: now(),
         });
         const write = await tx.execute({

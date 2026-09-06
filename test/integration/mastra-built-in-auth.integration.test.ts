@@ -270,4 +270,168 @@ describe("configured Mastra built-in API authorization", () => {
       usage: { inputTokens: 1, outputTokens: 1 },
     });
   });
+
+  it("aggregates native cost contexts and real delayed and failed provider-port spans", async () => {
+    const { mastra } = await configuredServer();
+    const { caseStore } = await import("../../src/mastra/lib/case-store");
+    const { computeMonitoringSummary } =
+      await import("../../src/mastra/lib/monitoring");
+    const { defaultLocalBinding, deliverOutbox, localRuntime } =
+      await import("../../src/mastra/runtime/local-runtime");
+    const binding = defaultLocalBinding("operational-span-conversation");
+    await localRuntime.seed(binding);
+    const observability = mastra.observability.getSelectedInstance({})!;
+    const root = observability.startSpan({
+      name: "phase004-operational-test",
+      type: SpanType.WORKFLOW_RUN,
+    });
+    const createdAt = new Date().toISOString();
+    const makeCase = (id: string) => ({
+      id,
+      externalId: id,
+      source: "mock-email" as const,
+      customer: { email: "alex@example.com" },
+      subject: "Operational span fixture",
+      messages: [],
+      status: "resolved" as const,
+      createdAt,
+      updatedAt: createdAt,
+      traceId: root.traceId,
+      metadata: { ownerId: "customer-alex", providerBinding: binding },
+    });
+    const slowCase = makeCase("operational-span-slow");
+    const failingCase = makeCase("operational-span-failure");
+    await caseStore.create(slowCase);
+    await caseStore.create(failingCase);
+    await caseStore.enqueueDelivery({
+      id: "operational-span-slow-outbox",
+      caseId: slowCase.id,
+      binding,
+      body: "slow synthetic delivery",
+      status: "resolved",
+    });
+    await caseStore.enqueueDelivery({
+      id: "operational-span-failure-outbox",
+      caseId: failingCase.id,
+      binding,
+      body: "failing synthetic delivery",
+      status: "resolved",
+    });
+    const support = localRuntime.support(binding);
+    const registry = {
+      support: () => ({
+        kind: "local" as const,
+        normalizeInbound: support.normalizeInbound.bind(support),
+        addInternalNote: support.addInternalNote.bind(support),
+        updateStatus: support.updateStatus.bind(support),
+        deliver: async (...args: Parameters<typeof support.deliver>) => {
+          if (args[3] === "operational-span-failure-outbox")
+            throw new Error("synthetic provider failure");
+          await new Promise<void>((resolve) => setTimeout(resolve, 15));
+          return support.deliver(...args);
+        },
+      }),
+      commerce: localRuntime.commerce.bind(localRuntime),
+      transactions: localRuntime.transactions.bind(localRuntime),
+      knowledge: localRuntime.knowledge.bind(localRuntime),
+    };
+    await deliverOutbox(registry, 10, caseStore, {
+      mastra,
+      tracingContext: { currentSpan: root },
+    });
+
+    const knownCost = root.createChildSpan({
+      name: "known-native-cost",
+      type: SpanType.MODEL_GENERATION,
+      attributes: {
+        model: "native-known",
+        usage: { inputTokens: 3, outputTokens: 2 },
+        costContext: { estimatedCost: 0.000123, costUnit: "usd" },
+      },
+    });
+    knownCost.end();
+    const unknownCost = root.createChildSpan({
+      name: "unknown-native-cost",
+      type: SpanType.MODEL_GENERATION,
+      attributes: {
+        model: "native-unknown",
+        usage: { inputTokens: 4, outputTokens: 1 },
+        costContext: { estimatedCost: 7, costUnit: "credits" },
+      },
+    });
+    unknownCost.end();
+    root.end();
+    await mastra.observability.flush();
+
+    const summary = await computeMonitoringSummary(mastra, binding.tenantId);
+    expect(summary.telemetry.providerCalls).toContainEqual({
+      operation: "support.deliver",
+      calls: 2,
+      errorRate: 0.5,
+      p95Ms: expect.any(Number),
+    });
+    expect(
+      summary.telemetry.providerCalls.find(
+        (item) => item.operation === "support.deliver",
+      )?.p95Ms,
+    ).toBeGreaterThanOrEqual(10);
+    expect(summary.telemetry.modelUsage).toContainEqual({
+      model: "native-known",
+      inputTokens: 3,
+      outputTokens: 2,
+      estimatedCostMicrosUsd: 123,
+    });
+    expect(summary.telemetry.modelUsage).toContainEqual({
+      model: "native-unknown",
+      inputTokens: 4,
+      outputTokens: 1,
+      estimatedCostMicrosUsd: null,
+    });
+    expect(summary.telemetry.unavailable).toContain("partial-model-cost");
+  });
+
+  it("keeps tenant domain metrics available when a trusted trace read fails", async () => {
+    const { mastra, server } = await configuredServer();
+    const { caseStore } = await import("../../src/mastra/lib/case-store");
+    const { defaultLocalBinding } =
+      await import("../../src/mastra/runtime/local-runtime");
+    const binding = defaultLocalBinding("partial-trace-read");
+    const createdAt = new Date().toISOString();
+    await caseStore.create({
+      id: "partial-trace-read-case",
+      externalId: "partial-trace-read-event",
+      source: "mock-email",
+      customer: { email: "alex@example.com" },
+      subject: "Trace retention fixture",
+      messages: [],
+      status: "resolved",
+      createdAt,
+      updatedAt: createdAt,
+      traceId: "missing-or-unreadable-trace",
+      metadata: { ownerId: "customer-alex", providerBinding: binding },
+    });
+    const storage = (await mastra.getStorage()!.getStore("observability")) as {
+      getTrace(args: { traceId: string }): Promise<unknown>;
+    };
+    vi.spyOn(storage, "getTrace").mockRejectedValueOnce(
+      new Error("synthetic retained-trace read failure"),
+    );
+    const response = await server.request(
+      "http://support.test/support/monitoring/summary",
+      {
+        headers: {
+          authorization: `Bearer ${issueLocalSession({ id: "admin-demo" })}`,
+        },
+      },
+    );
+    expect(response.status).toBe(200);
+    const summary = (await response.json()) as {
+      casesConsidered: number;
+      funnel: { resolved: number };
+      telemetry: { unavailable: string[] };
+    };
+    expect(summary.casesConsidered).toBe(1);
+    expect(summary.funnel.resolved).toBe(1);
+    expect(summary.telemetry.unavailable).toContain("partial-trace-read");
+  });
 });

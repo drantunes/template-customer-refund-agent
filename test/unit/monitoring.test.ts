@@ -24,13 +24,28 @@ function fixture(id: string): SupportCase {
 afterEach(() => vi.restoreAllMocks());
 
 describe("monitoring aggregates", () => {
-  it("uses immutable turn outcomes and separate exact currency totals", async () => {
+  it("separates pending recommendations, durable refund failures, and later workflow failures", async () => {
     const supportCase = fixture("case-1");
+    supportCase.status = "waiting_approval";
+    supportCase.draft = {
+      draftResponse: "Pending staff approval.",
+      citedSources: ["duplicate-charge-policy"],
+      recommendRefund: true,
+      requiresEscalation: false,
+    };
+    supportCase.metadata.activeTurnId = "turn-pending";
     vi.spyOn(caseStore, "turns").mockResolvedValue([
+      {
+        id: "turn-pending",
+        eventId: "event-pending",
+        sequence: 1,
+        state: "waiting_approval",
+        outcome: { telemetry: { traceId: "pending-trace" } },
+      },
       {
         id: "turn-usd",
         eventId: "event-usd",
-        sequence: 1,
+        sequence: 2,
         state: "resolved",
         outcome: {
           draft: { recommendRefund: true },
@@ -45,7 +60,7 @@ describe("monitoring aggregates", () => {
       {
         id: "turn-eur",
         eventId: "event-eur",
-        sequence: 2,
+        sequence: 3,
         state: "failed",
         outcome: {
           draft: { recommendRefund: true },
@@ -57,22 +72,46 @@ describe("monitoring aggregates", () => {
           },
         },
       },
+      {
+        id: "turn-provider-failure",
+        eventId: "event-provider-failure",
+        sequence: 4,
+        state: "failed",
+        outcome: {
+          draft: { recommendRefund: true },
+          refundResult: {
+            amount: 12,
+            currency: "USD",
+            status: "failed",
+            idempotencyKey: "failed-provider-effect",
+          },
+        },
+      },
     ]);
     vi.spyOn(caseStore, "monitoringDecisions").mockResolvedValue([
       { caseId: supportCase.id, turnId: "turn-usd", approved: true },
       { caseId: supportCase.id, turnId: "turn-eur", approved: false },
+      {
+        caseId: supportCase.id,
+        turnId: "turn-provider-failure",
+        approved: true,
+      },
     ]);
+    // Financial failure is a durable provider action, rather than a failed
+    // workflow/delivery turn. The executed EUR effect above is intentionally
+    // on a failed turn and must not add to this count.
+    vi.spyOn(caseStore, "monitoringFinancialFailures").mockResolvedValue(1);
 
     await expect(computeRefundApprovalMetrics([supportCase])).resolves.toEqual({
-      recommended: 2,
-      approved: 1,
+      recommended: 4,
+      approved: 2,
       rejected: 1,
       executed: 2,
       // A successful financial provider effect remains executed even if a
       // later workflow/delivery stage fails.
-      failed: 0,
+      failed: 1,
       autoEscalated: 0,
-      approvalRate: 0.5,
+      approvalRate: 2 / 3,
       executedTotals: [
         { currency: "EUR", minor: 1050 },
         { currency: "USD", minor: 2001 },
