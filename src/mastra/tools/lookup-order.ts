@@ -3,8 +3,8 @@ import { z } from "zod";
 import { moneyToLegacyAmount } from "../lib/money";
 import { caseStore } from "../lib/case-store";
 import { requireTrustedCommerceScope } from "../lib/trusted-run-scope";
+import { traceOperationalPort } from "../lib/operational-spans";
 import {
-  ensureProviderFixtures,
   providerRegistry,
   resolveConfiguredBinding,
 } from "../providers/registry";
@@ -87,13 +87,19 @@ export const lookupOrderTool = createTool({
     binding: bindingSchema,
   }),
   outputSchema: z.object({ found: z.boolean(), order: orderSchema.optional() }),
-  execute: async ({ customerEmail, orderId, binding }) => {
+  execute: async ({ customerEmail, orderId, binding }, context) => {
     const scoped = await verifiedCommerceBinding(binding, customerEmail);
     const configured = scoped.configured;
-    await ensureProviderFixtures(configured);
-    const order = await providerRegistry(configured)
-      .commerce(configured)
-      .findOrder(configured, scoped.customerEmail, orderId);
+    const order = await traceOperationalPort({
+      mastra: context?.mastra,
+      tracingContext: context?.tracingContext,
+      kind: "provider",
+      operation: "commerce.find_order",
+      run: () =>
+        providerRegistry(configured)
+          .commerce(configured)
+          .findOrder(configured, scoped.customerEmail, orderId),
+    });
     return order
       ? {
           found: true,
@@ -125,13 +131,19 @@ export const lookupSubscriptionTool = createTool({
       })
       .optional(),
   }),
-  execute: async ({ customerEmail, binding }) => {
+  execute: async ({ customerEmail, binding }, context) => {
     const scoped = await verifiedCommerceBinding(binding, customerEmail);
     const configured = scoped.configured;
-    await ensureProviderFixtures(configured);
-    const subscription = await providerRegistry(configured)
-      .commerce(configured)
-      .findSubscription(configured, scoped.customerEmail);
+    const subscription = await traceOperationalPort({
+      mastra: context?.mastra,
+      tracingContext: context?.tracingContext,
+      kind: "provider",
+      operation: "commerce.find_subscription",
+      run: () =>
+        providerRegistry(configured)
+          .commerce(configured)
+          .findSubscription(configured, scoped.customerEmail),
+    });
     return subscription
       ? {
           found: true,
@@ -161,20 +173,33 @@ export const lookupCustomerRefundHistoryTool = createTool({
       }),
     ),
   }),
-  execute: async ({ orderId, binding }) => {
+  execute: async ({ orderId, binding }, context) => {
     const scoped = await verifiedCommerceBinding(binding);
     const configured = scoped.configured;
-    await ensureProviderFixtures(configured);
-    const order = await providerRegistry(configured)
-      .commerce(configured)
-      .findOrder(configured, scoped.customerEmail, orderId);
+    const order = await traceOperationalPort({
+      mastra: context?.mastra,
+      tracingContext: context?.tracingContext,
+      kind: "provider",
+      operation: "commerce.find_order",
+      run: () =>
+        providerRegistry(configured)
+          .commerce(configured)
+          .findOrder(configured, scoped.customerEmail, orderId),
+    });
     if (!order)
       throw new Error(
         "Refund history order is outside the verified case owner scope.",
       );
-    const refunds = await providerRegistry(configured)
-      .commerce(configured)
-      .refunds(configured, orderId);
+    const refunds = await traceOperationalPort({
+      mastra: context?.mastra,
+      tracingContext: context?.tracingContext,
+      kind: "provider",
+      operation: "commerce.list_refunds",
+      run: () =>
+        providerRegistry(configured)
+          .commerce(configured)
+          .refunds(configured, orderId),
+    });
     return {
       refunds: refunds.map((refund) => ({
         ...refund,

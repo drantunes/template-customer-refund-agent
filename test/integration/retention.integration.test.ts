@@ -615,6 +615,27 @@ describe("DEC-015 retention", () => {
         old,
       ],
     });
+    await client.execute({
+      sql: "INSERT INTO support_feedback(id, case_id, turn_id, actor_id, data, created_at, dedupe_key, attribution_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      args: [
+        "cli-retention-feedback",
+        "cli-retention-case",
+        "cli-retention-turn",
+        "synthetic-retention-actor",
+        JSON.stringify({
+          rating: "down",
+          comment: "SYNTHETIC-DURABLE-FEEDBACK-003",
+          actorId: "synthetic-retention-actor",
+          turnId: "cli-retention-turn",
+          runId: "cli-retention-run",
+          traceId: "cli-retention-trace",
+          submittedAt: old,
+        }),
+        old,
+        "down",
+        "known",
+      ],
+    });
     await store.close();
     const { stdout } = await execFileAsync(
       process.execPath,
@@ -630,10 +651,11 @@ describe("DEC-015 retention", () => {
       },
     );
     const output = JSON.parse(stdout) as {
-      cases: { casesRedacted: number };
+      cases: { casesRedacted: number; feedbackDeleted: number };
       snapshotsDeleted: string[];
     };
     expect(output.cases.casesRedacted).toBe(1);
+    expect(output.cases.feedbackDeleted).toBe(1);
     expect(output.snapshotsDeleted).toEqual([
       "ingest-support-case:cli-ingress-storage-uuid",
     ]);
@@ -641,6 +663,12 @@ describe("DEC-015 retention", () => {
     expect(
       JSON.stringify(await reopened.get("cli-retention-case")),
     ).not.toContain("cli terminal approval marker");
+    expect(
+      await reopened.getClientForTests().execute({
+        sql: "SELECT COUNT(*) AS count FROM support_feedback WHERE case_id = ?",
+        args: ["cli-retention-case"],
+      }),
+    ).toMatchObject({ rows: [{ count: 0 }] });
     await reopened.close();
     const repeated = await execFileAsync(
       process.execPath,
@@ -655,7 +683,10 @@ describe("DEC-015 retention", () => {
         },
       },
     );
-    expect(JSON.parse(repeated.stdout).cases.casesRedacted).toBe(0);
+    expect(JSON.parse(repeated.stdout).cases).toMatchObject({
+      casesRedacted: 0,
+      feedbackDeleted: 0,
+    });
   });
 
   it("upgrades populated v6/v7 turn history through v9 and refuses every unsupported downgrade without mutation", async () => {

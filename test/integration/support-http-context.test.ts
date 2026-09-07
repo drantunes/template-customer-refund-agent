@@ -150,18 +150,10 @@ async function loadDeterministicRuntime() {
     usage: { inputTokens: 1, outputTokens: 1 },
     response: { modelId: "deterministic/response" },
   } as never);
-  vi.spyOn(searchSupportKnowledgeTool, "execute").mockResolvedValue({
-    sources: [
-      {
-        metadata: {
-          title: "Duplicate charge policy",
-          source: "duplicate-charge-policy",
-          text: "Synthetic policy evidence.",
-        },
-        score: 1,
-      },
-    ],
-  } as never);
+  // Keep the registered search implementation: the workflow must carry its
+  // trusted read scope and decision-time authoritative provenance checks.
+  // The spy still verifies RequestContext propagation below.
+  vi.spyOn(searchSupportKnowledgeTool, "execute");
   vi.spyOn(issueRefundTool, "execute");
   let refundModel: DeterministicRefundModel | undefined;
   const executionModel = async () => {
@@ -207,12 +199,20 @@ async function loadDeterministicRuntime() {
     routes.supportCaseApproveRoute.handler,
   );
   app.post(
+    "/support/cases/:caseId/reject",
+    routes.supportCaseRejectRoute.handler,
+  );
+  app.post(
     "/support/cases/:caseId/follow-ups",
     routes.supportCaseFollowUpRoute.handler,
   );
   app.post(
     "/support/cases/:caseId/feedback",
     routes.supportCaseFeedbackRoute.handler,
+  );
+  app.post(
+    "/support/cases/:caseId/supervisor",
+    routes.supportCaseSupervisorRoute.handler,
   );
   return {
     app,
@@ -234,6 +234,7 @@ afterEach(async () => {
     closeSharedClients.splice(0).map((close) => close()),
   );
   vi.restoreAllMocks();
+  vi.useRealTimers();
   vi.doUnmock("../../src/mastra/evals");
   vi.doUnmock("@mastra/core/llm");
   await Promise.all(
@@ -783,6 +784,21 @@ describe("support workflow HTTP context propagation", () => {
     await vi.waitFor(async () =>
       expect((await runtimeCaseStore.get(id))?.status).toBe("resolved"),
     );
+    const recovered = (await runtimeCaseStore.get(id))!;
+    const outbox = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT body, state FROM support_outbox WHERE case_id = ?",
+      args: [id],
+    });
+    expect(recovered.refundResult).toMatchObject({
+      orderId: "ORD-1001",
+      amount: 49,
+      currency: "USD",
+    });
+    expect(recovered.finalResponse).toBe(
+      "Your refund of 49 USD has been issued.",
+    );
+    expect(String(outbox.rows[0]?.body)).toBe(recovered.finalResponse);
+    expect(outbox.rows[0]?.state).toBe("delivered");
   });
 
   it("passes the Hono RequestContext from inbound and approval requests to specialists and registered tools", async () => {
@@ -833,6 +849,31 @@ describe("support workflow HTTP context propagation", () => {
       vi.mocked(searchSupportKnowledgeTool.execute).mock.calls[0]?.[1]
         ?.tracingContext,
     ).toBeDefined();
+    const caseTraceId = (await runtimeCaseStore.get(caseId))?.traceId;
+    expect(caseTraceId).toBeTruthy();
+    await mastra.observability.flush();
+    const observability = (await mastra
+      .getStorage()
+      ?.getStore("observability")) as {
+      getTrace(args: { traceId: string }): Promise<{
+        spans: Array<{ metadata?: Record<string, unknown> }>;
+      } | null>;
+    };
+    const trace = await observability.getTrace({ traceId: caseTraceId! });
+    const operationalNames = trace!.spans
+      .filter(
+        (span) =>
+          span.metadata?.operationalKind === "tool" ||
+          span.metadata?.operationalKind === "provider",
+      )
+      .map((span) => String(span.metadata?.operation));
+    expect(operationalNames).toEqual(
+      expect.arrayContaining([
+        "tool.search_support_knowledge",
+        "tool.lookup_order",
+        "commerce.find_order",
+      ]),
+    );
 
     const approveNative = vi.spyOn(
       mastra.getAgent("refundExecutionAgent"),
@@ -880,5 +921,1009 @@ describe("support workflow HTTP context propagation", () => {
     expect(
       approveNative.mock.calls[0]?.[0]?.requestContext?.getRaw("correlationId"),
     ).toBe("approval-correlation");
+  });
+
+  it("executes the registered supervisor through an authenticated case scope without mutating reachable domain state", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      mastra,
+    } = await loadDeterministicRuntime();
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `supervisor-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Duplicate charge",
+        body: "Please review order ORD-1001.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe(
+        "waiting_approval",
+      ),
+    );
+    let call = 0;
+    mastra.getAgent("supportSupervisorAgent").__updateModel({
+      model: {
+        specificationVersion: "v2",
+        provider: "phase004-test",
+        modelId: "trusted-supervisor",
+        supportedUrls: {},
+        async doGenerate() {
+          const tool = call++ === 0 ? "agent-triageAgent" : "lookup_order";
+          return call <= 2
+            ? {
+                content: [
+                  {
+                    type: "tool-call" as const,
+                    toolCallId: `supervisor-${call}`,
+                    toolName: tool,
+                    input: JSON.stringify(
+                      tool === "lookup_order"
+                        ? { orderId: "ORD-1001" }
+                        : { prompt: "Classify this case." },
+                    ),
+                  },
+                ],
+                finishReason: "tool-calls" as const,
+                usage: { inputTokens: 1, outputTokens: 1 },
+                warnings: [],
+              }
+            : {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: "I completed a read-only investigation; refund approval remains required.",
+                  },
+                ],
+                finishReason: "stop" as const,
+                usage: { inputTokens: 1, outputTokens: 1 },
+                warnings: [],
+              };
+        },
+        async doStream() {
+          throw new Error("deterministic test model only supports generate");
+        },
+      } as never,
+    });
+    const client = runtimeCaseStore.getClientForTests();
+    const counts = async () =>
+      client.execute(
+        "SELECT (SELECT COUNT(*) FROM support_cases) cases, (SELECT COUNT(*) FROM support_actions) actions, (SELECT COUNT(*) FROM support_outbox) outbox, (SELECT COUNT(*) FROM local_orders) orders, (SELECT COUNT(*) FROM local_knowledge) knowledge, (SELECT COUNT(*) FROM support_knowledge_generations) generations",
+      );
+    const before = JSON.stringify((await counts()).rows[0]);
+    const response = await app.request(
+      `http://support.test/support/cases/${caseId}/supervisor`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...supportAgentHeaders },
+        body: JSON.stringify({ message: "Inspect the order and classify it." }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      toolNames: ["agent-triageAgent", "lookup_order"],
+    });
+    expect(JSON.stringify((await counts()).rows[0])).toBe(before);
+    const denied = await app.request(
+      `http://support.test/support/cases/${caseId}/supervisor`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...otherTenantHeaders },
+        body: JSON.stringify({ message: "Inspect it." }),
+      },
+    );
+    expect(denied.status).toBe(403);
+  });
+
+  it("runs the registered supervisor's actual validation transport through the sandbox ledger", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      mastra,
+    } = await loadDeterministicRuntime();
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `budgeted-supervisor-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Budgeted supervisor validation",
+        body: "Please inspect my order.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe(
+        "waiting_approval",
+      ),
+    );
+    const transport = vi.fn(async () => ({
+      content: [
+        {
+          type: "text" as const,
+          text: "I completed a read-only budgeted validation.",
+        },
+      ],
+      finishReason: "stop" as const,
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      warnings: [],
+    }));
+    mastra.getAgent("supportSupervisorAgent").__updateModel({
+      model: {
+        specificationVersion: "v2",
+        provider: "phase004-test",
+        modelId: "budgeted-supervisor",
+        supportedUrls: {},
+        doGenerate: transport,
+        async doStream() {
+          throw new Error("deterministic validation only supports generate");
+        },
+      } as never,
+    });
+    const response = await app.request(
+      `http://support.test/support/cases/${caseId}/supervisor`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...supportAgentHeaders },
+        body: JSON.stringify({
+          message: "Perform the validation.",
+          validation: { mode: "sandbox" },
+        }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      text: "I completed a read-only budgeted validation.",
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+
+    const unpricedTransport = vi.fn(async () => ({
+      content: [{ type: "text" as const, text: "must not run" }],
+      finishReason: "stop" as const,
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      warnings: [],
+    }));
+    mastra.getAgent("supportSupervisorAgent").__updateModel({
+      model: {
+        specificationVersion: "v2",
+        provider: "unpriced-validation-provider",
+        modelId: "unknown-price",
+        supportedUrls: {},
+        doGenerate: unpricedTransport,
+        async doStream() {
+          throw new Error("must not stream");
+        },
+      } as never,
+    });
+    const blocked = await app.request(
+      `http://support.test/support/cases/${caseId}/supervisor`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...supportAgentHeaders },
+        body: JSON.stringify({
+          message: "Attempt an unpriced validation.",
+          validation: { mode: "sandbox" },
+        }),
+      },
+    );
+    expect(blocked.status).toBe(422);
+    await expect(blocked.json()).resolves.toMatchObject({
+      error: expect.stringContaining("unknown model price"),
+    });
+    expect(unpricedTransport).not.toHaveBeenCalled();
+  });
+
+  it("replaces unsupported refund prose before finalization and outbox delivery", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      responseAgent,
+    } = await loadDeterministicRuntime();
+    vi.mocked(responseAgent.generate).mockResolvedValueOnce({
+      object: {
+        draftResponse: "Your refund has already been issued.",
+        citedSources: [],
+        recommendRefund: true,
+        refundAmount: 49,
+        refundCurrency: "USD",
+        refundReason: "invented",
+        requiresEscalation: false,
+      },
+      usage: { inputTokens: 1, outputTokens: 1 },
+      response: { modelId: "deterministic/unsafe" },
+    } as never);
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `unsupported-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Refund request",
+        body: "Refund me.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("escalated"),
+    );
+    const supportCase = await runtimeCaseStore.get(caseId);
+    if (!supportCase) throw new Error("Expected escalated support case.");
+    const outbox = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT body FROM support_outbox WHERE case_id = ?",
+      args: [caseId],
+    });
+    expect(supportCase?.finalResponse).toContain("specialist needs to review");
+    expect(supportCase?.finalResponse).not.toContain("already been issued");
+    expect(String(outbox.rows[0]?.body)).toBe(supportCase?.finalResponse);
+    const metadata = supportCase!.metadata as Record<string, unknown>;
+    expect(metadata.rejectedDraftForStaff).toMatchObject({
+      draftResponse: "Your refund has already been issued.",
+    });
+  });
+
+  it.each([
+    "Your refund has already been issued.",
+    "The reimbursement was completed and the funds are on their way.",
+    "We processed the credit, so your card will be refunded.",
+  ])(
+    "never promotes a valid-citation, effectless financial completion claim: %s",
+    async (draftResponse) => {
+      const {
+        app,
+        caseStore: runtimeCaseStore,
+        responseAgent,
+      } = await loadDeterministicRuntime();
+      vi.mocked(responseAgent.generate).mockResolvedValueOnce({
+        object: {
+          draftResponse,
+          // The registered retrieval fixture exposes this active, applicable
+          // policy title. Both model flags deliberately avoid approval.
+          citedSources: ["Duplicate Charge Policy"],
+          recommendRefund: false,
+          requiresEscalation: false,
+        },
+        usage: { inputTokens: 1, outputTokens: 1 },
+        response: { modelId: "deterministic/hostile-valid-citation" },
+      } as never);
+      const inbound = await app.request("http://support.test/support/inbound", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...customerHeaders },
+        body: JSON.stringify({
+          externalId: `valid-citation-hostile-${crypto.randomUUID()}`,
+          from: "alex@example.com",
+          subject: "Order status",
+          body: "Please confirm my order status.",
+        }),
+      });
+      const { caseId } = inboundSupportResponseSchema.parse(
+        await inbound.json(),
+      );
+      await vi.waitFor(async () =>
+        expect((await runtimeCaseStore.get(caseId))?.status).toBe("resolved"),
+      );
+      const supportCase = await runtimeCaseStore.get(caseId);
+      if (!supportCase) throw new Error("Expected resolved support case.");
+      const outbox = await runtimeCaseStore.getClientForTests().execute({
+        sql: "SELECT body, state FROM support_outbox WHERE case_id = ?",
+        args: [caseId],
+      });
+      const durable = await runtimeCaseStore.getClientForTests().execute({
+        sql: "SELECT (SELECT COUNT(*) FROM support_decisions WHERE case_id = ?) AS approvals, (SELECT COUNT(*) FROM support_idempotency) AS effects, (SELECT COUNT(*) FROM local_refunds) AS refunds",
+        args: [caseId],
+      });
+      expect(supportCase.finalResponse).toBe(
+        "We reviewed your order ORD-1001. Its current status is fulfilled.",
+      );
+      expect(supportCase.finalResponse).not.toContain(draftResponse);
+      expect(String(outbox.rows[0]?.body)).toBe(supportCase.finalResponse);
+      expect(outbox.rows[0]?.state).toBe("delivered");
+      expect(durable.rows[0]).toMatchObject({
+        approvals: 0,
+        effects: 0,
+        refunds: 0,
+      });
+    },
+  );
+
+  it("renders an ordinary grounded order answer from durable order state", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      responseAgent,
+    } = await loadDeterministicRuntime();
+    vi.mocked(responseAgent.generate).mockResolvedValueOnce({
+      object: {
+        draftResponse: "Your order is fulfilled and no refund is needed.",
+        citedSources: ["Duplicate Charge Policy"],
+        recommendRefund: false,
+        requiresEscalation: false,
+      },
+      usage: { inputTokens: 1, outputTokens: 1 },
+      response: { modelId: "deterministic/ordinary-order" },
+    } as never);
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `ordinary-order-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Order status",
+        body: "Where is my order?",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("resolved"),
+    );
+    const supportCase = (await runtimeCaseStore.get(caseId))!;
+    expect(supportCase.finalResponse).toBe(
+      "We reviewed your order ORD-1001. Its current status is fulfilled.",
+    );
+  });
+
+  it("renders completed refund status only after native approval creates its matching durable effect", async () => {
+    const { app, caseStore: runtimeCaseStore } =
+      await loadDeterministicRuntime();
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `completed-refund-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Refund request",
+        body: "Please refund my duplicate charge.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe(
+        "waiting_approval",
+      ),
+    );
+    const command = (await runtimeCaseStore.get(caseId))!.metadata
+      .refundCommand as { fingerprint: string };
+    const approved = await app.request(
+      `http://support.test/support/cases/${caseId}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...approverHeaders },
+        body: JSON.stringify({ commandFingerprint: command.fingerprint }),
+      },
+    );
+    expect(approved.status).toBe(200);
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("resolved"),
+    );
+    const supportCase = (await runtimeCaseStore.get(caseId))!;
+    const outbox = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT body, state FROM support_outbox WHERE case_id = ?",
+      args: [caseId],
+    });
+    const effect = await runtimeCaseStore.idempotency(
+      supportCase.refundResult!.idempotencyKey,
+    );
+    expect(effect?.fingerprint).toBe(command.fingerprint);
+    expect(supportCase.finalResponse).toBe(
+      "Your refund of 49 USD has been issued.",
+    );
+    expect(String(outbox.rows[0]?.body)).toBe(supportCase.finalResponse);
+    expect(outbox.rows[0]?.state).toBe("delivered");
+  });
+
+  it("does not claim a completed refund when native approval is rejected without an effect", async () => {
+    const { app, caseStore: runtimeCaseStore } =
+      await loadDeterministicRuntime();
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `rejected-refund-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Refund request",
+        body: "Please refund my duplicate charge.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe(
+        "waiting_approval",
+      ),
+    );
+    const command = (await runtimeCaseStore.get(caseId))!.metadata
+      .refundCommand as { fingerprint: string };
+    const rejected = await app.request(
+      `http://support.test/support/cases/${caseId}/reject`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...approverHeaders },
+        body: JSON.stringify({ commandFingerprint: command.fingerprint }),
+      },
+    );
+    expect(rejected.status).toBe(200);
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("escalated"),
+    );
+    const supportCase = (await runtimeCaseStore.get(caseId))!;
+    const outbox = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT body, state FROM support_outbox WHERE case_id = ?",
+      args: [caseId],
+    });
+    const effects = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT COUNT(*) AS count FROM support_idempotency",
+    });
+    expect(effects.rows[0]?.count).toBe(0);
+    expect(supportCase.refundResult).toBeUndefined();
+    expect(supportCase.finalResponse).toContain(
+      "specialist is going to take a closer look",
+    );
+    expect(supportCase.finalResponse).not.toContain("has been issued");
+    expect(String(outbox.rows[0]?.body)).toBe(supportCase.finalResponse);
+    expect(outbox.rows[0]?.state).toBe("delivered");
+  });
+
+  it("never delivers an already-escalated uncited financial claim", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      responseAgent,
+    } = await loadDeterministicRuntime();
+    vi.mocked(responseAgent.generate).mockResolvedValueOnce({
+      object: {
+        draftResponse: "Your refund has already been issued.",
+        citedSources: [],
+        recommendRefund: false,
+        requiresEscalation: true,
+        escalationReason: "Please review this manually.",
+      },
+      usage: { inputTokens: 1, outputTokens: 1 },
+      response: { modelId: "deterministic/unsafe-escalation" },
+    } as never);
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `uncited-escalation-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Refund request",
+        body: "Refund me.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("escalated"),
+    );
+    const supportCase = await runtimeCaseStore.get(caseId);
+    if (!supportCase) throw new Error("Expected escalated support case.");
+    const outbox = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT body FROM support_outbox WHERE case_id = ?",
+      args: [caseId],
+    });
+    expect(supportCase.finalResponse).toContain("specialist needs to review");
+    expect(supportCase.finalResponse).not.toContain("already been issued");
+    expect(String(outbox.rows[0]?.body)).toBe(supportCase.finalResponse);
+    expect(
+      (supportCase.metadata as Record<string, unknown>).rejectedDraftForStaff,
+    ).toMatchObject({ draftResponse: "Your refund has already been issued." });
+  });
+
+  it("replaces an expired-policy draft before finalization and outbox delivery", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      responseAgent,
+    } = await loadDeterministicRuntime();
+    const initial = new Date();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(initial);
+    const expiresAt = new Date(initial.getTime() + 1_000).toISOString();
+    const afterExpiry = new Date(initial.getTime() + 1_001);
+    const { defaultLocalBinding, localRuntime } =
+      await import("../../src/mastra/runtime/local-runtime");
+    await localRuntime.seed(defaultLocalBinding());
+    // The workflow publishes this source row before it seals the candidate
+    // generation. Advancing the deterministic clock later makes the sealed
+    // authority expired without mutating its immutable document row.
+    await runtimeCaseStore.getClientForTests().execute({
+      sql: "UPDATE local_knowledge SET expires_at = ? WHERE tenant_id = ? AND provider_account_id = ?",
+      args: [expiresAt, "local-demo", "local-demo"],
+    });
+    vi.mocked(responseAgent.generate).mockImplementationOnce(async () => {
+      // Retrieval has already persisted its policy matches. Advance past the
+      // construction-time applicability window while generation is in flight
+      // to exercise the decision-time publication recheck.
+      vi.setSystemTime(afterExpiry);
+      return {
+        object: {
+          draftResponse: "The duplicate-charge policy confirms your refund.",
+          citedSources: ["duplicate-charge-policy"],
+          recommendRefund: false,
+          requiresEscalation: false,
+        },
+        usage: { inputTokens: 1, outputTokens: 1 },
+        response: { modelId: "deterministic/expired-policy" },
+      } as never;
+    });
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `expired-policy-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Duplicate charge",
+        body: "I was charged twice for order ORD-1001.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("escalated"),
+    );
+    const supportCase = await runtimeCaseStore.get(caseId);
+    if (!supportCase) throw new Error("Expected escalated support case.");
+    const outbox = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT body FROM support_outbox WHERE case_id = ?",
+      args: [caseId],
+    });
+    expect(supportCase.finalResponse).toContain("specialist needs to review");
+    expect(supportCase.finalResponse).not.toContain("duplicate-charge policy");
+    expect(String(outbox.rows[0]?.body)).toBe(supportCase.finalResponse);
+    expect(
+      (supportCase.metadata as Record<string, unknown>).rejectedDraftForStaff,
+    ).toMatchObject({
+      draftResponse: "The duplicate-charge policy confirms your refund.",
+    });
+  });
+
+  it("authorizes delayed response feedback and retains two turn-bound ratings through export failure and reopen", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      mastra,
+    } = await loadDeterministicRuntime();
+    const caseId = `feedback-history-${crypto.randomUUID()}`;
+    const binding = {
+      tenantId: "local-demo",
+      providerKind: "local" as const,
+      providerAccountId: "local-demo",
+      externalConversationId: `feedback-history-conversation-${caseId}`,
+    };
+    const createdAt = new Date().toISOString();
+    await runtimeCaseStore.acceptInbound(
+      {
+        id: caseId,
+        externalId: `feedback-history-event-${caseId}`,
+        source: "mock-email",
+        customer: { email: "alex@example.com" },
+        subject: "Feedback history",
+        messages: [
+          {
+            id: `feedback-history-message-${caseId}`,
+            author: "customer",
+            body: "Please resolve this request.",
+            createdAt,
+          },
+        ],
+        status: "new",
+        createdAt,
+        updatedAt: createdAt,
+        metadata: { ownerId: "customer-alex", providerBinding: binding },
+      },
+      `feedback-history-event-${caseId}`,
+      "feedback-history-run-a",
+    );
+    const firstTurn = (await runtimeCaseStore.turns(caseId))[0]!;
+    const current = await runtimeCaseStore.get(caseId);
+    await runtimeCaseStore.update(caseId, {
+      status: "resolved",
+      metadata: { ...current!.metadata, activeTurnId: firstTurn.id },
+    });
+    await runtimeCaseStore.getClientForTests().execute({
+      sql: "UPDATE support_turns SET state = 'resolved', outcome_data = ? WHERE id = ? AND case_id = ?",
+      args: [
+        JSON.stringify({
+          status: "resolved",
+          finalResponse: "Original synthetic final response.",
+          telemetry: { traceId: "feedback-trace-a" },
+        }),
+        firstTurn.id,
+        caseId,
+      ],
+    });
+    const second = await runtimeCaseStore.appendFollowUp({
+      caseId,
+      eventId: `feedback-history-follow-up-${caseId}`,
+      runId: "feedback-history-run-b",
+      expectedOwnerId: "customer-alex",
+      message: {
+        id: `feedback-history-follow-up-message-${caseId}`,
+        author: "customer",
+        body: "A second completed response.",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    const secondTurn = await runtimeCaseStore.turn(caseId, second.turnId!);
+    await runtimeCaseStore.getClientForTests().execute({
+      sql: "UPDATE support_turns SET state = 'resolved', outcome_data = ? WHERE id = ? AND case_id = ?",
+      args: [
+        JSON.stringify({
+          status: "resolved",
+          finalResponse: "Follow-up synthetic final response.",
+          telemetry: { traceId: "feedback-trace-b" },
+        }),
+        secondTurn!.id,
+        caseId,
+      ],
+    });
+    vi.spyOn(mastra.observability, "addFeedback").mockRejectedValue(
+      new Error("synthetic observability export failure"),
+    );
+
+    const delayed = await app.request(
+      `http://support.test/support/cases/${caseId}/feedback`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...customerHeaders },
+        body: JSON.stringify({
+          rating: "up",
+          comment: "This was for the original response.",
+          responseMessageId: `msg_${caseId}_${firstTurn.id}_final`,
+        }),
+      },
+    );
+    expect(delayed.status).toBe(200);
+    const currentTurn = await app.request(
+      `http://support.test/support/cases/${caseId}/feedback`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...customerHeaders },
+        body: JSON.stringify({
+          rating: "down",
+          comment: "This was for the new response.",
+          responseMessageId: `msg_${caseId}_${secondTurn!.id}_final`,
+        }),
+      },
+    );
+    expect(currentTurn.status).toBe(200);
+    expect(vi.mocked(mastra.observability.addFeedback)).toHaveBeenCalledTimes(
+      2,
+    );
+    expect(await runtimeCaseStore.feedback([caseId])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          feedback: expect.objectContaining({
+            turnId: firstTurn.id,
+            runId: "feedback-history-run-a",
+            traceId: "feedback-trace-a",
+          }),
+        }),
+        expect.objectContaining({
+          feedback: expect.objectContaining({
+            turnId: secondTurn!.id,
+            runId: "feedback-history-run-b",
+            traceId: "feedback-trace-b",
+          }),
+        }),
+      ]),
+    );
+    const { CaseStore } = await import("../../src/mastra/lib/case-store");
+    const reopened = new CaseStore({ url: process.env.TURSO_DATABASE_URL! });
+    expect(await reopened.feedback([caseId])).toHaveLength(2);
+    await reopened.close();
+  });
+
+  it("accepts feedback for actual approved and non-refund follow-up completions after dispatch completion", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      mastra,
+      responseAgent,
+    } = await loadDeterministicRuntime();
+    const inbound = await app.request("http://support.test/support/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...customerHeaders },
+      body: JSON.stringify({
+        externalId: `feedback-real-${crypto.randomUUID()}`,
+        conversationId: `feedback-real-conversation-${crypto.randomUUID()}`,
+        from: "alex@example.com",
+        subject: "Actual completed feedback",
+        body: "Please refund my duplicate charge.",
+      }),
+    });
+    const { caseId } = inboundSupportResponseSchema.parse(await inbound.json());
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe(
+        "waiting_approval",
+      ),
+    );
+    const firstTurn = (await runtimeCaseStore.turns(caseId))[0]!;
+    const command = (await runtimeCaseStore.get(caseId))!.metadata
+      .refundCommand as { fingerprint: string };
+    const approved = await app.request(
+      `http://support.test/support/cases/${caseId}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...approverHeaders },
+        body: JSON.stringify({ commandFingerprint: command.fingerprint }),
+      },
+    );
+    expect(approved.status).toBe(200);
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("resolved"),
+    );
+    expect(await runtimeCaseStore.turn(caseId, firstTurn.id)).toMatchObject({
+      state: "resolved",
+      outcome: { finalResponse: expect.any(String) },
+    });
+    const firstOutcome = (await runtimeCaseStore.turn(caseId, firstTurn.id))!
+      .outcome!;
+    const firstTraceId = (firstOutcome.telemetry as { traceId?: string })
+      ?.traceId;
+    expect(firstTraceId).toEqual(expect.any(String));
+    const firstOutboxId = `outbox_${caseId}_${firstTurn.id}_final`;
+    // Leave the first finalized reply pending, then process a real follow-up.
+    // The replayed worker attempt below must remain attached to this trace,
+    // rather than the mutable trace on the second active turn.
+    await runtimeCaseStore.getClientForTests().execute({
+      sql: "UPDATE support_outbox SET state = 'pending', receipt = NULL, lease_until = NULL, lease_token = NULL WHERE id = ?",
+      args: [firstOutboxId],
+    });
+    const observability = (await mastra
+      .getStorage()
+      ?.getStore("observability")) as {
+      getTrace(args: { traceId: string }): Promise<{
+        spans: Array<{ metadata?: Record<string, unknown> }>;
+      } | null>;
+    };
+    const deliveryCount = async (traceId: string) =>
+      (await observability.getTrace({ traceId }))?.spans.filter(
+        (span) => span.metadata?.operation === "support.deliver",
+      ).length ?? 0;
+    await mastra.observability.flush();
+    const firstBeforeFollowUp = await deliveryCount(firstTraceId!);
+    // Simulate an upgraded Phase 003 projection. It must be migrated before
+    // the later turn's feedback overwrites the current-case projection.
+    await runtimeCaseStore.update(caseId, {
+      feedback: {
+        rating: "up",
+        submittedAt: "2026-09-05T00:00:00.000Z",
+        actorId: "customer-alex",
+        turnId: firstTurn.id,
+        runId: firstTurn.runId,
+        traceId: (firstOutcome.telemetry as { traceId?: string })?.traceId,
+      },
+    });
+    responseAgent.generate.mockResolvedValueOnce({
+      object: {
+        draftResponse: "Your order is fulfilled and no refund is needed.",
+        citedSources: ["duplicate-charge-policy"],
+        recommendRefund: false,
+        requiresEscalation: false,
+      },
+      usage: { inputTokens: 1, outputTokens: 1 },
+      response: { modelId: "deterministic/follow-up" },
+    } as never);
+    const followUp = await app.request(
+      `http://support.test/support/cases/${caseId}/follow-ups`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...customerHeaders },
+        body: JSON.stringify({ body: "What is the current order status?" }),
+      },
+    );
+    expect(followUp.status).toBe(200);
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("resolved"),
+    );
+    const turns = await runtimeCaseStore.turns(caseId);
+    const secondTurn = turns.at(-1)!;
+    expect(secondTurn.id).not.toBe(firstTurn.id);
+    expect(secondTurn).toMatchObject({
+      state: "resolved",
+      outcome: {
+        finalResponse:
+          "We reviewed your order ORD-1001. Its current status is fulfilled.",
+      },
+    });
+    const secondTraceId = (await runtimeCaseStore.get(caseId))?.traceId;
+    expect(secondTraceId).toEqual(expect.any(String));
+    expect(secondTraceId).not.toBe(firstTraceId);
+    const outbox = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT originating_turn_id, originating_run_id, originating_trace_id, correlation_state FROM support_outbox WHERE id = ?",
+      args: [firstOutboxId],
+    });
+    expect(outbox.rows[0]).toMatchObject({
+      originating_turn_id: firstTurn.id,
+      originating_run_id: firstTurn.runId,
+      originating_trace_id: firstTraceId,
+      correlation_state: "known",
+    });
+    await mastra.observability.flush();
+    // The follow-up's background sweep retried the pending turn-one reply.
+    // Its provider span stays on turn one; turn two contains only its own
+    // final delivery, despite now owning the case's current trace.
+    expect(await deliveryCount(firstTraceId!)).toBe(firstBeforeFollowUp + 1);
+    expect(await deliveryCount(secondTraceId!)).toBe(1);
+    // Submit the later-turn rating first: this is the migration boundary that
+    // previously hid the original feedback on the same case.
+    for (const [turn, rating] of [
+      [secondTurn, "down"],
+      [firstTurn, "up"],
+    ] as const) {
+      const response = await app.request(
+        `http://support.test/support/cases/${caseId}/feedback`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", ...customerHeaders },
+          body: JSON.stringify({
+            rating,
+            responseMessageId: `msg_${caseId}_${turn.id}_final`,
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+    }
+    const exactDuplicate = await app.request(
+      `http://support.test/support/cases/${caseId}/feedback`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...customerHeaders },
+        body: JSON.stringify({
+          rating: "down",
+          responseMessageId: `msg_${caseId}_${secondTurn.id}_final`,
+        }),
+      },
+    );
+    expect(exactDuplicate.status).toBe(200);
+    const durableFeedback = await runtimeCaseStore.feedback([caseId]);
+    expect(durableFeedback).toHaveLength(2);
+    expect(durableFeedback.map((entry) => entry.feedback.turnId)).toEqual(
+      expect.arrayContaining([firstTurn.id, secondTurn.id]),
+    );
+    const { CaseStore } = await import("../../src/mastra/lib/case-store");
+    const reopened = new CaseStore({ url: process.env.TURSO_DATABASE_URL! });
+    expect(await reopened.feedback([caseId])).toHaveLength(2);
+    await reopened.close();
+  }, 20_000);
+
+  it("durably retries then escalates injected inbound and follow-up provider failures without restarting failed runs", async () => {
+    const {
+      app,
+      caseStore: runtimeCaseStore,
+      mastra,
+      responseAgent,
+    } = await loadDeterministicRuntime();
+    const { recoverLocalWorkflows } =
+      await import("../../src/mastra/runtime/local-runtime");
+    responseAgent.generate.mockRejectedValueOnce(
+      new Error("injected inbound response provider failure"),
+    );
+    const failedInbound = await app.request(
+      "http://support.test/support/inbound",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...customerHeaders },
+        body: JSON.stringify({
+          externalId: `failure-inbound-${crypto.randomUUID()}`,
+          from: "alex@example.com",
+          subject: "Injected inbound failure",
+          body: "Please inspect this order.",
+        }),
+      },
+    );
+    const { caseId: inboundCaseId } = inboundSupportResponseSchema.parse(
+      await failedInbound.json(),
+    );
+    await vi.waitFor(async () =>
+      expect(
+        (
+          await runtimeCaseStore.getClientForTests().execute({
+            sql: "SELECT state FROM support_dispatch WHERE case_id = ?",
+            args: [inboundCaseId],
+          })
+        ).rows[0],
+      ).toMatchObject({ state: "pending" }),
+    );
+    await recoverLocalWorkflows(mastra, 10, runtimeCaseStore);
+    expect((await runtimeCaseStore.get(inboundCaseId))?.status).toBe(
+      "escalated",
+    );
+
+    responseAgent.generate.mockResolvedValue({
+      object: {
+        draftResponse: "Your order is fulfilled.",
+        citedSources: ["duplicate-charge-policy"],
+        recommendRefund: false,
+        requiresEscalation: false,
+      },
+      usage: { inputTokens: 1, outputTokens: 1 },
+      response: { modelId: "deterministic/nonrefund" },
+    } as never);
+    const healthyInbound = await app.request(
+      "http://support.test/support/inbound",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...customerHeaders },
+        body: JSON.stringify({
+          externalId: `failure-follow-up-${crypto.randomUUID()}`,
+          from: "alex@example.com",
+          subject: "Healthy initial turn",
+          body: "Where is my order?",
+        }),
+      },
+    );
+    const { caseId } = inboundSupportResponseSchema.parse(
+      await healthyInbound.json(),
+    );
+    await vi.waitFor(async () =>
+      expect((await runtimeCaseStore.get(caseId))?.status).toBe("resolved"),
+    );
+    responseAgent.generate.mockRejectedValueOnce(
+      new Error("injected follow-up response provider failure"),
+    );
+    const failedFollowUp = await app.request(
+      `http://support.test/support/cases/${caseId}/follow-ups`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...customerHeaders },
+        body: JSON.stringify({ body: "Please check again." }),
+      },
+    );
+    expect(failedFollowUp.status).toBe(500);
+    const dispatch = await runtimeCaseStore.getClientForTests().execute({
+      sql: "SELECT state FROM support_dispatch WHERE case_id = ? ORDER BY created_at DESC LIMIT 1",
+      args: [caseId],
+    });
+    expect(dispatch.rows[0]).toMatchObject({ state: "pending" });
+    await recoverLocalWorkflows(mastra, 10, runtimeCaseStore);
+    expect((await runtimeCaseStore.get(caseId))?.status).toBe("escalated");
+  }, 20_000);
+
+  it("projects an exhausted dispatch lease to a durable escalation", async () => {
+    const { caseStore: runtimeCaseStore } = await loadDeterministicRuntime();
+    const caseId = `exhausted-dispatch-${crypto.randomUUID()}`;
+    await runtimeCaseStore.acceptInbound(
+      {
+        id: caseId,
+        externalId: `${caseId}-event`,
+        source: "mock-email",
+        customer: { email: "alex@example.com" },
+        subject: "Exhausted dispatch",
+        messages: [
+          {
+            id: `${caseId}-message`,
+            author: "customer",
+            body: "Please recover this exhausted dispatch.",
+            createdAt: new Date().toISOString(),
+          },
+        ],
+        status: "processing",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        metadata: {
+          ownerId: "customer-alex",
+          providerBinding: {
+            tenantId: "local-demo",
+            providerKind: "local",
+            providerAccountId: "local-demo",
+            externalConversationId: caseId,
+          },
+        },
+      },
+      `${caseId}-event`,
+      `${caseId}-run`,
+    );
+    await runtimeCaseStore.getClientForTests().execute({
+      sql: "UPDATE support_dispatch SET state = 'claimed', attempts = 3, lease_until = ? WHERE case_id = ?",
+      args: ["2000-01-01T00:00:00.000Z", caseId],
+    });
+    expect(await runtimeCaseStore.claimDispatch()).toEqual([]);
+    expect((await runtimeCaseStore.get(caseId))?.status).toBe("escalated");
+    expect((await runtimeCaseStore.turns(caseId))[0]).toMatchObject({
+      state: "escalated",
+      outcome: { operationalFailure: { disposition: "escalate" } },
+    });
   });
 });

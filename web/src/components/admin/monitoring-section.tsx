@@ -48,6 +48,36 @@ function formatMinutes(value: number | null): string {
   return `${(value / 60).toFixed(1)} hr`;
 }
 
+export function OperationHealth({
+  title,
+  entries,
+}: {
+  title: string;
+  entries: MonitoringSummary["telemetry"]["workflowStages"];
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <p className="font-medium">{title}</p>
+      {entries.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Unavailable — no retained spans.
+        </p>
+      ) : (
+        entries.map((entry) => (
+          <p
+            key={`${title}-${entry.operation}`}
+            className="text-xs text-muted-foreground"
+          >
+            {entry.operation}: {entry.calls} calls · errors{" "}
+            {formatPercent(entry.errorRate)} · p95{" "}
+            {entry.p95Ms === null ? "—" : `${entry.p95Ms.toFixed(0)} ms`}
+          </p>
+        ))
+      )}
+    </div>
+  );
+}
+
 function RateCard({
   icon: Icon,
   title,
@@ -142,8 +172,8 @@ export function MonitoringSection({ session }: { session: SupportSession }) {
           <h2 className="text-xl font-semibold tracking-tight">Monitoring</h2>
           <p className="max-w-2xl text-sm text-muted-foreground">
             Containment, escalation, refund approvals, customer feedback, and
-            the token cost and tool health data Mastra already tracks for every
-            case.
+            tenant-scoped model usage, exact refund totals, and operational
+            health recorded by Mastra.
           </p>
         </div>
         <Button
@@ -297,15 +327,29 @@ export function MonitoringSection({ session }: { session: SupportSession }) {
                     {summary.refunds.autoEscalated}
                   </p>
                 </div>
+                <div>
+                  <p className="text-muted-foreground">Executed / failed</p>
+                  <p className="text-2xl font-semibold">
+                    {summary.refunds.executed} / {summary.refunds.failed}
+                  </p>
+                </div>
                 <div className="col-span-2">
                   <Separator className="mb-3" />
                   <p className="text-muted-foreground">
-                    Total approved &amp; issued
+                    Executed totals (minor units)
                   </p>
-                  <p className="text-2xl font-semibold">
-                    {summary.refunds.totalApprovedAmount.toFixed(2)}{" "}
-                    {summary.refunds.currency}
-                  </p>
+                  {summary.refunds.executedTotals.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">—</p>
+                  ) : (
+                    summary.refunds.executedTotals.map((total) => (
+                      <p
+                        key={total.currency}
+                        className="text-2xl font-semibold"
+                      >
+                        {total.minor} {total.currency}
+                      </p>
+                    ))
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -332,11 +376,6 @@ export function MonitoringSection({ session }: { session: SupportSession }) {
                     >
                       <div>
                         <p className="font-medium">{entry.subject}</p>
-                        {entry.comment && (
-                          <p className="text-muted-foreground">
-                            {entry.comment}
-                          </p>
-                        )}
                         <p className="text-xs text-muted-foreground">
                           {new Date(entry.submittedAt).toLocaleString()}
                         </p>
@@ -358,6 +397,64 @@ export function MonitoringSection({ session }: { session: SupportSession }) {
                   ))}
                 </div>
               )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Operational telemetry</CardTitle>
+              <CardDescription>
+                Model usage is counted from generation spans only, so parent and
+                child spans are not double counted.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3 text-sm">
+              {summary.telemetry.unavailable.length > 0 && (
+                <p className="text-muted-foreground">
+                  Unavailable: {summary.telemetry.unavailable.join(", ")}
+                </p>
+              )}
+              <p>
+                Provider/tool error rate:{" "}
+                {formatPercent(summary.telemetry.providerOrToolErrorRate)} ·
+                p95:{" "}
+                {summary.telemetry.providerOrToolP95Ms === null
+                  ? "—"
+                  : `${summary.telemetry.providerOrToolP95Ms.toFixed(0)} ms`}
+              </p>
+              {summary.telemetry.modelUsage.map((model) => (
+                <p key={model.model} className="text-muted-foreground">
+                  {model.model}: {model.inputTokens} input /{" "}
+                  {model.outputTokens} output tokens; cost{" "}
+                  {model.estimatedCostMicrosUsd === null
+                    ? "unavailable"
+                    : `${model.estimatedCostMicrosUsd} μUSD`}
+                </p>
+              ))}
+              <OperationHealth
+                title="Workflow stages"
+                entries={summary.telemetry.workflowStages}
+              />
+              <OperationHealth
+                title="Provider operations"
+                entries={summary.telemetry.providerCalls}
+              />
+              <OperationHealth
+                title="Tool operations"
+                entries={summary.telemetry.toolCalls}
+              />
+              {summary.telemetry.alerts.length > 0 && (
+                <p className="text-destructive">
+                  Alerts: {summary.telemetry.alerts.join(", ")}
+                </p>
+              )}
+              <p className="text-muted-foreground">
+                Failures — rejected decisions:{" "}
+                {summary.failures.rejectedDecisions}, workflow:{" "}
+                {summary.failures.workflow}, financial:{" "}
+                {summary.failures.financial}, delivery:{" "}
+                {summary.failures.delivery}.
+              </p>
             </CardContent>
           </Card>
 

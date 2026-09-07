@@ -28,8 +28,196 @@ import {
   providerRegistry,
   resolveConfiguredBinding,
 } from "../providers/registry";
+import { knowledgePublicationStore } from "../lib/knowledge-publications";
+import { withTrustedCaseReadScope } from "../lib/trusted-run-scope";
+import { publishKnowledge } from "../lib/publish-knowledge";
+import { traceOperationalPort } from "../lib/operational-spans";
 
 const caseIdSchema = z.object({ caseId: z.string(), turnId: z.string() });
+
+/** Serialize only the authoritative identities already selected by the
+ * grounded draft. This durable action is later read by the provider write
+ * transaction; it intentionally does not consult a newer case draft. */
+function parsedDraftEvidence(supportCase: SupportCase, citations: string[]) {
+  return citations.map((citation) => {
+    const match = (supportCase.policyMatches ?? []).find(
+      (entry) => entry.title === citation || entry.source === citation,
+    );
+    if (
+      !match?.source ||
+      !match.title ||
+      !match.documentHash ||
+      !match.generationId ||
+      !match.version ||
+      !match.effectiveAt ||
+      !match.indexedAt ||
+      !match.providerKind ||
+      !match.providerAccountId
+    )
+      throw new Error(
+        "Refund approval requires complete authoritative policy evidence.",
+      );
+    return {
+      title: match.title,
+      source: match.source,
+      documentHash: match.documentHash,
+      generationId: match.generationId,
+      version: match.version,
+      effectiveAt: match.effectiveAt,
+      indexedAt: match.indexedAt,
+      expiresAt: match.expiresAt,
+      providerKind: match.providerKind,
+      providerAccountId: match.providerAccountId,
+    };
+  });
+}
+
+const safeEscalationResponse =
+  "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.";
+
+const financialResponseCommandSchema = z.object({
+  approvalCaseId: z.string(),
+  orderId: z.string(),
+  amount: z.number().positive(),
+  currency: z.string(),
+  reason: z.string(),
+  idempotencyKey: z.string(),
+  fingerprint: z.string(),
+});
+
+const immutableRefundCommandSchema = z.object({
+  binding: z.object({
+    tenantId: z.string(),
+    providerKind: z.literal("local"),
+    providerAccountId: z.string(),
+    externalConversationId: z.string(),
+  }),
+  approvalCaseId: z.string(),
+  orderId: z.string(),
+  amount: z.object({
+    currency: z.string(),
+    minor: z.number().int().positive(),
+  }),
+  reason: z.string(),
+  idempotencyKey: z.string(),
+  fingerprint: z.string(),
+});
+
+const durableRefundEffectSchema = z.object({
+  refundId: z.string(),
+  orderId: z.string(),
+  amount: z.object({
+    currency: z.string(),
+    minor: z.number().int().positive(),
+  }),
+  idempotencyKey: z.string(),
+  executedAt: z.string().refine((value) => Number.isFinite(Date.parse(value))),
+  replayed: z.boolean().optional(),
+});
+
+/** Model text is useful staff context, but it is not an authority to state a
+ * financial outcome. Customer-visible status is a projection of durable case
+ * facts; this keeps arbitrary prose, paraphrases, and mixed clauses from
+ * becoming an effectless financial completion claim. */
+function ordinarySupportResponse(supportCase: SupportCase) {
+  const order = supportCase.orderLookup?.order;
+  if (order && order.status !== "refunded")
+    return `We reviewed your order ${order.orderId}. Its current status is ${order.status}.`;
+  return "We reviewed your request. A support specialist will follow up if further action is needed.";
+}
+
+/** A completed refund message is permitted only when every customer-visible
+ * detail is bound back to the same durable effect, immutable command, account,
+ * and inbound turn. This intentionally does not inspect model text. */
+async function completedRefundResponse(
+  supportCase: SupportCase,
+  turnId: string,
+) {
+  const metadata = supportCase.metadata as Record<string, unknown>;
+  const command = financialResponseCommandSchema.safeParse(
+    metadata.refundCommand,
+  );
+  const result = supportCase.refundResult;
+  const turn = await persistentCaseStore.turn(supportCase.id, turnId);
+  if (!command.success || !result || !turn) return undefined;
+
+  const binding = resolveConfiguredBinding(
+    bindingsForPersistedCase(supportCase).transactions,
+  );
+  let expectedAmount;
+  try {
+    expectedAmount = legacyAmountToMoney(
+      command.data.amount,
+      command.data.currency,
+    );
+  } catch {
+    return undefined;
+  }
+  const expectedFingerprint = refundFingerprint({
+    binding,
+    approvalCaseId: supportCase.id,
+    orderId: command.data.orderId,
+    amount: expectedAmount,
+    reason: command.data.reason,
+    idempotencyKey: command.data.idempotencyKey,
+  });
+  const immutable = immutableRefundCommandSchema.safeParse(
+    await persistentCaseStore.getAction(
+      supportCase.id,
+      "refund-command",
+      command.data.fingerprint,
+    ),
+  );
+  const idempotency = await persistentCaseStore.idempotency(
+    command.data.idempotencyKey,
+  );
+  const effect = durableRefundEffectSchema.safeParse(idempotency?.effect);
+  const decision = await persistentCaseStore.approvalDecision(
+    supportCase.id,
+    turnId,
+  );
+  const projected = metadata.refundEffects as
+    Record<string, unknown> | undefined;
+  const projectedResult = projected?.[command.data.fingerprint];
+
+  if (
+    command.data.approvalCaseId !== supportCase.id ||
+    command.data.fingerprint !== expectedFingerprint ||
+    turn.commandFingerprint !== command.data.fingerprint ||
+    metadata.activeTurnId !== turnId ||
+    !supportCase.approval?.approved ||
+    !decision?.approved ||
+    decision.turnId !== turnId ||
+    decision.commandFingerprint !== command.data.fingerprint ||
+    !immutable.success ||
+    immutable.data.binding.tenantId !== binding.tenantId ||
+    immutable.data.binding.providerKind !== binding.providerKind ||
+    immutable.data.binding.providerAccountId !== binding.providerAccountId ||
+    immutable.data.approvalCaseId !== supportCase.id ||
+    immutable.data.orderId !== command.data.orderId ||
+    immutable.data.amount.currency !== expectedAmount.currency ||
+    immutable.data.amount.minor !== expectedAmount.minor ||
+    immutable.data.reason !== command.data.reason ||
+    immutable.data.idempotencyKey !== command.data.idempotencyKey ||
+    immutable.data.fingerprint !== command.data.fingerprint ||
+    idempotency?.fingerprint !== command.data.fingerprint ||
+    !effect.success ||
+    effect.data.orderId !== command.data.orderId ||
+    effect.data.amount.currency !== expectedAmount.currency ||
+    effect.data.amount.minor !== expectedAmount.minor ||
+    effect.data.idempotencyKey !== command.data.idempotencyKey ||
+    result.refundId !== effect.data.refundId ||
+    result.orderId !== effect.data.orderId ||
+    result.amount !== command.data.amount ||
+    result.currency !== effect.data.amount.currency ||
+    result.idempotencyKey !== effect.data.idempotencyKey ||
+    result.executedAt !== effect.data.executedAt ||
+    JSON.stringify(projectedResult) !== JSON.stringify(result)
+  )
+    return undefined;
+
+  return `Your refund of ${result.amount} ${result.currency} has been issued.`;
+}
 
 async function getCaseOrThrow(caseId: string, turnId: string) {
   const supportCase = await caseStore.get(caseId);
@@ -68,6 +256,10 @@ const classifyStep = createStep({
     const traceId = tracingContext?.currentSpan?.traceId;
     if (traceId) {
       await caseStore.update(supportCase.id, { traceId });
+      await caseStore.recordTurnTelemetry(supportCase.id, inputData.turnId, {
+        traceId,
+        workflowRunId: supportCase.workflowRunId,
+      });
     }
 
     const result = await mastra.getAgent("triageAgent").generate(
@@ -133,14 +325,37 @@ const retrievePolicyStep = createStep({
       throw new Error(
         "Registered search_support_knowledge tool has no execute function.",
       );
+    // The operational workflow is a trusted publication boundary. It may
+    // establish the initial local generation; the read tool below never can.
+    await publishKnowledge(bindings.knowledge, {
+      onlyIfMissing: true,
+      mastra,
+      tracingContext,
+    });
 
-    const result = await searchTool.execute(
+    const result = await withTrustedCaseReadScope(
       {
-        queryText,
-        topK: 5,
-        binding: resolveConfiguredBinding(bindings.knowledge),
+        caseId: supportCase.id,
+        ownerId: (supportCase.metadata as Record<string, unknown>)
+          .ownerId as string,
+        tenantId: bindings.knowledge.tenantId,
       },
-      { mastra, requestContext, tracingContext },
+      () =>
+        traceOperationalPort({
+          mastra,
+          tracingContext,
+          kind: "tool",
+          operation: "tool.search_support_knowledge",
+          run: () =>
+            searchTool.execute!(
+              {
+                queryText,
+                topK: 5,
+                binding: resolveConfiguredBinding(bindings.knowledge),
+              },
+              { mastra, requestContext, tracingContext },
+            ),
+        }),
     );
     const sources: Array<{
       metadata?: Record<string, unknown>;
@@ -160,6 +375,38 @@ const retrievePolicyStep = createStep({
       text: String(source.metadata?.text ?? source.document ?? ""),
       source: String(source.metadata?.source ?? "unknown"),
       score: source.score ?? 0,
+      version:
+        typeof source.metadata?.version === "string"
+          ? source.metadata.version
+          : undefined,
+      documentHash:
+        typeof source.metadata?.documentHash === "string"
+          ? source.metadata.documentHash
+          : undefined,
+      generationId:
+        typeof source.metadata?.generationId === "string"
+          ? source.metadata.generationId
+          : undefined,
+      effectiveAt:
+        typeof source.metadata?.effectiveAt === "string"
+          ? source.metadata.effectiveAt
+          : undefined,
+      indexedAt:
+        typeof source.metadata?.indexedAt === "string"
+          ? source.metadata.indexedAt
+          : undefined,
+      expiresAt:
+        typeof source.metadata?.expiresAt === "string"
+          ? source.metadata.expiresAt
+          : undefined,
+      providerKind:
+        typeof source.metadata?.providerKind === "string"
+          ? source.metadata.providerKind
+          : undefined,
+      providerAccountId:
+        typeof source.metadata?.providerAccountId === "string"
+          ? source.metadata.providerAccountId
+          : undefined,
     }));
 
     await caseStore.update(supportCase.id, { policyMatches });
@@ -195,6 +442,9 @@ const inspectOrderStep = createStep({
         "A registered commerce lookup tool has no execute function.",
       );
     }
+    // Fixture setup is an operational workflow concern. Read tools stay pure
+    // so a supervisor investigation cannot seed commerce state.
+    await ensureProviderFixtures(resolveConfiguredBinding(bindings.commerce));
     const executeOrder = orderTool.execute;
     const executeSubscription = subscriptionTool.execute;
     const executeRefundHistory = refundHistoryTool.execute;
@@ -207,34 +457,55 @@ const inspectOrderStep = createStep({
       },
       async () => {
         const orderLookup = orderLookupSchema.parse(
-          await executeOrder(
-            {
-              customerEmail: supportCase.customer.email,
-              binding: resolveConfiguredBinding(bindings.commerce),
-            },
-            { mastra, requestContext, tracingContext },
-          ),
-        );
-
-        const subscriptionLookup = subscriptionLookupSchema.parse(
-          await executeSubscription(
-            {
-              customerEmail: supportCase.customer.email,
-              binding: resolveConfiguredBinding(bindings.commerce),
-            },
-            { mastra, requestContext, tracingContext },
-          ),
-        );
-
-        const refundHistory = orderLookup.found
-          ? refundHistorySchema.parse(
-              await executeRefundHistory(
+          await traceOperationalPort({
+            mastra,
+            tracingContext,
+            kind: "tool",
+            operation: "tool.lookup_order",
+            run: () =>
+              executeOrder(
                 {
-                  orderId: orderLookup.order?.orderId ?? "",
+                  customerEmail: supportCase.customer.email,
                   binding: resolveConfiguredBinding(bindings.commerce),
                 },
                 { mastra, requestContext, tracingContext },
               ),
+          }),
+        );
+
+        const subscriptionLookup = subscriptionLookupSchema.parse(
+          await traceOperationalPort({
+            mastra,
+            tracingContext,
+            kind: "tool",
+            operation: "tool.lookup_subscription",
+            run: () =>
+              executeSubscription(
+                {
+                  customerEmail: supportCase.customer.email,
+                  binding: resolveConfiguredBinding(bindings.commerce),
+                },
+                { mastra, requestContext, tracingContext },
+              ),
+          }),
+        );
+
+        const refundHistory = orderLookup.found
+          ? refundHistorySchema.parse(
+              await traceOperationalPort({
+                mastra,
+                tracingContext,
+                kind: "tool",
+                operation: "tool.lookup_customer_refund_history",
+                run: () =>
+                  executeRefundHistory(
+                    {
+                      orderId: orderLookup.order?.orderId ?? "",
+                      binding: resolveConfiguredBinding(bindings.commerce),
+                    },
+                    { mastra, requestContext, tracingContext },
+                  ),
+              }),
             )
           : { refunds: [] };
 
@@ -309,8 +580,110 @@ const draftResponseStep = createStep({
 
     const responseUsage = result.usage;
     const existingUsage = supportCase.agentUsage;
+    const parsedDraft = draftResolutionSchema.parse(result.object);
+    const policyMatches = supportCase.policyMatches ?? [];
+    const validCitations = new Set(
+      policyMatches.flatMap((entry) => [entry.title, entry.source]),
+    );
+    const missingEvidence = policyMatches.length === 0;
+    const requiresSupportingCitation =
+      parsedDraft.recommendRefund || !parsedDraft.requiresEscalation;
+    const invalidCitation =
+      (requiresSupportingCitation && parsedDraft.citedSources.length === 0) ||
+      parsedDraft.citedSources.some(
+        (citation) => !validCitations.has(citation),
+      );
+    // Retrieval is not a decision. Re-read the selected authoritative
+    // publication just before committing the draft so expiry, rollback, or a
+    // stale/tampered vector result cannot support a customer promise.
+    const applicableEvidence = await Promise.all(
+      parsedDraft.citedSources.map(async (citation) => {
+        const match = policyMatches.find(
+          (entry) => entry.title === citation || entry.source === citation,
+        );
+        if (
+          !match?.source ||
+          !match.documentHash ||
+          !match.generationId ||
+          !match.version ||
+          !match.effectiveAt ||
+          !match.indexedAt ||
+          !match.providerKind ||
+          !match.providerAccountId ||
+          match.providerKind !== bindings.knowledge.providerKind ||
+          match.providerAccountId !== bindings.knowledge.providerAccountId
+        )
+          return false;
+        try {
+          if (
+            (await knowledgePublicationStore.activeGeneration(
+              bindings.knowledge,
+            )) !== match.generationId
+          )
+            return false;
+          const authoritative = await knowledgePublicationStore.document(
+            bindings.knowledge,
+            match.generationId,
+            match.source,
+            match.documentHash,
+          );
+          const now = Date.now();
+          return Boolean(
+            authoritative &&
+            authoritative.title === match.title &&
+            authoritative.version === match.version &&
+            authoritative.effectiveAt === match.effectiveAt &&
+            authoritative.indexedAt === match.indexedAt &&
+            authoritative.expiresAt === match.expiresAt &&
+            Date.parse(authoritative.effectiveAt) <= now &&
+            (!authoritative.expiresAt ||
+              Date.parse(authoritative.expiresAt) > now),
+          );
+        } catch {
+          return false;
+        }
+      }),
+    );
+    const staleOrUnauthoritativeEvidence =
+      requiresSupportingCitation && !applicableEvidence.every(Boolean);
+    // A model cannot turn absent, stale, or conflicting evidence into an
+    // executable promise. Preserve its text for staff review, but force the
+    // durable case down the escalation path and suppress a refund proposal.
+    // An escalation is deliberately a handoff, not a license to deliver
+    // arbitrary model prose.  Keep the model's proposed text only in staff
+    // metadata: even a non-refund draft can falsely assert that a refund was
+    // issued or rely on evidence that expired while it was being generated.
+    const mustUseSafeEscalation =
+      parsedDraft.requiresEscalation ||
+      missingEvidence ||
+      invalidCitation ||
+      staleOrUnauthoritativeEvidence;
+    const safeDraft = mustUseSafeEscalation
+      ? {
+          ...parsedDraft,
+          draftResponse: safeEscalationResponse,
+          recommendRefund: false,
+          refundAmount: undefined,
+          refundCurrency: undefined,
+          refundReason: undefined,
+          requiresEscalation: true,
+          escalationReason: missingEvidence
+            ? "No published policy evidence was retrieved for this case."
+            : "Draft lacks applicable evidence from the active publication.",
+        }
+      : parsedDraft;
     await caseStore.update(supportCase.id, {
-      draft: draftResolutionSchema.parse(result.object),
+      draft: safeDraft,
+      metadata: mustUseSafeEscalation
+        ? {
+            ...supportCase.metadata,
+            rejectedDraftForStaff: {
+              draftResponse: parsedDraft.draftResponse,
+              citedSources: parsedDraft.citedSources,
+              reason: safeDraft.escalationReason,
+            },
+          }
+        : supportCase.metadata,
       agentUsage: {
         inputTokens:
           (existingUsage?.inputTokens ?? 0) + (responseUsage.inputTokens ?? 0),
@@ -507,14 +880,42 @@ const requestApprovalStep = createStep({
         ...immutableCommand,
         fingerprint: command.fingerprint,
       };
-      await providerRegistry(binding)
-        .transactions(binding)
-        .quoteRefund(approvedCommand);
+      // Tool.execute does not create a Mastra span when this trusted workflow
+      // invokes a deterministic provider port directly.  Quote is a real
+      // financial-provider boundary even though it has no effect, so include
+      // it in the workflow's tenant/turn trace before native suspension.
+      await traceOperationalPort({
+        mastra,
+        tracingContext,
+        kind: "provider",
+        operation: "transactions.quote_refund",
+        run: () =>
+          providerRegistry(binding)
+            .transactions(binding)
+            .quoteRefund(approvedCommand),
+      });
       await persistentCaseStore.saveAction(
         supportCase.id,
         "refund-command",
         command.fingerprint,
         approvedCommand,
+      );
+      // Bind the exact evidence selected for this immutable command and turn.
+      // Later case projections/drafts are mutable operational state and must
+      // never decide whether a suspended approval may create an effect.
+      await persistentCaseStore.saveAction(
+        supportCase.id,
+        "refund-policy-evidence",
+        command.fingerprint,
+        {
+          turnId,
+          binding: {
+            tenantId: bindings.knowledge.tenantId,
+            providerKind: bindings.knowledge.providerKind,
+            providerAccountId: bindings.knowledge.providerAccountId,
+          },
+          citations: parsedDraftEvidence(supportCase, draft.citedSources),
+        },
       );
       await persistentCaseStore.bindTurnCommand(
         supportCase.id,
@@ -648,7 +1049,9 @@ const resolveCaseStep = createStep({
       inputData.turnId,
     );
     const draft = supportCase.draft!;
-    let finalResponse = draft.draftResponse;
+    let finalResponse = draft.requiresEscalation
+      ? safeEscalationResponse
+      : ordinarySupportResponse(supportCase);
     let status: "resolved" | "escalated" = draft.requiresEscalation
       ? "escalated"
       : "resolved";
@@ -676,11 +1079,16 @@ const resolveCaseStep = createStep({
           // Phase 003 executes through the native Agent approval lifecycle.
           // The tool writes its durable result before this workflow resumes;
           // never call a requireApproval tool directly from a workflow step.
-          if (supportCase.refundResult) {
+          const completed = await completedRefundResponse(
+            supportCase,
+            inputData.turnId,
+          );
+          if (completed) {
             status = "resolved";
+            finalResponse = completed;
           } else
             throw new Error(
-              "Native approval resumed without a durable refund effect; recovery must reconcile the native run.",
+              "Native approval resumed without a matching durable refund effect; recovery must reconcile the immutable command.",
             );
         }
       }
@@ -712,7 +1120,7 @@ const resolveCaseStep = createStep({
         status,
       },
     });
-    await deliverOutbox().catch((error) =>
+    await deliverOutbox(undefined, 10, caseStore, { mastra }).catch((error) =>
       mastra
         ?.getLogger()
         ?.warn("Local outbox delivery failed; recovery will retry it.", {

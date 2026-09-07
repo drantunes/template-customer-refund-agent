@@ -15,8 +15,21 @@ import {
 } from "../providers/registry";
 import { withNativeRefundExecutionAuthorization } from "../providers/native-execution";
 import { activePrincipalHasRole } from "../server/auth";
+import { traceOperationalPort } from "../lib/operational-spans";
+import { isRefundPolicyEvidenceError } from "../lib/refund-policy-evidence";
 
 export const MAX_AUTO_APPROVABLE_REFUND = 1000;
+/**
+ * An exception alone cannot prove a financial effect failed: a transport can
+ * break after the provider commits. Only deterministic provider rejections
+ * are financial failures; all other no-effect observations remain durable
+ * uncertainty for recovery/staff review without raising a false refund alert.
+ */
+function isConfirmedRefundFailure(error: unknown) {
+  return /\b(?:400|401|403|404|409|422)\b|permanent|rejected|invalid|not found|exceeds the remaining balance|currency does not match/i.test(
+    String(error),
+  );
+}
 const commandSchema = z.object({
   approvalCaseId: z.string(),
   orderId: z.string(),
@@ -136,24 +149,62 @@ export const issueRefundTool = createTool({
       throw new Error("The persisted refund command fingerprint is invalid.");
     const binding = resolveConfiguredBinding(bindings.transactions);
     await ensureProviderFixtures(binding);
-    const effect = await withNativeRefundExecutionAuthorization(
-      context,
-      native,
-      command.fingerprint,
-      (authorization) =>
-        providerRegistry(binding).transactions(binding).issueRefund(
+    let effect;
+    try {
+      effect = await withNativeRefundExecutionAuthorization(
+        context,
+        native,
+        command.fingerprint,
+        (authorization) =>
+          traceOperationalPort({
+            mastra: context?.mastra,
+            tracingContext: context?.tracingContext,
+            kind: "provider",
+            operation: "transactions.issue_refund",
+            run: () =>
+              providerRegistry(binding).transactions(binding).issueRefund(
+                {
+                  binding,
+                  approvalCaseId: input.caseId,
+                  orderId: command.orderId,
+                  amount,
+                  reason: command.reason,
+                  idempotencyKey: command.idempotencyKey,
+                  fingerprint: command.fingerprint,
+                },
+                authorization,
+              ),
+          }),
+      );
+    } catch (error) {
+      // A transport error is not proof that the provider did not commit. The
+      // local idempotency record is the durable fact used by recovery; do not
+      // permanently report a financial failure when it already exists.
+      const durable = await caseStore.idempotency(command.idempotencyKey);
+      if (!durable) {
+        const policyEvidenceRejected = isRefundPolicyEvidenceError(error);
+        const confirmed = isConfirmedRefundFailure(error);
+        await caseStore.saveAction(
+          input.caseId,
+          policyEvidenceRejected
+            ? "refund-policy-evidence-rejected"
+            : confirmed
+              ? "refund-failure"
+              : "refund-uncertain",
+          command.fingerprint,
           {
-            binding,
-            approvalCaseId: input.caseId,
-            orderId: command.orderId,
-            amount,
-            reason: command.reason,
-            idempotencyKey: command.idempotencyKey,
-            fingerprint: command.fingerprint,
+            category: policyEvidenceRejected ? "policy" : "provider",
+            classification: policyEvidenceRejected
+              ? "requires-review"
+              : confirmed
+                ? "confirmed-failed"
+                : "uncertain",
+            failedAt: new Date().toISOString(),
           },
-          authorization,
-        ),
-    );
+        );
+      }
+      throw error;
+    }
     const result = {
       refundId: effect.refundId,
       orderId: effect.orderId,

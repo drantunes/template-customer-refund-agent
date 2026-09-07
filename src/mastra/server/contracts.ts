@@ -44,13 +44,41 @@ export const loginResponseSchema = z.object({
     roles: z.array(z.enum(["customer", "support-agent", "approver", "admin"])),
   }),
 });
-export const feedbackRequestSchema = caseFeedbackSchema.pick({
-  rating: true,
-  comment: true,
-});
+export const feedbackRequestSchema = caseFeedbackSchema
+  .pick({
+    rating: true,
+    comment: true,
+  })
+  .extend({ responseMessageId: z.string().min(1) });
 export const errorResponseSchema = z.object({ error: z.string() });
 export const reindexResponseSchema = z.object({
   indexed: z.number().int().nonnegative(),
+});
+export const validationRequestSchema = z.object({
+  // This is intentionally an explicit alternate execution mode. Ordinary
+  // application requests do not inherit validation accounting.
+  mode: z.literal("sandbox"),
+});
+export const supervisorExecutionRequestSchema = z.object({
+  message: z.string().min(1).max(10_000),
+  validation: validationRequestSchema.optional(),
+});
+export const reindexRequestSchema = z.object({
+  validation: validationRequestSchema.optional(),
+});
+export const supervisorExecutionResponseSchema = z.object({
+  text: z.string(),
+  traceId: z.string().optional(),
+  toolNames: z.array(z.string()),
+  // Staff can inspect the read-only evidence their authorized supervisor run
+  // actually observed. This deliberately exposes no command or approval data.
+  toolResults: z.array(
+    z.object({
+      toolName: z.string(),
+      result: z.unknown().optional(),
+      isError: z.boolean(),
+    }),
+  ),
 });
 export const monitoringSummarySchema = z.object({
   generatedAt: z.iso.datetime(),
@@ -73,8 +101,11 @@ export const monitoringSummarySchema = z.object({
     rejected: z.number().int().nonnegative(),
     autoEscalated: z.number().int().nonnegative(),
     approvalRate: z.number().nullable(),
-    totalApprovedAmount: z.number().nonnegative(),
-    currency: z.string(),
+    executed: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    executedTotals: z.array(
+      z.object({ currency: z.string(), minor: z.number().int().nonnegative() }),
+    ),
   }),
   feedback: z.object({
     totalResponses: z.number().int().nonnegative(),
@@ -86,10 +117,58 @@ export const monitoringSummarySchema = z.object({
         caseId: z.string(),
         subject: z.string(),
         rating: z.enum(["up", "down"]),
-        comment: z.string().optional(),
         submittedAt: z.iso.datetime(),
+        turnId: z.string().optional(),
+        runId: z.string().optional(),
+        traceId: z.string().optional(),
       }),
     ),
+  }),
+  telemetry: z.object({
+    observedTraces: z.number().int().nonnegative(),
+    observedSpans: z.number().int().nonnegative(),
+    providerOrToolErrorRate: z.number().nullable(),
+    providerOrToolP95Ms: z.number().nullable(),
+    modelUsage: z.array(
+      z.object({
+        model: z.string(),
+        inputTokens: z.number().int().nonnegative(),
+        outputTokens: z.number().int().nonnegative(),
+        estimatedCostMicrosUsd: z.number().nullable(),
+      }),
+    ),
+    workflowStages: z.array(
+      z.object({
+        operation: z.string(),
+        calls: z.number().int().nonnegative(),
+        errorRate: z.number().nullable(),
+        p95Ms: z.number().nullable(),
+      }),
+    ),
+    providerCalls: z.array(
+      z.object({
+        operation: z.string(),
+        calls: z.number().int().nonnegative(),
+        errorRate: z.number().nullable(),
+        p95Ms: z.number().nullable(),
+      }),
+    ),
+    toolCalls: z.array(
+      z.object({
+        operation: z.string(),
+        calls: z.number().int().nonnegative(),
+        errorRate: z.number().nullable(),
+        p95Ms: z.number().nullable(),
+      }),
+    ),
+    unavailable: z.array(z.string()),
+    alerts: z.array(z.string()),
+  }),
+  failures: z.object({
+    rejectedDecisions: z.number().int().nonnegative(),
+    workflow: z.number().int().nonnegative(),
+    financial: z.number().int().nonnegative(),
+    delivery: z.number().int().nonnegative(),
   }),
 });
 
@@ -228,6 +307,35 @@ export const supportOpenApiDocument = {
         },
       },
     },
+    "/support/cases/{caseId}/supervisor": {
+      post: {
+        parameters: [caseIdParameter],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: jsonSchema(supervisorExecutionRequestSchema),
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Authenticated read-only supervisor response",
+            content: {
+              "application/json": {
+                schema: jsonSchema(supervisorExecutionResponseSchema),
+              },
+            },
+          },
+          "400": {
+            description: "Invalid supervisor request",
+            content: {
+              "application/json": { schema: jsonSchema(errorResponseSchema) },
+            },
+          },
+        },
+      },
+    },
     "/support/cases/{caseId}/feedback": {
       post: {
         parameters: [caseIdParameter],
@@ -268,6 +376,12 @@ export const supportOpenApiDocument = {
     },
     "/support/knowledge/reindex": {
       post: {
+        requestBody: {
+          required: false,
+          content: {
+            "application/json": { schema: jsonSchema(reindexRequestSchema) },
+          },
+        },
         responses: {
           "200": {
             description: "Knowledge indexed",

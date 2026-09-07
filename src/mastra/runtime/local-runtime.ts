@@ -1,6 +1,7 @@
 import type { Client } from "@libsql/client";
 import type { LanguageModelV2 } from "@ai-sdk/provider";
 import type { Mastra } from "@mastra/core/mastra";
+import type { TracingContext } from "@mastra/core/observability";
 import { createHash } from "node:crypto";
 import { caseStore, type CaseStore } from "../lib/case-store";
 import {
@@ -38,6 +39,13 @@ import {
   type NativeRefundExecutionAuthorization,
 } from "../providers/native-execution";
 import { activePrincipalHasRole, ownerIdForCustomer } from "../server/auth";
+import { traceOperationalPort } from "../lib/operational-spans";
+import { retryOrEscalateOperationalFailure } from "../lib/operational-alerts";
+import {
+  isRefundPolicyEvidenceError,
+  refundPolicyEvidenceError,
+} from "../lib/refund-policy-evidence";
+import { knowledgeAccountKey } from "../lib/knowledge-publications";
 
 // Keep this runtime boundary independent of the workflow module: the workflow
 // itself uses LocalRuntime through providers and importing it here would create
@@ -58,6 +66,165 @@ export const defaultLocalBinding = (
   externalConversationId,
 });
 const text = (value: unknown) => String(value ?? "");
+type LocalTransaction = Awaited<ReturnType<Client["transaction"]>>;
+
+type RefundPolicyEvidence = {
+  title: string;
+  source: string;
+  documentHash: string;
+  generationId: string;
+  version: string;
+  effectiveAt: string;
+  indexedAt: string;
+  expiresAt?: string;
+  providerKind: string;
+  providerAccountId: string;
+};
+
+function isRefundPolicyEvidence(value: unknown): value is RefundPolicyEvidence {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Record<string, unknown>;
+  return (
+    [
+      "title",
+      "source",
+      "documentHash",
+      "generationId",
+      "version",
+      "effectiveAt",
+      "indexedAt",
+      "providerKind",
+      "providerAccountId",
+    ].every((key) => typeof entry[key] === "string") &&
+    (entry.expiresAt === undefined || typeof entry.expiresAt === "string")
+  );
+}
+
+/** Revalidate the command's immutable evidence in the same write transaction
+ * as its first possible provider effect. Idempotency replay happens before
+ * this boundary so an already committed matching effect remains reconcilable
+ * after a later policy expiry. */
+async function assertRefundPolicyEvidenceAtFirstEffect(
+  tx: LocalTransaction,
+  command: RefundCommand,
+  nativeTurnId: string,
+) {
+  const action = await tx.execute({
+    sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = 'refund-policy-evidence' AND fingerprint = ?",
+    args: [command.approvalCaseId, command.fingerprint],
+  });
+  // The production workflow always persists both immutable command and
+  // evidence actions before native suspension. Keep the provider-neutral
+  // native-tool characterization path usable for callers that never created
+  // a workflow command at all; it cannot impersonate a suspended command.
+  if (!action.rows[0]) {
+    const commandAction = await tx.execute({
+      sql: "SELECT id FROM support_actions WHERE case_id = ? AND kind = 'refund-command' AND fingerprint = ?",
+      args: [command.approvalCaseId, command.fingerprint],
+    });
+    if (!commandAction.rows[0]) return;
+  }
+  let stored: {
+    turnId?: unknown;
+    binding?: Record<string, unknown>;
+    citations?: unknown;
+  };
+  let knowledgeBinding: ProviderBinding;
+  try {
+    stored = JSON.parse(text(action.rows[0]?.data)) as typeof stored;
+    // The evidence action is immutable command material, but the selected
+    // knowledge account is case-owned authority. Resolve it from the durable
+    // originating case, never from the financial command or model input.
+    const originatingCase = await tx.execute({
+      sql: "SELECT data FROM support_cases WHERE id = ?",
+      args: [command.approvalCaseId],
+    });
+    const persisted = JSON.parse(text(originatingCase.rows[0]?.data)) as {
+      externalId?: unknown;
+      metadata?: unknown;
+    };
+    if (
+      !persisted ||
+      typeof persisted !== "object" ||
+      !persisted.metadata ||
+      typeof persisted.metadata !== "object"
+    )
+      throw new Error("missing originating case knowledge binding");
+    knowledgeBinding = bindingsForPersistedCase({
+      externalId: text(persisted.externalId),
+      metadata: persisted.metadata as Record<string, unknown>,
+    }).knowledge;
+  } catch {
+    throw refundPolicyEvidenceError(
+      "the approved command has no parseable originating policy evidence binding",
+    );
+  }
+  const citations = Array.isArray(stored.citations) ? stored.citations : [];
+  const binding = stored.binding;
+  if (
+    stored.turnId !== nativeTurnId ||
+    !binding ||
+    binding.tenantId !== command.binding.tenantId ||
+    binding.tenantId !== knowledgeBinding.tenantId ||
+    binding.providerKind !== knowledgeBinding.providerKind ||
+    binding.providerAccountId !== knowledgeBinding.providerAccountId ||
+    citations.length === 0 ||
+    !citations.every(isRefundPolicyEvidence)
+  )
+    throw refundPolicyEvidenceError(
+      "the approved command is not bound to complete originating policy evidence",
+    );
+
+  const accountKey = knowledgeAccountKey(knowledgeBinding);
+  const publication = await tx.execute({
+    sql: "SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?",
+    args: [accountKey],
+  });
+  const activeGeneration = publication.rows[0]?.generation_id;
+  const now = Date.now();
+  for (const citation of citations) {
+    if (activeGeneration !== citation.generationId)
+      throw refundPolicyEvidenceError(
+        "the cited policy generation is no longer the active publication",
+      );
+    const authoritative = await tx.execute({
+      sql: "SELECT d.*, g.account_key AS generation_account_key, g.tenant_id AS generation_tenant_id, g.provider_kind AS generation_provider_kind, g.provider_account_id AS generation_provider_account_id, g.state AS generation_state FROM support_knowledge_documents d JOIN support_knowledge_generations g ON g.id = d.generation_id WHERE d.generation_id = ? AND d.source = ? AND d.document_hash = ?",
+      args: [citation.generationId, citation.source, citation.documentHash],
+    });
+    const row = authoritative.rows[0] as Record<string, unknown> | undefined;
+    const effectiveAt = Date.parse(text(row?.effective_at));
+    const expiresAt = row?.expires_at
+      ? Date.parse(text(row.expires_at))
+      : undefined;
+    if (
+      !row ||
+      row.generation_state !== "active" ||
+      text(row.generation_account_key) !== accountKey ||
+      text(row.generation_tenant_id) !== knowledgeBinding.tenantId ||
+      text(row.generation_provider_kind) !== knowledgeBinding.providerKind ||
+      text(row.generation_provider_account_id) !==
+        knowledgeBinding.providerAccountId ||
+      text(row.title) !== citation.title ||
+      text(row.version) !== citation.version ||
+      text(row.effective_at) !== citation.effectiveAt ||
+      text(row.indexed_at) !== citation.indexedAt ||
+      (row.expires_at ? text(row.expires_at) : undefined) !==
+        citation.expiresAt ||
+      text(row.provider_kind) !== citation.providerKind ||
+      text(row.provider_account_id) !== citation.providerAccountId ||
+      citation.providerKind !== knowledgeBinding.providerKind ||
+      citation.providerAccountId !== knowledgeBinding.providerAccountId ||
+      !Number.isFinite(effectiveAt) ||
+      effectiveAt > now ||
+      (expiresAt !== undefined &&
+        (!Number.isFinite(expiresAt) || expiresAt <= now))
+    ) {
+      throw refundPolicyEvidenceError(
+        "the cited policy is missing, altered, inactive, or outside its applicability window",
+      );
+    }
+  }
+}
 
 /** Compare the persisted authorization command structurally. JSON text is not
  * an authority format: equivalent objects may have a different key order. */
@@ -120,7 +287,7 @@ export class LocalRuntime
       CREATE TABLE IF NOT EXISTS local_orders (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, order_id TEXT NOT NULL, customer_email TEXT NOT NULL, product TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, charge_count INTEGER NOT NULL, placed_at TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, order_id));
       CREATE TABLE IF NOT EXISTS local_subscriptions (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, subscription_id TEXT NOT NULL, customer_email TEXT NOT NULL, plan TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, renews_at TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, subscription_id));
       CREATE TABLE IF NOT EXISTS local_refunds (refund_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, order_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, reason TEXT NOT NULL, issued_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS local_knowledge (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, version TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, source));
+      CREATE TABLE IF NOT EXISTS local_knowledge (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, version TEXT NOT NULL, effective_at TEXT, expires_at TEXT, PRIMARY KEY(tenant_id, provider_account_id, source));
       CREATE TABLE IF NOT EXISTS local_deliveries (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, payload_fingerprint TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, idempotency_key));
     `);
     try {
@@ -130,6 +297,25 @@ export class LocalRuntime
     } catch (error) {
       if (!String(error).includes("duplicate column")) throw error;
     }
+    for (const sql of [
+      "ALTER TABLE local_knowledge ADD COLUMN effective_at TEXT",
+      "ALTER TABLE local_knowledge ADD COLUMN expires_at TEXT",
+    ])
+      try {
+        await this.client.execute(sql);
+      } catch (error) {
+        if (!String(error).includes("duplicate column")) throw error;
+      }
+    // Phase 003 fixture rows predate applicability metadata. Only the known,
+    // versioned local fixture identities are migrated; unknown imported rows
+    // deliberately remain unpublished rather than receiving invented dates.
+    await this.client.batch(
+      POLICY_DOCUMENTS.map((document) => ({
+        sql: "UPDATE local_knowledge SET effective_at = '2026-01-01T00:00:00.000Z' WHERE source = ? AND title = ? AND text = ? AND version = 'local-v1' AND effective_at IS NULL",
+        args: [document.source, document.title, document.text],
+      })),
+      "write",
+    );
   }
   private assertLocalBinding(binding: ProviderBinding) {
     if (
@@ -227,7 +413,7 @@ export class LocalRuntime
           args,
         },
         ...POLICY_DOCUMENTS.map((document) => ({
-          sql: "INSERT OR IGNORE INTO local_knowledge VALUES (?, ?, ?, ?, ?, 'local-v1')",
+          sql: "INSERT OR IGNORE INTO local_knowledge(tenant_id, provider_account_id, source, title, text, version, effective_at, expires_at) VALUES (?, ?, ?, ?, ?, 'local-v1', '2026-01-01T00:00:00.000Z', NULL)",
           args: [...args, document.source, document.title, document.text],
         })),
       ],
@@ -495,6 +681,11 @@ export class LocalRuntime
         await tx.rollback();
         return { ...effect, replayed: true };
       }
+      // This is deliberately below exact idempotency reconciliation and above
+      // every provider-effect insert. A completed command can always be
+      // projected once; a new effect cannot rely on evidence that expired or
+      // was superseded while native approval was suspended.
+      await assertRefundPolicyEvidenceAtFirstEffect(tx, command, native.turnId);
       const orderRows = await tx.execute({
         sql: "SELECT * FROM local_orders WHERE tenant_id = ? AND provider_account_id = ? AND order_id = ?",
         args: [
@@ -627,6 +818,10 @@ export class LocalRuntime
           text: text(value.text),
           source: text(value.source),
           version: text(value.version),
+          effectiveAt: value.effective_at
+            ? text(value.effective_at)
+            : undefined,
+          expiresAt: value.expires_at ? text(value.expires_at) : undefined,
           score:
             terms.filter((term) => haystack.includes(term)).length /
             Math.max(terms.length, 1),
@@ -639,13 +834,13 @@ export class LocalRuntime
   async listChanged(binding: ProviderBinding) {
     await this.ensured();
     const result = await this.client.execute({
-      sql: "SELECT source, version FROM local_knowledge WHERE tenant_id = ? AND provider_account_id = ?",
+      sql: "SELECT source, version, effective_at FROM local_knowledge WHERE tenant_id = ? AND provider_account_id = ?",
       args: [binding.tenantId, binding.providerAccountId],
     });
     return result.rows.map((row) => ({
       source: text(row.source),
       version: text(row.version),
-      changedAt: "2026-09-05T00:00:00.000Z",
+      changedAt: text(row.effective_at),
     }));
   }
   async fetchDocument(binding: ProviderBinding, source: string) {
@@ -661,6 +856,8 @@ export class LocalRuntime
           text: text(row.text),
           source: text(row.source),
           version: text(row.version),
+          effectiveAt: row.effective_at ? text(row.effective_at) : undefined,
+          expiresAt: row.expires_at ? text(row.expires_at) : undefined,
           score: 1,
         }
       : undefined;
@@ -786,6 +983,7 @@ export async function deliverOutbox(
   registry?: ProviderRegistry,
   limit = 10,
   store: CaseStore = caseStore,
+  observability?: { mastra?: Mastra; tracingContext?: TracingContext },
 ) {
   const attempted = new Set<string>();
   let claimed = 0;
@@ -807,6 +1005,19 @@ export async function deliverOutbox(
       }
     };
     try {
+      // Outbox processing is global, but every attempt belongs to the durable
+      // case that enqueued it. Never attach an arbitrary queue item to the
+      // workflow that happened to trigger this sweep.
+      const ownerCase = await store.get(item.caseId);
+      const ownerBinding = ownerCase
+        ? bindingsForPersistedCase(ownerCase).support
+        : undefined;
+      if (
+        ownerBinding &&
+        (ownerBinding.tenantId !== item.binding.tenantId ||
+          ownerBinding.providerAccountId !== item.binding.providerAccountId)
+      )
+        throw new Error("Outbox item binding does not match its durable case.");
       const selected =
         registry ??
         (await import("../providers/registry")).providerRegistry(item.binding);
@@ -817,9 +1028,21 @@ export async function deliverOutbox(
       if (lostOwnership) break;
       heartbeat = setInterval(() => void renew(), 10_000);
       heartbeat.unref();
-      const receipt = await selected
-        .support(item.binding)
-        .deliver(item.binding, item.body, item.status, item.id);
+      const receipt = await traceOperationalPort({
+        mastra: observability?.mastra,
+        // Do not use the caller's context or the mutable case projection: a
+        // later follow-up can replace both. The outbox owns its response turn.
+        traceId:
+          item.correlationState === "known"
+            ? item.originatingTraceId
+            : undefined,
+        kind: "provider",
+        operation: "support.deliver",
+        run: () =>
+          selected
+            .support(item.binding)
+            .deliver(item.binding, item.body, item.status, item.id),
+      });
       if (lostOwnership) break;
       await store.completeOutbox(item.id, receipt, item.leaseToken);
     } catch (error) {
@@ -845,10 +1068,40 @@ export async function deliverOutbox(
 
 /** Restarts interrupted Mastra work; suspended approvals remain suspended. */
 export async function recoverLocalWorkflows(
-  mastra: { getWorkflow(id: string): any },
+  mastra: {
+    getWorkflow(id: string): any;
+    /** Present on the registered runtime; optional for narrow recovery fakes. */
+    observability?: Mastra["observability"];
+  },
   limit = 10,
   store: CaseStore = caseStore,
 ) {
+  const retryOperationalFailure = async (
+    dispatch: DispatchRecord,
+    error: unknown,
+  ): Promise<"retried" | "escalate"> => {
+    // This is the operational recovery path, not a dashboard-only
+    // classification. Attempts are durably bounded by CaseStore at three.
+    const result = await retryOrEscalateOperationalFailure({
+      signal: {
+        providerOrTool: "resolve-support-case",
+        occurredAt: new Date(),
+        durationMs: 0,
+        failed: true,
+      },
+      retry: () =>
+        store.retryDispatch(
+          dispatch.id,
+          dispatch.caseId,
+          error,
+          dispatch.leaseToken,
+        ),
+      // Recovery must defer its case projection until it knows the retry has
+      // exhausted. The caller owns the fenced escalation transition.
+      escalate: async () => false,
+    });
+    return result.disposition === "retry" ? "retried" : "escalate";
+  };
   let claimed = 0;
   while (claimed < limit) {
     // Workflow restarts are sequential; claiming ahead would let a waiting
@@ -883,6 +1136,17 @@ export async function recoverLocalWorkflows(
         );
         continue;
       }
+      // Publication is a trusted worker responsibility, never a read-tool
+      // side effect. This preserves the ordinary search capability as a pure
+      // read while keeping the local quickstart operational after startup.
+      const { publishKnowledge } = await import("../lib/publish-knowledge");
+      await publishKnowledge(bindingsForPersistedCase(supportCase).knowledge, {
+        onlyIfMissing: true,
+        // The background worker is a real operational boundary. Its provider
+        // reads need the registered observability instance just like a
+        // foreground workflow, while lightweight recovery fakes remain pure.
+        ...(mastra.observability ? { mastra: mastra as Mastra } : {}),
+      });
       const workflow = mastra.getWorkflow("resolveSupportCaseWorkflow");
       const existing = await workflow.getWorkflowRunById?.(dispatch.runId);
       if (
@@ -929,6 +1193,7 @@ export async function recoverLocalWorkflows(
           dispatch.caseId,
           `Workflow recovery failed: ${existing.status}`,
           dispatch.leaseToken,
+          "escalated",
         );
         continue;
       }
@@ -964,14 +1229,20 @@ export async function recoverLocalWorkflows(
               }),
       );
       if (lostOwnership) break;
-      if (result.status === "failed")
+      if (result.status === "failed") {
+        const recovery = await retryOperationalFailure(
+          dispatch,
+          "Workflow restart failed.",
+        ).catch(() => "escalate" as const);
+        if (recovery === "retried") continue;
         await store.failDispatchAndCase(
           dispatch.id,
           dispatch.caseId,
           "Workflow restart failed.",
           dispatch.leaseToken,
+          "escalated",
         );
-      else
+      } else
         await store.completeDispatch(
           dispatch.id,
           result.status === "suspended" ? "suspended" : "completed",
@@ -979,15 +1250,21 @@ export async function recoverLocalWorkflows(
           dispatch.leaseToken,
         );
     } catch (error) {
-      if (!lostOwnership)
-        await store
-          .failDispatchAndCase(
-            dispatch.id,
-            dispatch.caseId,
-            error,
-            dispatch.leaseToken,
-          )
-          .catch(() => undefined);
+      if (!lostOwnership) {
+        const recovery = await retryOperationalFailure(dispatch, error).catch(
+          () => "escalate" as const,
+        );
+        if (recovery !== "retried")
+          await store
+            .failDispatchAndCase(
+              dispatch.id,
+              dispatch.caseId,
+              error,
+              dispatch.leaseToken,
+              "escalated",
+            )
+            .catch(() => undefined);
+      }
     } finally {
       if (heartbeat) clearInterval(heartbeat);
     }
@@ -1231,6 +1508,7 @@ export async function recoverApprovedNativeDecisions(
           item.caseId,
           "Native approval completed without a durable refund effect.",
           dispatch.leaseToken,
+          "escalated",
         );
         continue;
       }
@@ -1264,6 +1542,7 @@ export async function recoverApprovedNativeDecisions(
           item.caseId,
           "Workflow recovery failed after the native decision.",
           dispatch.leaseToken,
+          "escalated",
         );
       else if (result.status === "success")
         await store.completeDispatch(
@@ -1284,13 +1563,17 @@ export async function recoverApprovedNativeDecisions(
       // The native snapshot may be temporarily unavailable after a process
       // crash. Return its lease to the suspended queue so a later bounded
       // sweep can reconcile it; never invent an approval or effect.
-      if (/does not match the immutable approved command/.test(String(error)))
+      if (
+        /does not match the immutable approved command/.test(String(error)) ||
+        isRefundPolicyEvidenceError(error)
+      )
         await store
           .failDispatchAndCase(
             dispatch.id,
             item.caseId,
             error,
             dispatch.leaseToken,
+            "escalated",
           )
           .catch(() => undefined);
       else
@@ -1349,7 +1632,7 @@ export function startLocalRuntimeWorkers(
         logger?.warn("Native approval recovery failed.", { error }),
       );
       await recoverLocalWorkflows(mastra);
-      await deliverOutbox();
+      await deliverOutbox(undefined, 10, caseStore, { mastra });
       if (Date.now() - lastRetentionSweep >= retentionInterval) {
         const caseRetention = await caseStore.enforceRetention();
         const storage = mastra.getStorage?.();

@@ -131,6 +131,30 @@ describe("native issue_refund approval", () => {
       ...base,
       fingerprint,
     });
+    const { publishKnowledge } =
+      await import("../../src/mastra/lib/publish-knowledge");
+    const { knowledgePublicationStore } =
+      await import("../../src/mastra/lib/knowledge-publications");
+    await publishKnowledge(binding);
+    const [citation] = await knowledgePublicationStore.search(
+      binding,
+      "duplicate charge",
+      1,
+    );
+    await caseStore.saveAction(
+      "native-case",
+      "refund-policy-evidence",
+      fingerprint,
+      {
+        turnId: "legacy:native-case",
+        binding: {
+          tenantId: binding.tenantId,
+          providerKind: binding.providerKind,
+          providerAccountId: binding.providerAccountId,
+        },
+        citations: [citation],
+      },
+    );
     const agent = mastra.getAgent("refundExecutionAgent");
     const model = deterministicRefundModel({
       caseId: "native-case",

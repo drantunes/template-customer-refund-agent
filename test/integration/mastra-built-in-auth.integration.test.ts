@@ -4,6 +4,8 @@ import { createHonoServer } from "@mastra/deployer/server";
 import { SpanType } from "@mastra/core/observability";
 import { TestExporter } from "@mastra/observability";
 import { issueLocalSession } from "../../src/mastra/server/auth";
+import { deterministicJsonModel } from "../fixtures/deterministic-language-model";
+import type { ProviderRegistry } from "../../src/mastra/providers/contracts";
 
 const databases: string[] = [];
 const shutdowns: Array<() => Promise<void>> = [];
@@ -224,5 +226,498 @@ describe("configured Mastra built-in API authorization", () => {
       expect(exported).not.toContain(marker);
     expect(exported).toContain("case-diagnostic-003");
     expect(exported).toContain("failed");
+  });
+
+  it("flushes real registered generation spans to LibSQL and preserves numeric usage", async () => {
+    const { mastra } = await configuredServer();
+    const { triageResultSchema } =
+      await import("../../src/mastra/domain/support-case");
+    const triage = mastra.getAgent("triageAgent");
+    triage.__updateModel({
+      model: deterministicJsonModel({
+        intent: "other",
+        urgency: "normal",
+        sentiment: "neutral",
+        requiresHumanReview: false,
+        confidence: 0.9,
+        rationale: "synthetic",
+      }) as never,
+    });
+    const result = await triage.generate(
+      [{ role: "user", content: "Synthetic trace request." }],
+      { structuredOutput: { schema: triageResultSchema } },
+    );
+    expect(result.traceId).toBeTruthy();
+    await mastra.observability.flush();
+    const store = (await mastra.getStorage()!.getStore("observability")) as {
+      getTrace(args: { traceId: string }): Promise<{
+        spans: Array<{
+          spanType: string;
+          attributes?: Record<string, unknown>;
+        }>;
+      } | null>;
+    };
+    const trace = await store.getTrace({ traceId: result.traceId! });
+    expect(
+      trace?.spans.some((span) => span.spanType === "model_generation"),
+    ).toBe(true);
+    expect(
+      trace?.spans.some((span) => span.spanType === "model_inference"),
+    ).toBe(true);
+    const generation = trace?.spans.find(
+      (span) => span.spanType === "model_generation",
+    );
+    expect(generation?.attributes).toMatchObject({
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+  });
+
+  it("aggregates native cost contexts and real delayed and failed provider-port spans", async () => {
+    const { mastra } = await configuredServer();
+    const { caseStore } = await import("../../src/mastra/lib/case-store");
+    const { computeMonitoringSummary } =
+      await import("../../src/mastra/lib/monitoring");
+    const { defaultLocalBinding, deliverOutbox, localRuntime } =
+      await import("../../src/mastra/runtime/local-runtime");
+    const binding = defaultLocalBinding("operational-span-conversation");
+    await localRuntime.seed(binding);
+    const observability = mastra.observability.getSelectedInstance({})!;
+    const root = observability.startSpan({
+      name: "phase004-operational-test",
+      type: SpanType.WORKFLOW_RUN,
+    });
+    const createdAt = new Date().toISOString();
+    const makeCase = (id: string) => ({
+      id,
+      externalId: id,
+      source: "mock-email" as const,
+      customer: { email: "alex@example.com" },
+      subject: "Operational span fixture",
+      messages: [],
+      status: "resolved" as const,
+      createdAt,
+      updatedAt: createdAt,
+      traceId: root.traceId,
+      metadata: { ownerId: "customer-alex", providerBinding: binding },
+    });
+    const slowCase = makeCase("operational-span-slow");
+    const failingCase = makeCase("operational-span-failure");
+    await caseStore.create(slowCase);
+    await caseStore.create(failingCase);
+    await caseStore.enqueueDelivery({
+      id: "operational-span-slow-outbox",
+      caseId: slowCase.id,
+      binding,
+      body: "slow synthetic delivery",
+      status: "resolved",
+      originatingTurnId: "operational-span-slow-turn",
+      originatingRunId: "operational-span-run",
+      originatingTraceId: root.traceId,
+      correlationState: "known",
+    });
+    await caseStore.enqueueDelivery({
+      id: "operational-span-failure-outbox",
+      caseId: failingCase.id,
+      binding,
+      body: "failing synthetic delivery",
+      status: "resolved",
+      originatingTurnId: "operational-span-failure-turn",
+      originatingRunId: "operational-span-run",
+      originatingTraceId: root.traceId,
+      correlationState: "known",
+    });
+    const support = localRuntime.support(binding);
+    const registry = {
+      support: () => ({
+        kind: "local" as const,
+        normalizeInbound: support.normalizeInbound.bind(support),
+        addInternalNote: support.addInternalNote.bind(support),
+        updateStatus: support.updateStatus.bind(support),
+        deliver: async (...args: Parameters<typeof support.deliver>) => {
+          if (args[3] === "operational-span-failure-outbox")
+            throw new Error("synthetic provider failure");
+          await new Promise<void>((resolve) => setTimeout(resolve, 15));
+          return support.deliver(...args);
+        },
+      }),
+      commerce: localRuntime.commerce.bind(localRuntime),
+      transactions: localRuntime.transactions.bind(localRuntime),
+      knowledge: localRuntime.knowledge.bind(localRuntime),
+    };
+    await deliverOutbox(registry, 10, caseStore, {
+      mastra,
+      tracingContext: { currentSpan: root },
+    });
+
+    const knownCost = root.createChildSpan({
+      name: "known-native-cost",
+      type: SpanType.MODEL_GENERATION,
+      attributes: {
+        model: "native-known",
+        usage: { inputTokens: 3, outputTokens: 2 },
+        costContext: { estimatedCost: 0.000123, costUnit: "usd" },
+      },
+    });
+    knownCost.end();
+    const unknownCost = root.createChildSpan({
+      name: "unknown-native-cost",
+      type: SpanType.MODEL_GENERATION,
+      attributes: {
+        model: "native-unknown",
+        usage: { inputTokens: 4, outputTokens: 1 },
+        costContext: { estimatedCost: 7, costUnit: "credits" },
+      },
+    });
+    unknownCost.end();
+    root.end();
+    await mastra.observability.flush();
+
+    const summary = await computeMonitoringSummary(mastra, binding.tenantId);
+    expect(summary.telemetry.providerCalls).toContainEqual({
+      operation: "support.deliver",
+      calls: 2,
+      errorRate: 0.5,
+      p95Ms: expect.any(Number),
+    });
+    expect(
+      summary.telemetry.providerCalls.find(
+        (item) => item.operation === "support.deliver",
+      )?.p95Ms,
+    ).toBeGreaterThanOrEqual(10);
+    expect(summary.telemetry.modelUsage).toContainEqual({
+      model: "native-known",
+      inputTokens: 3,
+      outputTokens: 2,
+      estimatedCostMicrosUsd: 123,
+    });
+    expect(summary.telemetry.modelUsage).toContainEqual({
+      model: "native-unknown",
+      inputTokens: 4,
+      outputTokens: 1,
+      estimatedCostMicrosUsd: null,
+    });
+    expect(summary.telemetry.unavailable).toContain("partial-model-cost");
+  });
+
+  it("keeps queued delivery and retry spans with each durable tenant owner and exports publication reads", async () => {
+    const { mastra } = await configuredServer();
+    const { caseStore } = await import("../../src/mastra/lib/case-store");
+    const { computeMonitoringSummary } =
+      await import("../../src/mastra/lib/monitoring");
+    const { publishKnowledge } =
+      await import("../../src/mastra/lib/publish-knowledge");
+    const { defaultLocalBinding, deliverOutbox, localRuntime } =
+      await import("../../src/mastra/runtime/local-runtime");
+    const bindingA = defaultLocalBinding("tenant-a-queued-delivery");
+    const bindingB = {
+      tenantId: "tenant-b",
+      providerKind: "local" as const,
+      providerAccountId: "tenant-b-account",
+      externalConversationId: "tenant-b-queued-delivery",
+    };
+    await localRuntime.seed(bindingA);
+    await localRuntime.seed(bindingB);
+    const observability = mastra.observability.getSelectedInstance({})!;
+    const rootA = observability.startSpan({
+      name: "tenant-a-owner-trace",
+      type: SpanType.WORKFLOW_RUN,
+    });
+    const rootB = observability.startSpan({
+      name: "tenant-b-owner-trace",
+      type: SpanType.WORKFLOW_RUN,
+    });
+    const createdAt = new Date().toISOString();
+    const createCase = (
+      id: string,
+      binding: typeof bindingA,
+      traceId: string,
+    ) =>
+      caseStore.create({
+        id,
+        externalId: id,
+        source: "mock-email",
+        customer: { email: "alex@example.com" },
+        subject: "Queued delivery owner trace",
+        messages: [],
+        status: "resolved",
+        createdAt,
+        updatedAt: createdAt,
+        traceId,
+        metadata: { ownerId: "customer-alex", providerBinding: binding },
+      });
+    await createCase("tenant-a-delivery-case", bindingA, rootA.traceId);
+    await createCase("tenant-b-delivery-case", bindingB, rootB.traceId);
+    await caseStore.enqueueDelivery({
+      id: "tenant-a-delivery",
+      caseId: "tenant-a-delivery-case",
+      binding: bindingA,
+      body: "tenant A reply",
+      status: "resolved",
+      originatingTurnId: "tenant-a-origin-turn",
+      originatingRunId: "tenant-a-origin-run",
+      originatingTraceId: rootA.traceId,
+      correlationState: "known",
+    });
+    await caseStore.enqueueDelivery({
+      id: "tenant-b-retry-delivery",
+      caseId: "tenant-b-delivery-case",
+      binding: bindingB,
+      body: "tenant B reply",
+      status: "resolved",
+      originatingTurnId: "tenant-b-origin-turn",
+      originatingRunId: "tenant-b-origin-run",
+      originatingTraceId: rootB.traceId,
+      correlationState: "known",
+    });
+    let tenantBFailures = 0;
+    const registry: ProviderRegistry = {
+      support: (binding) => {
+        const support = localRuntime.support(binding);
+        return {
+          kind: "local",
+          normalizeInbound: support.normalizeInbound.bind(support),
+          addInternalNote: support.addInternalNote.bind(support),
+          updateStatus: support.updateStatus.bind(support),
+          deliver: async (...args) => {
+            if (
+              args[3] === "tenant-b-retry-delivery" &&
+              tenantBFailures++ === 0
+            )
+              throw new Error("synthetic background HTTP 500");
+            return support.deliver(...args);
+          },
+        };
+      },
+      commerce: localRuntime.commerce.bind(localRuntime),
+      transactions: localRuntime.transactions.bind(localRuntime),
+      knowledge: localRuntime.knowledge.bind(localRuntime),
+    };
+    // No caller tracing context is supplied: both sweeps model background work.
+    await deliverOutbox(registry, 10, caseStore, { mastra });
+    await deliverOutbox(registry, 10, caseStore, { mastra });
+    await publishKnowledge(bindingA, {
+      mastra,
+      tracingContext: { currentSpan: rootA },
+    });
+    rootA.end();
+    rootB.end();
+    await mastra.observability.flush();
+
+    const summaryA = await computeMonitoringSummary(mastra, bindingA.tenantId);
+    const summaryB = await computeMonitoringSummary(mastra, bindingB.tenantId);
+    expect(summaryA.telemetry.providerCalls).toContainEqual({
+      operation: "support.deliver",
+      calls: 1,
+      errorRate: 0,
+      p95Ms: expect.any(Number),
+    });
+    expect(summaryB.telemetry.providerCalls).toContainEqual({
+      operation: "support.deliver",
+      calls: 2,
+      errorRate: 0.5,
+      p95Ms: expect.any(Number),
+    });
+    expect(summaryA.telemetry.providerCalls).toContainEqual(
+      expect.objectContaining({
+        operation: "knowledge.list_changed",
+        calls: 1,
+      }),
+    );
+    expect(summaryA.telemetry.providerCalls).toContainEqual(
+      expect.objectContaining({
+        operation: "knowledge.fetch_document",
+        calls: 6,
+      }),
+    );
+    expect(
+      summaryB.telemetry.providerCalls.map((item) => item.operation),
+    ).not.toContain("knowledge.list_changed");
+    expect(
+      await caseStore.getClientForTests().execute({
+        sql: "SELECT state, attempts FROM support_outbox WHERE id = ?",
+        args: ["tenant-b-retry-delivery"],
+      }),
+    ).toMatchObject({ rows: [{ state: "delivered", attempts: 2 }] });
+  });
+
+  it("keeps tenant domain metrics available when a trusted trace read fails", async () => {
+    const { mastra, server } = await configuredServer();
+    const { caseStore } = await import("../../src/mastra/lib/case-store");
+    const { defaultLocalBinding } =
+      await import("../../src/mastra/runtime/local-runtime");
+    const binding = defaultLocalBinding("partial-trace-read");
+    const createdAt = new Date().toISOString();
+    await caseStore.create({
+      id: "partial-trace-read-case",
+      externalId: "partial-trace-read-event",
+      source: "mock-email",
+      customer: { email: "alex@example.com" },
+      subject: "Trace retention fixture",
+      messages: [],
+      status: "resolved",
+      createdAt,
+      updatedAt: createdAt,
+      traceId: "missing-or-unreadable-trace",
+      metadata: { ownerId: "customer-alex", providerBinding: binding },
+    });
+    const storage = (await mastra.getStorage()!.getStore("observability")) as {
+      getTrace(args: { traceId: string }): Promise<unknown>;
+    };
+    vi.spyOn(storage, "getTrace").mockRejectedValueOnce(
+      new Error("synthetic retained-trace read failure"),
+    );
+    const response = await server.request(
+      "http://support.test/support/monitoring/summary",
+      {
+        headers: {
+          authorization: `Bearer ${issueLocalSession({ id: "admin-demo" })}`,
+        },
+      },
+    );
+    expect(response.status).toBe(200);
+    const summary = (await response.json()) as {
+      casesConsidered: number;
+      funnel: { resolved: number };
+      telemetry: { unavailable: string[] };
+    };
+    expect(summary.casesConsidered).toBe(1);
+    expect(summary.funnel.resolved).toBe(1);
+    expect(summary.telemetry.unavailable).toContain("partial-trace-read");
+  });
+
+  it("marks fulfilled missing traces as partial while retaining available tenant telemetry", async () => {
+    const { mastra } = await configuredServer();
+    const { caseStore } = await import("../../src/mastra/lib/case-store");
+    const { computeMonitoringSummary } =
+      await import("../../src/mastra/lib/monitoring");
+    const { defaultLocalBinding } =
+      await import("../../src/mastra/runtime/local-runtime");
+    const binding = defaultLocalBinding("fulfilled-null-trace");
+    const root = mastra.observability.getSelectedInstance({})!.startSpan({
+      name: "retained-tenant-trace",
+      type: SpanType.WORKFLOW_RUN,
+    });
+    root.end();
+    await mastra.observability.flush();
+    const createdAt = new Date().toISOString();
+    for (const [id, traceId] of [
+      ["retained-trace-case", root.traceId],
+      ["missing-trace-case", "retained-and-purged-trace"],
+    ])
+      await caseStore.create({
+        id,
+        externalId: id,
+        source: "mock-email",
+        customer: { email: "alex@example.com" },
+        subject: "Trace retention fixture",
+        messages: [],
+        status: "resolved",
+        createdAt,
+        updatedAt: createdAt,
+        traceId,
+        metadata: { ownerId: "customer-alex", providerBinding: binding },
+      });
+    const storage = (await mastra.getStorage()!.getStore("observability")) as {
+      getTrace(args: { traceId: string }): Promise<unknown>;
+    };
+    const getTrace = storage.getTrace.bind(storage);
+    vi.spyOn(storage, "getTrace").mockImplementation(({ traceId }) =>
+      traceId === "retained-and-purged-trace"
+        ? Promise.resolve(null)
+        : getTrace({ traceId }),
+    );
+    const summary = await computeMonitoringSummary(mastra, binding.tenantId);
+    expect(summary.telemetry.observedTraces).toBe(1);
+    expect(summary.telemetry.unavailable).toContain("partial-trace-read");
+  });
+
+  it("merges a legacy feedback projection for one case with a newer durable record for another", async () => {
+    const { mastra } = await configuredServer();
+    const { caseStore } = await import("../../src/mastra/lib/case-store");
+    const { computeMonitoringSummary } =
+      await import("../../src/mastra/lib/monitoring");
+    const { defaultLocalBinding } =
+      await import("../../src/mastra/runtime/local-runtime");
+    const binding = defaultLocalBinding("mixed-feedback");
+    const createdAt = new Date().toISOString();
+    const inbound = async (id: string, runId: string) => {
+      const caseBinding = { ...binding, externalConversationId: id };
+      await caseStore.acceptInbound(
+        {
+          id,
+          externalId: `${id}-event`,
+          source: "mock-email",
+          customer: { email: "alex@example.com" },
+          subject: "Feedback fixture",
+          messages: [
+            {
+              id: `${id}-message`,
+              author: "customer",
+              body: "Please help with this synthetic feedback fixture.",
+              createdAt,
+            },
+          ],
+          status: "new",
+          createdAt,
+          updatedAt: createdAt,
+          metadata: { ownerId: "customer-alex", providerBinding: caseBinding },
+        },
+        `${id}-event`,
+        runId,
+      );
+      const turn = (await caseStore.turns(id))[0]!;
+      await caseStore.getClientForTests().execute({
+        sql: "UPDATE support_turns SET state = 'resolved', run_id = ?, outcome_data = ? WHERE id = ?",
+        args: [
+          runId,
+          JSON.stringify({
+            status: "resolved",
+            finalResponse: "Synthetic final response.",
+            telemetry: { traceId: `${id}-trace` },
+          }),
+          turn.id,
+        ],
+      });
+      return turn.id;
+    };
+    const legacyTurnId = await inbound("legacy-feedback-case", "legacy-run");
+    const newerTurnId = await inbound("durable-feedback-case", "durable-run");
+    await caseStore.update("legacy-feedback-case", {
+      status: "resolved",
+      feedback: {
+        rating: "up",
+        submittedAt: "2026-09-05T00:00:00.000Z",
+        actorId: "customer-alex",
+        turnId: legacyTurnId,
+        runId: "legacy-run",
+        traceId: "legacy-feedback-case-trace",
+      },
+    });
+    await caseStore.recordFeedback({
+      caseId: "durable-feedback-case",
+      turnId: newerTurnId,
+      actorId: "customer-alex",
+      feedback: {
+        rating: "down",
+        submittedAt: "2026-09-05T00:01:00.000Z",
+        actorId: "customer-alex",
+        turnId: newerTurnId,
+        runId: "durable-run",
+        traceId: "durable-feedback-case-trace",
+      },
+    });
+    await expect(
+      computeMonitoringSummary(mastra, binding.tenantId),
+    ).resolves.toMatchObject({
+      feedback: {
+        totalResponses: 2,
+        up: 1,
+        down: 1,
+        recent: expect.arrayContaining([
+          expect.objectContaining({ caseId: "legacy-feedback-case" }),
+          expect.objectContaining({ caseId: "durable-feedback-case" }),
+        ]),
+      },
+    });
   });
 });

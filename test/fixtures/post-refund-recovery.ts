@@ -2,7 +2,6 @@ import { mastra } from "../../src/mastra/index";
 import { caseStore } from "../../src/mastra/lib/case-store";
 import { recoverLocalWorkflows } from "../../src/mastra/runtime/local-runtime";
 import { responseAgent } from "../../src/mastra/agents/response-agent";
-import { searchSupportKnowledgeTool } from "../../src/mastra/tools/search-support-knowledge";
 import { triageAgent } from "../../src/mastra/agents/triage-agent";
 import { issueRefundTool } from "../../src/mastra/tools/issue-refund";
 import {
@@ -31,20 +30,6 @@ responseAgent.__updateModel({
     requiresEscalation: false,
   }) as never,
 });
-searchSupportKnowledgeTool.execute = async () =>
-  ({
-    sources: [
-      {
-        metadata: {
-          title: "policy",
-          source: "duplicate-charge-policy",
-          text: "duplicate refund",
-        },
-        score: 1,
-      },
-    ],
-  }) as never;
-
 await caseStore.list();
 const mode = process.argv[2];
 

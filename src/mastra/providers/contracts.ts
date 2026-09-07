@@ -158,6 +158,10 @@ export interface KnowledgeEvidence {
   source: string;
   score: number;
   version: string;
+  /** Source-owned applicability boundary. It is never inferred at indexing. */
+  effectiveAt?: string;
+  /** Source-owned expiry boundary; absent means the source gave no expiry. */
+  expiresAt?: string;
 }
 export interface KnowledgeDocumentRef {
   source: string;

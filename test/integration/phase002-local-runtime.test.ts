@@ -28,6 +28,10 @@ import {
   LoopbackHttpCommerceProvider,
   LoopbackHttpProviderRegistry,
 } from "../../src/mastra/providers/loopback-http";
+import {
+  registerProviderRegistry,
+  resetProviderRegistryForTests,
+} from "../../src/mastra/providers/registry";
 import type {
   CaseProviderBindings,
   ProviderBinding,
@@ -118,7 +122,13 @@ async function runtime() {
   files.push(path, `${path}-shm`, `${path}-wal`);
   const store = new CaseStore({ url: `file:${path}` });
   await store.list();
-  return { path, store, local: new LocalRuntime(store.getClientForTests()) };
+  const local = new LocalRuntime(store.getClientForTests());
+  // Recovery is a trusted knowledge-publication boundary.  Register this
+  // fixture's actual local port instead of leaving it to fail before a mocked
+  // workflow can exercise recovery behavior.
+  resetProviderRegistryForTests();
+  registerProviderRegistry(local, [binding]);
+  return { path, store, local };
 }
 
 async function realLoopback(fetcher: LoopbackFetch) {
@@ -155,6 +165,7 @@ async function realLoopback(fetcher: LoopbackFetch) {
 }
 
 afterEach(async () => {
+  resetProviderRegistryForTests();
   await Promise.all(files.splice(0).map((file) => rm(file, { force: true })));
 });
 
@@ -169,7 +180,7 @@ describe("Phase 002 persistent local runtime", () => {
       .execute("INSERT INTO mastra_owned_probe VALUES ('keep')");
     await store.create(supportCase("legacy"));
     await expect(store.migrate(1)).rejects.toThrow(
-      "Refusing unsupported downgrade from support schema v9 to v1.",
+      "Refusing unsupported downgrade from support schema v12 to v1.",
     );
     expect((await store.get("legacy"))?.externalId).toBe("legacy");
     expect(
@@ -253,7 +264,7 @@ describe("Phase 002 persistent local runtime", () => {
     const { store } = await runtime();
     await store.create(supportCase("bad-migration"));
     await expect(store.migrate(3)).rejects.toThrow(
-      "Refusing unsupported downgrade from support schema v9 to v3.",
+      "Refusing unsupported downgrade from support schema v12 to v3.",
     );
     const versions = await store
       .getClientForTests()
@@ -261,7 +272,7 @@ describe("Phase 002 persistent local runtime", () => {
         "SELECT version FROM support_schema_migrations ORDER BY version",
       );
     expect(versions.rows.map((row) => Number(row.version))).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
     ]);
     expect(
       await store
@@ -902,7 +913,7 @@ describe("Phase 002 persistent local runtime", () => {
     await store.close();
   });
 
-  it("persists recovery failure on the case as well as the dispatch", async () => {
+  it("retries returned workflow failures before durable escalation", async () => {
     const { store } = await runtime();
     const failed = supportCase("recovery-failure");
     await store.acceptInbound(
@@ -922,8 +933,179 @@ describe("Phase 002 persistent local runtime", () => {
       10,
       store,
     );
-    expect(await store.get(failed.id)).toMatchObject({ status: "failed" });
+    expect(await store.get(failed.id)).toMatchObject({ status: "escalated" });
+    expect(await store.turns(failed.id)).toContainEqual(
+      expect.objectContaining({
+        state: "escalated",
+        outcome: expect.objectContaining({
+          operationalFailure: expect.objectContaining({
+            disposition: "escalate",
+          }),
+        }),
+      }),
+    );
     await store.close();
+  });
+
+  it("preserves classified snapshots and escalates after bounded recovery retries", async () => {
+    const { path, store } = await runtime();
+    const failedAfterClassification = supportCase("classified-failure");
+    await store.acceptInbound(
+      failedAfterClassification,
+      "classified-failure-event",
+      "classified-failure-run",
+    );
+    const [classificationDispatch] = await store.claimDispatch();
+    await store.activateDispatch(classificationDispatch!);
+    const classified = await store.get(failedAfterClassification.id);
+    await store.update(failedAfterClassification.id, {
+      status: "processing",
+      triage: {
+        intent: "duplicate_charge",
+        urgency: "normal",
+        sentiment: "negative",
+        requiresHumanReview: true,
+        confidence: 1,
+        rationale: "synthetic classification",
+      },
+      draft: {
+        draftResponse: "A staff-visible draft.",
+        citedSources: ["duplicate-charge-policy"],
+        recommendRefund: true,
+        refundAmount: 20,
+        refundCurrency: "USD",
+        refundReason: "duplicate",
+        requiresEscalation: false,
+      },
+      metadata: {
+        ...classified!.metadata,
+        activeTurnId: classificationDispatch!.turnId,
+      },
+    });
+    await store.recordTurnTelemetry(
+      failedAfterClassification.id,
+      classificationDispatch!.turnId,
+      { traceId: "trace-classified", workflowRunId: "classified-failure-run" },
+    );
+    await store.failDispatchAndCase(
+      classificationDispatch!.id,
+      failedAfterClassification.id,
+      "injected failure after classification",
+      classificationDispatch!.leaseToken,
+    );
+
+    const waitingApproval = supportCase("waiting-approval-follow-up");
+    await store.acceptInbound(
+      waitingApproval,
+      "waiting-approval-event",
+      "waiting-approval-run",
+    );
+    const waitingTurn = (await store.turns(waitingApproval.id))[0]!;
+    const waitingCurrent = await store.get(waitingApproval.id);
+    await store.update(waitingApproval.id, {
+      status: "waiting_approval",
+      draft: {
+        draftResponse: "A pending refund recommendation.",
+        citedSources: ["duplicate-charge-policy"],
+        recommendRefund: true,
+        refundAmount: 20,
+        refundCurrency: "USD",
+        refundReason: "duplicate",
+        requiresEscalation: false,
+      },
+      approval: { approved: true, approverId: "approver-demo" },
+      metadata: {
+        ...waitingCurrent!.metadata,
+        activeTurnId: waitingTurn.id,
+      },
+    });
+    await store.recordTurnTelemetry(waitingApproval.id, waitingTurn.id, {
+      traceId: "trace-waiting",
+      workflowRunId: "waiting-approval-run",
+    });
+    await store.appendFollowUp({
+      caseId: waitingApproval.id,
+      eventId: "waiting-approval-follow-up-event",
+      runId: "waiting-approval-follow-up-run",
+      message: {
+        id: "waiting-approval-follow-up-message",
+        author: "customer",
+        body: "Please add this detail before approval.",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    // The separate snapshot assertion intentionally leaves this real follow-up
+    // pending; keep it out of the bounded recovery sweep below.
+    await store.getClientForTests().execute({
+      sql: "UPDATE support_dispatch SET state = 'suspended' WHERE case_id = ? AND state = 'pending'",
+      args: [waitingApproval.id],
+    });
+
+    const exhausted = supportCase("recovery-exhausted");
+    await store.acceptInbound(
+      exhausted,
+      "recovery-exhausted-event",
+      "recovery-exhausted-run",
+    );
+    const failedWorkflow = {
+      getWorkflow: () => ({
+        createRun: async () => ({
+          start: async () => {
+            throw new Error("injected retryable provider failure");
+          },
+        }),
+        getWorkflowRunById: async () => undefined,
+      }),
+    };
+    await recoverLocalWorkflows(failedWorkflow, 3, store);
+    expect(await store.get(exhausted.id)).toMatchObject({
+      status: "escalated",
+      metadata: { workflowStatus: "escalated" },
+    });
+    expect(await store.turns(exhausted.id)).toContainEqual(
+      expect.objectContaining({
+        state: "escalated",
+        outcome: expect.objectContaining({
+          operationalFailure: expect.objectContaining({
+            disposition: "escalate",
+          }),
+        }),
+      }),
+    );
+    // Recovery intentionally projects exhaustion as customer-visible
+    // escalation. Its immutable operational failure must still reach the
+    // workflow error counter rather than disappearing with the state change.
+    await expect(
+      store.monitoringOperationalFailures([exhausted.id]),
+    ).resolves.toMatchObject({ workflow: 1 });
+    await store.close();
+
+    const reopened = new CaseStore({ url: `file:${path}` });
+    await reopened.list();
+    expect(
+      await reopened.turn(
+        failedAfterClassification.id,
+        classificationDispatch!.turnId,
+      ),
+    ).toMatchObject({
+      state: "failed",
+      outcome: {
+        telemetry: { traceId: "trace-classified" },
+        triage: { intent: "duplicate_charge" },
+        draft: { recommendRefund: true },
+        escalationReason: "injected failure after classification",
+      },
+    });
+    expect(
+      await reopened.turn(waitingApproval.id, waitingTurn.id),
+    ).toMatchObject({
+      outcome: {
+        telemetry: { traceId: "trace-waiting" },
+        draft: { recommendRefund: true },
+        approval: { approved: true, approverId: "approver-demo" },
+      },
+    });
+    await reopened.close();
   });
 
   it("never fresh-starts a terminal Mastra snapshot", async () => {
@@ -944,7 +1126,10 @@ describe("Phase 002 persistent local runtime", () => {
     );
     expect(start).not.toHaveBeenCalled();
     expect(restart).not.toHaveBeenCalled();
-    expect(await store.get(terminal.id)).toMatchObject({ status: "failed" });
+    expect(await store.get(terminal.id)).toMatchObject({
+      status: "escalated",
+      escalationReason: "Workflow recovery failed: failed",
+    });
     await store.close();
   });
 

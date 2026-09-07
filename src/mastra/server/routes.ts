@@ -1,13 +1,27 @@
 import { registerApiRoute, type ContextWithMastra } from "@mastra/core/server";
-import { caseStore, isRetentionTombstone } from "../lib/case-store";
+import {
+  caseStore,
+  isRetentionTombstone,
+  type DispatchRecord,
+} from "../lib/case-store";
+import { retryOrEscalateOperationalFailure } from "../lib/operational-alerts";
 import {
   renewDispatchLeaseWhileRunning,
   withDispatchLeaseScope,
 } from "../lib/dispatch-lease-scope";
 import { resumeApprovedNativeTool } from "../providers/native-execution";
 import { reconcileApprovedRefundEffect } from "../runtime/local-runtime";
+import { isRefundPolicyEvidenceError } from "../lib/refund-policy-evidence";
 import { REQUEST_APPROVAL_STEP_ID } from "../workflows/resolve-support-case";
+import { bindingsForCase } from "../providers/contracts";
+import { withTrustedCaseReadScope } from "../lib/trusted-run-scope";
+import { resourceIdForOwner, threadIdForCase } from "../domain/support-case";
 import { computeMonitoringSummary } from "../lib/monitoring";
+import {
+  budgetedLanguageModel,
+  createValidationBudgetExecution,
+  validationBudgetRequestContextKey,
+} from "../lib/eval-budget";
 import type { CaseFeedback, SupportCase } from "../domain/support-case";
 import {
   approvalRequestSchema,
@@ -19,6 +33,9 @@ import {
   monitoringSummarySchema,
   mockEmailPayloadSchema,
   reindexResponseSchema,
+  reindexRequestSchema,
+  supervisorExecutionRequestSchema,
+  supervisorExecutionResponseSchema,
   supportOpenApiDocument,
 } from "./contracts";
 import {
@@ -58,6 +75,34 @@ function requireRole(
         403,
       );
 }
+
+/** Follow-up execution is an operational entrypoint, not merely an HTTP
+ * response. Classify its failure and leave a bounded durable retry or a human
+ * escalation; never terminalize a dispatch as an unclassified failure. */
+async function recoverFollowUpFailure(
+  dispatch: DispatchRecord,
+  caseId: string,
+  error: unknown,
+) {
+  return retryOrEscalateOperationalFailure({
+    signal: {
+      providerOrTool: "resolve-support-case",
+      occurredAt: new Date(),
+      durationMs: 0,
+      failed: true,
+    },
+    retry: () =>
+      caseStore.retryDispatch(dispatch.id, caseId, error, dispatch.leaseToken),
+    escalate: () =>
+      caseStore.failDispatchAndCase(
+        dispatch.id,
+        caseId,
+        error,
+        dispatch.leaseToken,
+        "escalated",
+      ),
+  });
+}
 function caseScope(
   c: ContextWithMastra,
   supportCase: Parameters<typeof canAccessCase>[1],
@@ -67,6 +112,27 @@ function caseScope(
   return canAccessCase(current, supportCase)
     ? current
     : c.json(errorResponseSchema.parse({ error: "Case access denied." }), 403);
+}
+
+function correlationIdFromError(
+  error: unknown,
+  seen = new Set<object>(),
+): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  if (seen.has(error)) return undefined;
+  seen.add(error);
+  const value = error as Record<string, unknown>;
+  for (const key of ["traceId", "trace_id"])
+    if (typeof value[key] === "string") return value[key];
+  // Mastra and transport wrappers preserve the native failure as a cause or
+  // contextual record. Follow only those structured diagnostic links; never
+  // scrape message text, which could contain customer content.
+  for (const key of ["cause", "context", "details", "error"])
+    if (value[key]) {
+      const traceId = correlationIdFromError(value[key], seen);
+      if (traceId) return traceId;
+    }
+  return undefined;
 }
 
 /**
@@ -364,13 +430,12 @@ export const supportCaseFollowUpRoute = registerApiRoute(
             409,
           );
         if (result.status === "failed") {
-          const failed = await caseStore.failDispatchAndCase(
-            dispatch.id,
+          const recovery = await recoverFollowUpFailure(
+            dispatch,
             caseId,
             "Follow-up resolution failed.",
-            dispatch.leaseToken,
           );
-          if (!failed)
+          if (!recovery.applied)
             return c.json(
               { error: "Follow-up lost its dispatch lease; reload the case." },
               409,
@@ -408,13 +473,12 @@ export const supportCaseFollowUpRoute = registerApiRoute(
               409,
             );
         } else {
-          const failed = await caseStore.failDispatchAndCase(
-            dispatch.id,
+          const recovery = await recoverFollowUpFailure(
+            dispatch,
             caseId,
             `Follow-up resolution returned ${result.status}.`,
-            dispatch.leaseToken,
           );
-          if (!failed)
+          if (!recovery.applied)
             return c.json(
               { error: "Follow-up lost its dispatch lease; reload the case." },
               409,
@@ -422,9 +486,16 @@ export const supportCaseFollowUpRoute = registerApiRoute(
           return c.json({ error: "Follow-up resolution failed." }, 500);
         }
       } catch (error) {
-        await caseStore
-          .failDispatchAndCase(dispatch.id, caseId, error, dispatch.leaseToken)
-          .catch(() => undefined);
+        const recovery = await recoverFollowUpFailure(
+          dispatch,
+          caseId,
+          error,
+        ).catch(() => undefined);
+        if (!recovery?.applied)
+          return c.json(
+            { error: "Follow-up lost its dispatch lease; reload the case." },
+            409,
+          );
         return c.json(
           errorResponseSchema.parse({
             error: error instanceof Error ? error.message : String(error),
@@ -469,6 +540,206 @@ export const supportCaseDetailRoute = registerApiRoute(
       const current = caseScope(c, supportCase);
       if (current instanceof Response) return current;
       return c.json(scopedCaseDto(supportCase, current));
+    },
+  },
+);
+
+/** A tenant/case-qualified alternative to generic Studio agent execution.
+ * Generic built-in routes cannot establish this application's resource scope;
+ * this endpoint authenticates a staff user, checks the durable case, and gives
+ * the registered supervisor only read authority for that one case. */
+export const supportCaseSupervisorRoute = registerApiRoute(
+  "/support/cases/:caseId/supervisor",
+  {
+    method: "POST",
+    handler: async (c) => {
+      const current = requirePrincipal(c);
+      if (current instanceof Response) return current;
+      if (!hasRole(current, "support-agent") && !hasRole(current, "admin"))
+        return c.json(
+          errorResponseSchema.parse({ error: "Insufficient authority." }),
+          403,
+        );
+      const supportCase = await caseStore.get(c.req.param("caseId"));
+      if (!supportCase) return c.json({ error: "Case not found." }, 404);
+      if (!canAccessCase(current, supportCase))
+        return c.json(
+          errorResponseSchema.parse({ error: "Case access denied." }),
+          403,
+        );
+      let input: unknown;
+      try {
+        input = await c.req.json();
+      } catch {
+        return c.json(
+          errorResponseSchema.parse({ error: "Invalid supervisor request." }),
+          400,
+        );
+      }
+      const parsed = supervisorExecutionRequestSchema.safeParse(input);
+      if (!parsed.success)
+        return c.json(
+          errorResponseSchema.parse({ error: "Invalid supervisor request." }),
+          400,
+        );
+      const ownerId = (supportCase.metadata as Record<string, unknown>).ownerId;
+      if (typeof ownerId !== "string" || !ownerId)
+        return c.json(
+          errorResponseSchema.parse({ error: "Case has no verified owner." }),
+          409,
+        );
+      const binding = bindingsForCase(supportCase).support;
+      const validation = parsed.data.validation
+        ? createValidationBudgetExecution(parsed.data.validation.mode)
+        : undefined;
+      const requestContext = c.get("requestContext");
+      if (validation)
+        requestContext.setRaw(validationBudgetRequestContextKey, validation);
+      const supervisor = c.get("mastra").getAgent("supportSupervisorAgent");
+      // Supplying the native run ID lets us retain a trustworthy association
+      // even when a generation fails before Mastra can return a trace ID.
+      const supervisorRunId = `supervisor_${crypto.randomUUID()}`;
+      const supervisorThreadId = threadIdForCase(
+        supportCase.id,
+        binding.tenantId,
+      );
+      const model = validation
+        ? budgetedLanguageModel(
+            (await supervisor.getModel({ requestContext })) as never,
+            validation,
+          )
+        : undefined;
+      // Mastra's final aggregate omits failed tool calls after the model
+      // recovers with a text response. Capture the supported native iteration
+      // result so the authenticated staff response reports both successful
+      // evidence and a denied read without fabricating either outcome.
+      const observedToolResults: Array<{
+        name: string;
+        result: unknown;
+        error?: Error;
+      }> = [];
+      let validationError: Error | undefined;
+      let result: Awaited<ReturnType<typeof supervisor.generate>> | undefined;
+      let generationError: Error | undefined;
+      try {
+        result = await withTrustedCaseReadScope(
+          { caseId: supportCase.id, ownerId, tenantId: binding.tenantId },
+          () =>
+            c
+              .get("mastra")
+              .getAgent("supportSupervisorAgent")
+              .generate(
+                [
+                  {
+                    role: "user",
+                    content: `Investigate this existing support case read-only. Case subject: ${supportCase.subject}. Customer: ${supportCase.customer.email}. Request: ${parsed.data.message}`,
+                  },
+                ],
+                {
+                  memory: {
+                    thread: supervisorThreadId,
+                    resource: resourceIdForOwner(ownerId, binding.tenantId),
+                  },
+                  runId: supervisorRunId,
+                  requestContext,
+                  ...(model
+                    ? {
+                        model,
+                      }
+                    : {}),
+                  delegation: {
+                    ...(model
+                      ? {
+                          onDelegationStart: () => ({
+                            proceed: false,
+                            rejectionReason:
+                              "Budgeted supervisor validation does not permit delegated model calls.",
+                          }),
+                        }
+                      : {}),
+                    // Native delegation preserves each specialist's actual tool
+                    // outcomes here. Expose those read-only observations beside
+                    // the parent delegation result so staff and acceptance tests
+                    // can distinguish a completed delegation from one that
+                    // merely returned prose without exercising its evidence.
+                    onDelegationComplete: ({ primitiveId, result }) => {
+                      observedToolResults.push(
+                        ...(result.subAgentToolResults ?? []).map((entry) => ({
+                          name: `${primitiveId}.${entry.toolName}`,
+                          result: entry.result,
+                        })),
+                      );
+                    },
+                  },
+                  onIterationComplete: ({ toolResults }) => {
+                    observedToolResults.push(...toolResults);
+                  },
+                },
+              ),
+        );
+      } catch (error) {
+        generationError =
+          error instanceof Error ? error : new Error(String(error));
+        validationError = generationError;
+      }
+      if (!result) {
+        await caseStore.recordSupervisorExecution({
+          tenantId: binding.tenantId,
+          caseId: supportCase.id,
+          threadId: supervisorThreadId,
+          actorId: current.id,
+          runId: supervisorRunId,
+          traceId: correlationIdFromError(generationError),
+          state: "failed",
+        });
+        if (!validation) throw generationError;
+        return c.json(
+          errorResponseSchema.parse({
+            error: `Validation budget blocked: ${validationError?.message ?? "unknown error"}`,
+          }),
+          422,
+        );
+      }
+      // Wait for the native aggregate before persisting correlation or sending
+      // the HTTP response. This closes the generation's span/export path;
+      // retaining a trace ID before its native execution settles would make a
+      // durable association point at a transient, undiscoverable trace.
+      const responseText = await result.text;
+      await caseStore.recordSupervisorExecution({
+        tenantId: binding.tenantId,
+        caseId: supportCase.id,
+        threadId: supervisorThreadId,
+        actorId: current.id,
+        runId: supervisorRunId,
+        traceId: result.traceId,
+        state: "completed",
+      });
+      // The run remains durably visible as partial telemetry, but never claim
+      // a trace ID we did not receive from the native runtime.
+      if (!result.traceId)
+        return c.json(
+          errorResponseSchema.parse({
+            error:
+              "Supervisor completed without an observable trace correlation.",
+          }),
+          503,
+        );
+      const toolResults = observedToolResults.map((entry) => ({
+        toolName: entry.name,
+        result: entry.error ? { error: entry.error.message } : entry.result,
+        // Registered read tools and delegated specialist tools have object
+        // output schemas. Mastra materializes a thrown tool error as its
+        // message string in the native hook rather than setting `error`.
+        isError: Boolean(entry.error) || typeof entry.result === "string",
+      }));
+      return c.json(
+        supervisorExecutionResponseSchema.parse({
+          text: responseText,
+          traceId: result.traceId,
+          toolNames: toolResults.map((entry) => entry.toolName),
+          toolResults,
+        }),
+      );
     },
   },
 );
@@ -645,11 +916,24 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
     );
     nativeResumed = true;
   } catch (error) {
-    // The decision remains durable. Requeue its fenced dispatch for native
-    // recovery instead of recording a second decision or a failed effect.
-    await caseStore
-      .completeDispatch(dispatch.id, "suspended", error, dispatch.leaseToken)
-      .catch(() => undefined);
+    // Expired/replaced command evidence is a deterministic safety decision,
+    // not a transient native snapshot failure. Leave a durable staff-review
+    // outcome with no new provider effect; only transport/snapshot failures
+    // remain recoverable.
+    if (isRefundPolicyEvidenceError(error))
+      await caseStore
+        .failDispatchAndCase(
+          dispatch.id,
+          caseId,
+          error,
+          dispatch.leaseToken,
+          "escalated",
+        )
+        .catch(() => undefined);
+    else
+      await caseStore
+        .completeDispatch(dispatch.id, "suspended", error, dispatch.leaseToken)
+        .catch(() => undefined);
     lease.stop();
     return c.json(
       errorResponseSchema.parse({
@@ -687,6 +971,7 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
           caseId,
           "Native approval completed without a durable refund effect.",
           dispatch.leaseToken,
+          "escalated",
         );
         if (!failed)
           return c.json(
@@ -744,6 +1029,7 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
         caseId,
         "Resolution failed after approval resume.",
         dispatch.leaseToken,
+        "escalated",
       );
       if (!failed)
         return c.json(
@@ -767,6 +1053,7 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
         caseId,
         `Resolution returned ${result.status} after approval resume.`,
         dispatch.leaseToken,
+        "escalated",
       );
       if (!failed)
         return c.json(
@@ -797,7 +1084,13 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
     }
     if (!lease.lostOwnership && nativeResumed) {
       const failed = await caseStore
-        .failDispatchAndCase(dispatch.id, caseId, error, dispatch.leaseToken)
+        .failDispatchAndCase(
+          dispatch.id,
+          caseId,
+          error,
+          dispatch.leaseToken,
+          "escalated",
+        )
         .catch(() => false);
       if (!failed)
         return c.json(
@@ -858,7 +1151,11 @@ export const supportCaseFeedbackRoute = registerApiRoute(
           410,
         );
 
-      let body: { rating?: string; comment?: string } = {};
+      let body: {
+        rating?: string;
+        comment?: string;
+        responseMessageId?: string;
+      } = {};
       try {
         body = await c.req.json();
       } catch {
@@ -878,23 +1175,55 @@ export const supportCaseFeedbackRoute = registerApiRoute(
         );
       }
 
+      const ratedTurn = (await caseStore.turns(caseId)).find(
+        (turn) =>
+          `msg_${caseId}_${turn.id}_final` === parsed.data.responseMessageId,
+      );
+      if (!ratedTurn)
+        return c.json(
+          errorResponseSchema.parse({
+            error: "Feedback response was not found.",
+          }),
+          404,
+        );
+      const telemetry =
+        ratedTurn.outcome?.telemetry &&
+        typeof ratedTurn.outcome.telemetry === "object"
+          ? (ratedTurn.outcome.telemetry as { traceId?: string })
+          : undefined;
       const feedback: CaseFeedback = {
         rating: parsed.data.rating,
         comment: parsed.data.comment,
         submittedAt: new Date().toISOString(),
+        actorId: current.id,
+        turnId: ratedTurn.id,
+        runId: ratedTurn.runId,
+        traceId: telemetry?.traceId,
       };
-      const updated = await caseStore.update(caseId, { feedback });
+      const persistedFeedback = await caseStore.recordFeedback({
+        caseId,
+        turnId: ratedTurn.id,
+        actorId: current.id,
+        feedback,
+      });
+      const updated =
+        (supportCase.metadata as Record<string, unknown>).activeTurnId ===
+        ratedTurn.id
+          ? await caseStore.update(caseId, { feedback: persistedFeedback })
+          : supportCase;
 
       const mastra = c.get("mastra");
-      if (supportCase.traceId && mastra.observability.addFeedback) {
+      if (persistedFeedback.traceId && mastra.observability.addFeedback) {
         try {
           await mastra.observability.addFeedback({
-            traceId: supportCase.traceId,
+            traceId: persistedFeedback.traceId,
             feedback: {
               feedbackSource: "user",
               feedbackType: "thumbs",
               value: feedback.rating === "up" ? 1 : -1,
-              comment: feedback.comment,
+              // Free-form feedback is retained only in the case store. Do not
+              // bypass the application redactor by exporting it as a span
+              // payload; the rating and trace association are sufficient.
             },
           });
         } catch (error) {
@@ -934,7 +1263,7 @@ export const supportMonitoringSummaryRoute = registerApiRoute(
       const current = requireRole(c, "admin");
       if (current instanceof Response) return current;
       const mastra = c.get("mastra");
-      const summary = await computeMonitoringSummary(mastra);
+      const summary = await computeMonitoringSummary(mastra, current.tenantId);
       return c.json(monitoringSummarySchema.parse(summary));
     },
   },
@@ -947,11 +1276,29 @@ export const supportKnowledgeReindexRoute = registerApiRoute(
     handler: async (c) => {
       const current = requireRole(c, "admin");
       if (current instanceof Response) return current;
+      const reindexInput = reindexRequestSchema.safeParse(
+        await c.req.json().catch(() => ({})),
+      );
+      if (!reindexInput.success)
+        return c.json(
+          errorResponseSchema.parse({ error: "Invalid reindex request." }),
+          400,
+        );
       const mastra = c.get("mastra");
       const workflow = mastra.getWorkflow("indexSupportKnowledgeWorkflow");
       const run = await workflow.createRun();
       const result = await run.start({
-        inputData: {},
+        inputData: {
+          binding: {
+            tenantId: current.tenantId,
+            providerKind: "local",
+            providerAccountId: "local-demo",
+            externalConversationId: `reindex:${current.id}`,
+          },
+          ...(reindexInput.data.validation
+            ? { validation: reindexInput.data.validation }
+            : {}),
+        },
         requestContext: c.get("requestContext"),
       });
       if (result.status !== "success") {
@@ -970,6 +1317,7 @@ export const supportRoutes = [
   supportInboundRoute,
   supportCasesListRoute,
   supportCaseDetailRoute,
+  supportCaseSupervisorRoute,
   supportCaseApproveRoute,
   supportCaseRejectRoute,
   supportCaseFollowUpRoute,

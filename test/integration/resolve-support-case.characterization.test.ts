@@ -359,8 +359,10 @@ describe("resolve support case WIP characterization", () => {
     const second = await caseStore.get(supportCase.id);
     expect(second).toMatchObject({
       status: "escalated",
-      finalResponse: "A distinct response for the queued second request.",
-      escalationReason: "Second-turn escalation.",
+      finalResponse:
+        "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
+      escalationReason:
+        "Draft lacks applicable evidence from the active publication.",
     });
     const turns = await caseStore.turns(supportCase.id);
     expect(turns).toHaveLength(2);
@@ -416,7 +418,8 @@ describe("resolve support case WIP characterization", () => {
     const second = await caseStore.get(supportCase.id);
     expect(second).toMatchObject({
       status: "resolved",
-      finalResponse: "A clean resolved answer for the second request.",
+      finalResponse:
+        "We reviewed your order ORD-1001. Its current status is fulfilled.",
     });
     expect(second?.escalationReason).toBeUndefined();
     const turns = await caseStore.turns(supportCase.id);
@@ -474,7 +477,7 @@ describe("resolve support case WIP characterization", () => {
     expect((await caseStore.get(supportCase.id))?.refundResult).toBeUndefined();
   });
 
-  it("marks a detached workflow start failed when its refund quote exceeds the remaining balance", async () => {
+  it("queues a detached workflow retry when its refund quote exceeds the remaining balance", async () => {
     const runtime = await loadCharacterizationRuntime({
       recommendRefund: true,
       requiresEscalation: false,
@@ -505,17 +508,16 @@ describe("resolve support case WIP characterization", () => {
     });
 
     expect(ingested.status).toBe("success");
-    await vi.waitFor(async () => {
-      expect(await caseStore.get(ingested.result.caseId)).toMatchObject({
-        status: "failed",
-        escalationReason: "Workflow start failed.",
-      });
-    });
-    const dispatch = await caseStore.getClientForTests().execute({
-      sql: "SELECT state FROM support_dispatch WHERE case_id = ?",
-      args: [ingested.result.caseId],
-    });
-    expect(dispatch.rows[0]).toMatchObject({ state: "failed" });
+    await vi.waitFor(async () =>
+      expect(
+        (
+          await caseStore.getClientForTests().execute({
+            sql: "SELECT state FROM support_dispatch WHERE case_id = ?",
+            args: [ingested.result.caseId],
+          })
+        ).rows[0],
+      ).toMatchObject({ state: "pending" }),
+    );
   });
 
   it("escalates a deterministic policy decision that does not require a refund", async () => {
@@ -536,7 +538,8 @@ describe("resolve support case WIP characterization", () => {
     expect(result.status).toBe("success");
     expect(await caseStore.get(supportCase.id)).toMatchObject({
       status: "escalated",
-      escalationReason: "Deterministic escalation.",
+      escalationReason:
+        "Draft lacks applicable evidence from the active publication.",
     });
   });
 

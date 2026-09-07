@@ -1,252 +1,95 @@
 import { createScorer, type MastraScorers } from "@mastra/core/evals";
-import type { Tool } from "@mastra/core/tools";
 import {
-  createMultiTurnJudgeScorer,
-  createPromptAlignmentScorerLLM,
-  createToolCallAccuracyScorerLLM,
-} from "@mastra/evals/scorers/prebuilt";
-import {
-  extractAgentResponseMessages,
-  extractToolCalls,
-  getAssistantMessageFromRunOutput,
-  getCombinedSystemPrompt,
-  getUserMessageFromRunInput,
-} from "@mastra/evals/scorers/utils";
-import { z } from "zod";
-import {
-  lookupCustomerRefundHistoryTool,
-  lookupOrderTool,
-  lookupSubscriptionTool,
-} from "../tools/lookup-order";
-import { searchSupportKnowledgeTool } from "../tools/search-support-knowledge";
+  canonicalScorerRecord,
+  isPlainJsonRecord,
+  scoreAxis,
+} from "./deterministic-semantics.js";
 
-const EVAL_MODEL = "openai/gpt-5-mini";
+/**
+ * CI evaluates executable, deterministic safety behavior. These registered
+ * scorers deliberately make no model calls; a paid judge must be separately
+ * budgeted before it can be enabled for a non-deterministic experiment.
+ */
+type EvalOutput = Record<string, unknown>;
 
-const responseAgentAvailableTools = [
-  searchSupportKnowledgeTool,
-  lookupOrderTool,
-  lookupSubscriptionTool,
-  lookupCustomerRefundHistoryTool,
-] as unknown as Tool[];
-
-function normalizeWhitespace(value: string | undefined): string {
-  return value?.replace(/\s+/g, " ").trim() ?? "";
+function plainRecord(value: unknown): EvalOutput {
+  if (isPlainJsonRecord(value)) return value as EvalOutput;
+  return {};
 }
 
-function extractJsonBlock(value: string): string | null {
-  const start = value.indexOf("{");
-  const end = value.lastIndexOf("}");
-
-  if (start === -1 || end === -1 || end < start) {
-    return null;
-  }
-
-  return value.slice(start, end + 1);
-}
-
-function parseJsonObject(
-  value: string | undefined,
-): Record<string, unknown> | null {
-  if (!value) {
-    return null;
-  }
-
-  const jsonBlock = extractJsonBlock(value);
-  if (!jsonBlock) {
-    return null;
-  }
-
+/** Parse only Mastra's explicit top-level model-output text boundary. */
+function topLevelModelOutput(value: unknown): unknown {
+  if (typeof value !== "string") return value;
   try {
-    const parsed = JSON.parse(jsonBlock);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
+    return JSON.parse(value);
   } catch {
-    return null;
+    return value;
   }
 }
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
+function deterministicScorer(
+  id: string,
+  name: string,
+  score?: (output: unknown, truth: unknown) => number,
+) {
+  return createScorer({
+    id,
+    name,
+    description: `Deterministic ${name} scorer for versioned support-eval evidence.`,
+    type: "agent",
+  })
+    .preprocess(({ run }) => {
+      // Parse only the explicit top-level output text boundary, then snapshot
+      // both inputs before any scorer callback can inspect hostile evidence.
+      const output = canonicalScorerRecord(topLevelModelOutput(run.output));
+      const truth = canonicalScorerRecord(run.groundTruth);
+      return { output, truth };
+    })
+    .generateScore(({ results }) =>
+      score
+        ? score(
+            results.preprocessStepResult?.output,
+            results.preprocessStepResult?.truth,
+          )
+        : scoreAxis(
+            id,
+            results.preprocessStepResult?.output as Parameters<
+              typeof scoreAxis
+            >[1],
+            results.preprocessStepResult?.truth as Parameters<
+              typeof scoreAxis
+            >[2],
+          ),
+    )
+    .generateReason(
+      ({ score }) =>
+        `${id}=${Number.isFinite(score) ? score.toFixed(2) : "0.00"} from deterministic canonical evidence`,
+    );
 }
 
-function asStringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
-    : [];
-}
-
-function stringifyContext(context: Record<string, unknown> | null): string {
-  return context
-    ? JSON.stringify(context, null, 2)
-    : "No structured case context was found in the input.";
-}
-
-export const routingAccuracyScorer = createScorer({
-  id: "routing-accuracy",
-  name: "Routing Accuracy",
-  description:
-    "Evaluates whether triage routing labels match the support message and any provided ground truth.",
-  type: "agent",
-  judge: {
-    model: EVAL_MODEL,
-    instructions:
-      "You evaluate support-triage classifications. Grade whether the predicted intent, urgency, sentiment, and human-review decision are justified by the customer message. Be strict about unsupported labels.",
-  },
-})
-  .preprocess(({ run }) => {
-    const userMessage = getUserMessageFromRunInput(run.input);
-    const rawOutput = getAssistantMessageFromRunOutput(run.output);
-    const prediction = parseJsonObject(rawOutput);
-    const groundTruth = isRecord(run.groundTruth) ? run.groundTruth : null;
-
-    return {
-      userMessage,
-      rawOutput,
-      prediction,
-      groundTruth,
-    };
-  })
-  .analyze({
-    description: "Determine whether the triage output is accurate.",
-    outputSchema: z.object({
-      intentCorrect: z.boolean(),
-      urgencyCorrect: z.boolean(),
-      sentimentCorrect: z.boolean(),
-      humanReviewCorrect: z.boolean(),
-      rationaleGrounded: z.boolean(),
-      reasoning: z.string(),
-      overallScore: z.number().min(0).max(1),
-    }),
-    createPrompt: ({ results }) => {
-      const { userMessage, prediction, groundTruth, rawOutput } =
-        results.preprocessStepResult ?? {};
-
-      return `Customer message:\n${userMessage ?? "Missing customer message"}\n\nPredicted triage JSON:\n${prediction ? JSON.stringify(prediction, null, 2) : (rawOutput ?? "Unparseable output")}\n\nGround truth (if present):\n${groundTruth ? JSON.stringify(groundTruth, null, 2) : "None provided"}\n\nReturn booleans for each field, a concise explanation, and an overallScore from 0 to 1.`;
-    },
-  })
-  .generateScore(({ results }) => results.analyzeStepResult?.overallScore ?? 0)
-  .generateReason(
-    ({ results }) =>
-      results.analyzeStepResult?.reasoning ?? "No routing analysis available.",
-  );
-
-export const groundednessScorer = createScorer({
-  id: "groundedness",
-  name: "Groundedness",
-  description:
-    "Checks whether the drafted support resolution is grounded in the retrieved policy and account context.",
-  type: "agent",
-  judge: {
-    model: EVAL_MODEL,
-    instructions:
-      "You evaluate grounded customer-support resolutions. A grounded answer only makes claims that are supported by the provided policy, order, subscription, and refund-history context.",
-  },
-})
-  .preprocess(({ run }) => {
-    const userMessage = getUserMessageFromRunInput(run.input);
-    const responseText = getAssistantMessageFromRunOutput(run.output);
-    const responseObject = parseJsonObject(responseText);
-    const context = parseJsonObject(userMessage);
-
-    return {
-      responseText,
-      responseObject,
-      context,
-    };
-  })
-  .analyze({
-    description:
-      "Judge how well the response stays grounded in the supplied case context.",
-    outputSchema: z.object({
-      supportedClaims: z.number().int().nonnegative(),
-      unsupportedClaims: z.number().int().nonnegative(),
-      missingSupport: z.array(z.string()),
-      reasoning: z.string(),
-      overallScore: z.number().min(0).max(1),
-    }),
-    createPrompt: ({ results }) => {
-      const { context, responseObject, responseText } =
-        results.preprocessStepResult ?? {};
-
-      return `Case context JSON:\n${stringifyContext(context ?? null)}\n\nDraft resolution output:\n${responseObject ? JSON.stringify(responseObject, null, 2) : (responseText ?? "Missing output")}\n\nScore how grounded the draft is in the context. Penalize invented refund eligibility, invented order facts, invented timelines, and uncited policy claims.`;
-    },
-  })
-  .generateScore(({ results }) => results.analyzeStepResult?.overallScore ?? 0)
-  .generateReason(
-    ({ results }) =>
-      results.analyzeStepResult?.reasoning ??
-      "No groundedness analysis available.",
-  );
-
-export const policyComplianceScorer = createScorer({
-  id: "policy-compliance",
-  name: "Policy Compliance",
-  description:
-    "Checks whether the draft follows refund and escalation policy rules from the retrieved support context.",
-  type: "agent",
-  judge: {
-    model: EVAL_MODEL,
-    instructions:
-      "You evaluate policy compliance for a support refund agent. Focus on whether the response respects the supplied policies and the agent rules around citations, escalation, and refund recommendations.",
-  },
-})
-  .preprocess(({ run }) => {
-    const userMessage = getUserMessageFromRunInput(run.input);
-    const responseText = getAssistantMessageFromRunOutput(run.output);
-    const responseObject = parseJsonObject(responseText);
-    const context = parseJsonObject(userMessage);
-
-    return {
-      responseText,
-      responseObject,
-      context,
-      systemPrompt: getCombinedSystemPrompt(run.input),
-    };
-  })
-  .analyze({
-    description:
-      "Judge whether the response complies with policy and response rules.",
-    outputSchema: z.object({
-      respectsPolicy: z.boolean(),
-      citesSourcesWhenMakingPolicyClaims: z.boolean(),
-      avoidsUnsupportedRefundPromises: z.boolean(),
-      handlesEscalationCorrectly: z.boolean(),
-      reasoning: z.string(),
-      overallScore: z.number().min(0).max(1),
-    }),
-    createPrompt: ({ results }) => {
-      const { context, responseObject, responseText, systemPrompt } =
-        results.preprocessStepResult ?? {};
-
-      return `Agent instructions:\n${systemPrompt ?? "Missing system prompt"}\n\nCase context JSON:\n${stringifyContext(context ?? null)}\n\nDraft resolution output:\n${responseObject ? JSON.stringify(responseObject, null, 2) : (responseText ?? "Missing output")}\n\nJudge policy compliance. Check whether citedSources match used policy claims, whether refund recommendations are supported by policy and account state, and whether escalation is used when the situation requires it.`;
-    },
-  })
-  .generateScore(({ results }) => results.analyzeStepResult?.overallScore ?? 0)
-  .generateReason(
-    ({ results }) =>
-      results.analyzeStepResult?.reasoning ??
-      "No policy-compliance analysis available.",
-  );
-
-export const toolCallCorrectnessScorer = createToolCallAccuracyScorerLLM({
-  model: EVAL_MODEL,
-  availableTools: responseAgentAvailableTools,
-});
-
-export const resolutionQualityScorer = createPromptAlignmentScorerLLM({
-  model: EVAL_MODEL,
-  options: {
-    evaluationMode: "user",
-    includeConversationHistory: { maxMessages: 6 },
-  },
-});
-
-export const multiTurnConsistencyScorer = createMultiTurnJudgeScorer({
-  model: EVAL_MODEL,
-  criterion:
-    "Across the conversation, the support agent stays consistent about the customer issue, recommended next steps, refund posture, and escalation status. It does not contradict earlier claims about eligibility, actions taken, or required approvals.",
-});
+export const routingAccuracyScorer = deterministicScorer(
+  "routing-accuracy",
+  "Routing Accuracy",
+);
+export const groundednessScorer = deterministicScorer(
+  "groundedness",
+  "Groundedness",
+);
+export const policyComplianceScorer = deterministicScorer(
+  "policy-compliance",
+  "Policy Compliance",
+);
+export const toolCallCorrectnessScorer = deterministicScorer(
+  "tool-call-correctness",
+  "Tool Call Correctness",
+);
+export const resolutionQualityScorer = deterministicScorer(
+  "resolution-quality",
+  "Resolution Quality",
+);
+export const multiTurnConsistencyScorer = deterministicScorer(
+  "multi-turn-consistency",
+  "Multi-turn Consistency",
+);
 
 export const responseAgentScorers: MastraScorers = {
   groundedness: { scorer: groundednessScorer },
@@ -255,119 +98,66 @@ export const responseAgentScorers: MastraScorers = {
   resolutionQuality: { scorer: resolutionQualityScorer },
   multiTurnConsistency: { scorer: multiTurnConsistencyScorer },
 };
-
 export const triageAgentScorers: MastraScorers = {
   routingAccuracy: { scorer: routingAccuracyScorer },
   multiTurnConsistency: { scorer: multiTurnConsistencyScorer },
 };
-
 export const supportEvalScorers: MastraScorers = {
+  ...responseAgentScorers,
   routingAccuracy: { scorer: routingAccuracyScorer },
-  groundedness: { scorer: groundednessScorer },
-  policyCompliance: { scorer: policyComplianceScorer },
-  toolCallCorrectness: { scorer: toolCallCorrectnessScorer },
-  resolutionQuality: { scorer: resolutionQualityScorer },
-  multiTurnConsistency: { scorer: multiTurnConsistencyScorer },
 };
 
-export function scoreDraftResolutionFields(output: string | undefined): {
-  hasDraftResponse: boolean;
-  hasSources: boolean;
-  recommendsRefund: boolean;
-  requiresEscalation: boolean;
-  citedSources: string[];
-} {
-  const parsed = parseJsonObject(output);
-  const citedSources = asStringArray(parsed?.citedSources);
-
+export function scoreDraftResolutionFields(output: unknown) {
+  const parsed = plainRecord(
+      canonicalScorerRecord(topLevelModelOutput(output)),
+    ),
+    citedSources = Array.isArray(parsed.citedSources)
+      ? parsed.citedSources.filter(
+          (source): source is string => typeof source === "string",
+        )
+      : [];
   return {
     hasDraftResponse:
-      typeof parsed?.draftResponse === "string" &&
-      normalizeWhitespace(parsed.draftResponse).length > 0,
+      typeof parsed.draftResponse === "string" &&
+      parsed.draftResponse.trim().length > 0,
     hasSources: citedSources.length > 0,
-    recommendsRefund: parsed?.recommendRefund === true,
-    requiresEscalation: parsed?.requiresEscalation === true,
+    recommendsRefund: parsed.recommendRefund === true,
+    requiresEscalation: parsed.requiresEscalation === true,
     citedSources,
   };
 }
-
-export const responseStructureSanityScorer = createScorer({
-  id: "response-structure-sanity",
-  name: "Response Structure Sanity",
-  description:
-    "Performs a lightweight deterministic sanity check over the draft resolution structure.",
-  type: "agent",
-})
-  .preprocess(({ run }) =>
-    scoreDraftResolutionFields(getAssistantMessageFromRunOutput(run.output)),
-  )
-  .generateScore(({ results }) => {
-    const structure = results.preprocessStepResult;
-    if (!structure) {
-      return 0;
-    }
-
-    let score = 0;
-    if (structure.hasDraftResponse) score += 0.4;
-    if (structure.hasSources) score += 0.2;
-    if (!structure.recommendsRefund || structure.hasSources) score += 0.2;
-    if (!structure.requiresEscalation || structure.hasDraftResponse)
-      score += 0.2;
-    return score;
-  })
-  .generateReason(({ results, score }) => {
-    const structure = results.preprocessStepResult;
-
-    if (!structure) {
-      return "The response could not be parsed as the expected structured draft output.";
-    }
-
-    return `Score ${score.toFixed(2)}. draftResponse=${structure.hasDraftResponse}, citedSources=${structure.citedSources.length}, recommendRefund=${structure.recommendsRefund}, requiresEscalation=${structure.requiresEscalation}.`;
-  });
-
+export const responseStructureSanityScorer = deterministicScorer(
+  "response-structure-sanity",
+  "Response Structure Sanity",
+  (output) => (scoreDraftResolutionFields(output).hasDraftResponse ? 1 : 0),
+);
+export const conversationCoverageScorer = deterministicScorer(
+  "conversation-coverage",
+  "Conversation Coverage",
+  (output) => {
+    const answers = plainRecord(canonicalScorerRecord(output)).answers;
+    return (Array.isArray(answers) ? answers : []).filter(
+      (answer) => typeof answer === "string",
+    ).length > 1
+      ? 1
+      : 0;
+  },
+);
 responseAgentScorers.responseStructureSanity = {
   scorer: responseStructureSanityScorer,
-};
-supportEvalScorers.responseStructureSanity = {
-  scorer: responseStructureSanityScorer,
-};
-
-export const conversationCoverageScorer = createScorer({
-  id: "conversation-coverage",
-  name: "Conversation Coverage",
-  description:
-    "Checks whether the agent keeps responding across a multi-turn conversation.",
-  type: "agent",
-})
-  .preprocess(({ run }) => {
-    const assistantTurns = extractAgentResponseMessages(run.output);
-    const toolUsage = extractToolCalls(run.output);
-
-    return {
-      assistantTurns,
-      toolCount: toolUsage.tools.length,
-    };
-  })
-  .generateScore(({ results }) => {
-    const turnCount = results.preprocessStepResult?.assistantTurns.length ?? 0;
-    return turnCount > 1 ? 1 : 0;
-  })
-  .generateReason(({ results }) => {
-    const turnCount = results.preprocessStepResult?.assistantTurns.length ?? 0;
-    const toolCount = results.preprocessStepResult?.toolCount ?? 0;
-    return `Observed ${turnCount} assistant turn(s) and ${toolCount} tool call(s) in the conversation output.`;
-  });
-
-triageAgentScorers.conversationCoverage = {
-  scorer: conversationCoverageScorer,
 };
 responseAgentScorers.conversationCoverage = {
   scorer: conversationCoverageScorer,
 };
+triageAgentScorers.conversationCoverage = {
+  scorer: conversationCoverageScorer,
+};
+supportEvalScorers.responseStructureSanity = {
+  scorer: responseStructureSanityScorer,
+};
 supportEvalScorers.conversationCoverage = {
   scorer: conversationCoverageScorer,
 };
-
 export const supportEvalScorerRegistry = {
   routingAccuracy: routingAccuracyScorer,
   groundedness: groundednessScorer,
