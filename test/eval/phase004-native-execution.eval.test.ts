@@ -156,31 +156,33 @@ async function pinDeterministicKnowledgeFixture(
   authorityId: string,
 ) {
   const { caseStore } = await import("../../src/mastra/lib/case-store");
-  const { knowledgePublicationStore } =
-    await import("../../src/mastra/lib/knowledge-publications");
-  const publication = await knowledgePublicationStore.publication(configured);
-  if (!publication.generationId)
-    throw new Error("Expected active deterministic knowledge publication.");
+  const { publishKnowledge } =
+    await import("../../src/mastra/lib/publish-knowledge");
   const authority = trajectoryAuthorityForDatasetCase(authorityId);
   const client = caseStore.getClientForTests();
   await client.execute({
-    sql: "UPDATE support_knowledge_documents SET generation_id = ?, effective_at = ?, indexed_at = ?, expires_at = ? WHERE generation_id = ?",
+    sql: "UPDATE local_knowledge SET expires_at = ? WHERE tenant_id = ? AND provider_account_id = ? AND source = ?",
     args: [
-      authority.generationId,
-      authority.effectiveAt,
-      authority.indexedAt,
       authority.expiresAt ?? null,
-      publication.generationId,
+      configured.tenantId,
+      configured.providerAccountId,
+      "duplicate-charge-policy",
     ],
   });
-  await client.execute({
-    sql: "UPDATE support_knowledge_generations SET id = ? WHERE id = ?",
-    args: [authority.generationId, publication.generationId],
-  });
-  await client.execute({
-    sql: "UPDATE support_knowledge_publications SET generation_id = ? WHERE generation_id = ?",
-    args: [authority.generationId, publication.generationId],
-  });
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(authority.indexedAt));
+  const randomUUID = vi
+    .spyOn(crypto, "randomUUID")
+    .mockReturnValue(authority.generationId.slice("knowledge_".length));
+  try {
+    const candidate = await publishKnowledge(configured, {
+      onlyIfMissing: true,
+    });
+    expect(candidate.generationId).toBe(authority.generationId);
+  } finally {
+    randomUUID.mockRestore();
+    vi.useRealTimers();
+  }
 }
 
 function completeObservedTurns() {
@@ -324,8 +326,6 @@ async function observedReadTrajectory(
   } = {},
 ) {
   const { mastra } = await import("../../src/mastra/index");
-  const { publishKnowledge } =
-    await import("../../src/mastra/lib/publish-knowledge");
   const { ensureProviderFixtures } =
     await import("../../src/mastra/providers/registry");
   const { registerProviderRegistry } =
@@ -338,10 +338,14 @@ async function observedReadTrajectory(
     await import("../../src/mastra/domain/support-case");
   const { id, configured } = await createCase(input, options.authorityId);
   registerProviderRegistry(localRuntime, [configured]);
-  await publishKnowledge(configured, { onlyIfMissing: true });
+  await ensureProviderFixtures(configured);
   if (options.authorityId)
     await pinDeterministicKnowledgeFixture(configured, options.authorityId);
-  await ensureProviderFixtures(configured);
+  else {
+    const { publishKnowledge } =
+      await import("../../src/mastra/lib/publish-knowledge");
+    await publishKnowledge(configured, { onlyIfMissing: true });
+  }
   const search = mastra.getTool("searchSupportKnowledgeTool");
   const lookup = mastra.getTool("lookupOrderTool");
   const calls: ObservedCall[] = [];
@@ -461,64 +465,78 @@ async function workflowGuardEvidence(evidenceKind: "invalid" | "expired") {
       `refund ${evidenceKind} evidence policy`,
     );
     registerProviderRegistry(localRuntime, [configured]);
-    await publishKnowledge(configured, { onlyIfMissing: true });
+    await localRuntime.seed(configured);
+    const expiresAt =
+      evidenceKind === "expired"
+        ? new Date(Date.now() + 60_000).toISOString()
+        : undefined;
     if (evidenceKind === "expired")
       await caseStore.getClientForTests().execute({
-        sql: "UPDATE support_knowledge_documents SET expires_at = ? WHERE provider_kind = ? AND provider_account_id = ?",
+        sql: "UPDATE local_knowledge SET expires_at = ? WHERE tenant_id = ? AND provider_account_id = ? AND source = ?",
         args: [
-          "2000-01-01T00:00:00.000Z",
-          configured.providerKind,
+          expiresAt,
+          configured.tenantId,
           configured.providerAccountId,
+          "duplicate-charge-policy",
         ],
       });
-    const [turn] = await caseStore.turns(id);
-    if (!turn) throw new Error("Expected immutable workflow turn.");
-    mastra.getAgent("responseAgent").__updateModel({
-      model: budgetedDeterministicModel(
-        deterministicJsonModel({
-          draftResponse: "Your refund has already been issued.",
-          citedSources: evidenceKind === "invalid" ? ["Invented policy"] : [],
-          recommendRefund: true,
-          refundAmount: 49,
-          refundCurrency: "USD",
-          refundReason: "forged",
-          requiresEscalation: false,
-        }),
-      ) as never,
-    });
-    await caseStore.update(id, {
-      workflowRunId: `phase004-workflow-${id}`,
-      metadata: {
-        ...((await caseStore.get(id))!.metadata as Record<string, unknown>),
-        activeTurnId: turn.id,
-      },
-    });
-    await (
-      await mastra
-        .getWorkflow("resolveSupportCaseWorkflow")
-        .createRun({ runId: `phase004-workflow-${id}`, disableScorers: true })
-    ).start({ inputData: { caseId: id, turnId: turn.id } });
-    const persisted = await caseStore.get(id);
-    const outbox = await caseStore.getClientForTests().execute({
-      sql: "SELECT body FROM support_outbox WHERE case_id = ?",
-      args: [id],
-    });
-    const outboxBodies = outbox.rows.map((row) => row.body);
-    return {
-      guarded:
-        persisted?.status === "escalated" &&
-        persisted?.finalResponse ===
-          "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly." &&
-        outboxBodies.length === 1 &&
-        outboxBodies[0] === persisted.finalResponse,
-      status: persisted?.status,
-      finalResponse: persisted?.finalResponse,
-      outboxBodies,
-      draft: persisted?.draft,
-      order: persisted?.orderLookup,
-      evidenceKind,
-      policyMatchCount: persisted?.policyMatches?.length ?? 0,
-    };
+    await publishKnowledge(configured, { onlyIfMissing: true });
+    if (expiresAt) {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(Date.parse(expiresAt) + 1));
+    }
+    try {
+      const [turn] = await caseStore.turns(id);
+      if (!turn) throw new Error("Expected immutable workflow turn.");
+      mastra.getAgent("responseAgent").__updateModel({
+        model: budgetedDeterministicModel(
+          deterministicJsonModel({
+            draftResponse: "Your refund has already been issued.",
+            citedSources: evidenceKind === "invalid" ? ["Invented policy"] : [],
+            recommendRefund: true,
+            refundAmount: 49,
+            refundCurrency: "USD",
+            refundReason: "forged",
+            requiresEscalation: false,
+          }),
+        ) as never,
+      });
+      await caseStore.update(id, {
+        workflowRunId: `phase004-workflow-${id}`,
+        metadata: {
+          ...((await caseStore.get(id))!.metadata as Record<string, unknown>),
+          activeTurnId: turn.id,
+        },
+      });
+      await (
+        await mastra
+          .getWorkflow("resolveSupportCaseWorkflow")
+          .createRun({ runId: `phase004-workflow-${id}`, disableScorers: true })
+      ).start({ inputData: { caseId: id, turnId: turn.id } });
+      const persisted = await caseStore.get(id);
+      const outbox = await caseStore.getClientForTests().execute({
+        sql: "SELECT body FROM support_outbox WHERE case_id = ?",
+        args: [id],
+      });
+      const outboxBodies = outbox.rows.map((row) => row.body);
+      return {
+        guarded:
+          persisted?.status === "escalated" &&
+          persisted?.finalResponse ===
+            "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly." &&
+          outboxBodies.length === 1 &&
+          outboxBodies[0] === persisted.finalResponse,
+        status: persisted?.status,
+        finalResponse: persisted?.finalResponse,
+        outboxBodies,
+        draft: persisted?.draft,
+        order: persisted?.orderLookup,
+        evidenceKind,
+        policyMatchCount: persisted?.policyMatches?.length ?? 0,
+      };
+    } finally {
+      if (expiresAt) vi.useRealTimers();
+    }
   })();
 }
 
