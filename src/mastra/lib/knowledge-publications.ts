@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Client } from "@libsql/client";
+import type { Client, Transaction } from "@libsql/client";
 import type {
   KnowledgeEvidence,
   ProviderBinding,
@@ -37,6 +37,8 @@ type ManifestDocument = Pick<
   | "effectiveAt"
   | "indexedAt"
   | "expiresAt"
+  | "providerKind"
+  | "providerAccountId"
 >;
 export interface KnowledgePublication {
   generationId?: string;
@@ -62,6 +64,7 @@ const documentHashFor = (source: string, version: string, text: string) =>
  * database-specific row encoding. It is stable across SQLite implementations
  * and binds every serving-relevant document value to its durable account. */
 const manifestHashFor = (
+  generationId: string,
   binding: Pick<
     ProviderBinding,
     "tenantId" | "providerKind" | "providerAccountId"
@@ -78,6 +81,8 @@ const manifestHashFor = (
       document.effectiveAt,
       document.indexedAt,
       document.expiresAt ?? null,
+      document.providerKind,
+      document.providerAccountId,
     ])
     .sort((left, right) => {
       const a = JSON.stringify(left);
@@ -87,6 +92,7 @@ const manifestHashFor = (
   return createHash("sha256")
     .update(
       JSON.stringify([
+        generationId,
         binding.tenantId,
         binding.providerKind,
         binding.providerAccountId,
@@ -111,6 +117,8 @@ const documentFromRow = (row: Record<string, unknown>): ManifestDocument => ({
     row.expires_at === null || row.expires_at === undefined
       ? undefined
       : String(row.expires_at),
+  providerKind: String(row.provider_kind),
+  providerAccountId: String(row.provider_account_id),
 });
 
 const canonicalInstant = (value: unknown) => {
@@ -121,6 +129,15 @@ const canonicalInstant = (value: unknown) => {
   return new Date(milliseconds).toISOString() === instant
     ? { instant, milliseconds }
     : undefined;
+};
+
+const isSqliteBusy = (error: unknown) => {
+  const value = error as { code?: string; message?: string };
+  return (
+    value.code === "SQLITE_BUSY" ||
+    value.code === "SQLITE_LOCKED" ||
+    /database (is )?locked|cannot commit transaction/i.test(value.message ?? "")
+  );
 };
 
 const tokenize = (value: string) =>
@@ -136,174 +153,375 @@ function lexicalScore(query: string, document: string) {
 }
 
 export class KnowledgePublicationStore {
+  private static initializationChain: Promise<void> = Promise.resolve();
   private readonly client: Client;
   private ready?: Promise<void>;
   constructor(client: Client = getSharedLocalSqliteClient()) {
     this.client = serializeSqliteClient(client);
   }
 
-  private async ensured() {
-    this.ready ??= (async () => {
-      await waitForMastraStorage();
-      await this.client.executeMultiple(`
+  private async applyMigration(
+    version: number,
+    apply: (tx: Transaction) => Promise<void>,
+    verify: (tx: Transaction) => Promise<void>,
+  ) {
+    let delay = 5;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      let tx: Transaction | undefined;
+      try {
+        tx = await this.client.transaction("write");
+        // The marker is deliberately checked only after BEGIN IMMEDIATE. Two
+        // clients can therefore initialize one fresh database without racing a
+        // read-before-lock marker check or retaining a rejected ready promise.
+        const marker = await tx.execute({
+          sql: "SELECT version FROM support_knowledge_schema_migrations WHERE version = ?",
+          args: [version],
+        });
+        if (!marker.rows[0]) await apply(tx);
+        await tx.execute({
+          sql: "INSERT OR IGNORE INTO support_knowledge_schema_migrations(version, applied_at) VALUES (?, ?)",
+          args: [version, new Date().toISOString()],
+        });
+        // A competing initializer can have completed this version before this
+        // transaction acquired its lock. Always prove the resulting schema,
+        // rather than trusting the marker alone.
+        await verify(tx);
+        await tx.commit();
+        return;
+      } catch (error) {
+        try {
+          await tx?.rollback();
+        } catch {}
+        if (!isSqliteBusy(error) || attempt === 4) throw error;
+        lastError = error;
+        await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        delay *= 2;
+      }
+    }
+    throw lastError;
+  }
+
+  private async assertGenerationColumns(tx: Transaction, columns: string[]) {
+    const result = await tx.execute(
+      "PRAGMA table_info(support_knowledge_generations)",
+    );
+    const actual = new Set(
+      result.rows.map((row) => String((row as Record<string, unknown>).name)),
+    );
+    if (columns.some((column) => !actual.has(column)))
+      throw new Error(
+        "Knowledge publication migration schema verification failed.",
+      );
+  }
+
+  private async ensureMigrationTable() {
+    await this.applyMigrationTableTransaction(async (tx) => {
+      await tx.executeMultiple(`
         CREATE TABLE IF NOT EXISTS support_knowledge_schema_migrations (
           version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS support_knowledge_generations (
-          id TEXT PRIMARY KEY, account_key TEXT NOT NULL, tenant_id TEXT NOT NULL,
-          provider_kind TEXT NOT NULL, provider_account_id TEXT NOT NULL,
-          state TEXT NOT NULL CHECK(state IN ('candidate','active','rolled_back','failed')),
-          created_at TEXT NOT NULL, activated_at TEXT, replaced_generation_id TEXT,
-          base_revision INTEGER NOT NULL DEFAULT 0,
-          UNIQUE(account_key, id)
-        );
-        CREATE TABLE IF NOT EXISTS support_knowledge_documents (
-          generation_id TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL,
-          text TEXT NOT NULL, version TEXT NOT NULL, document_hash TEXT NOT NULL,
-          effective_at TEXT NOT NULL, indexed_at TEXT NOT NULL, expires_at TEXT,
-          provider_kind TEXT NOT NULL, provider_account_id TEXT NOT NULL,
-          PRIMARY KEY(generation_id, source, document_hash)
-        );
-        CREATE TABLE IF NOT EXISTS support_knowledge_publications (
-          account_key TEXT PRIMARY KEY, generation_id TEXT NOT NULL, revision INTEGER NOT NULL,
-          published_at TEXT NOT NULL
-        );
       `);
-      await this.client.execute({
-        sql: "INSERT OR IGNORE INTO support_knowledge_schema_migrations(version, applied_at) VALUES (1, ?)",
-        args: [new Date().toISOString()],
-      });
-      const keyMigration = await this.client.execute({
-        sql: "SELECT version FROM support_knowledge_schema_migrations WHERE version = 2",
-      });
-      if (!keyMigration.rows[0]) {
-        const tx = await this.client.transaction("write");
+    });
+  }
+
+  private async applyMigrationTableTransaction(
+    operation: (tx: Transaction) => Promise<void>,
+  ) {
+    let delay = 5;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      let tx: Transaction | undefined;
+      try {
+        tx = await this.client.transaction("write");
+        await operation(tx);
+        await tx.commit();
+        return;
+      } catch (error) {
         try {
-          // Older NUL-delimited bindings were truncated by the SQLite client.
-          // Re-key every generation from its independently persisted fields,
-          // then retain each legacy serving pointer under that generation's
-          // exact account tuple. A pointer that was already re-keyed wins.
-          const generations = await tx.execute(
-            "SELECT id, tenant_id, provider_kind, provider_account_id FROM support_knowledge_generations",
-          );
-          for (const row of generations.rows) {
-            const value = row as Record<string, unknown>;
-            await tx.execute({
-              sql: "UPDATE support_knowledge_generations SET account_key = ? WHERE id = ?",
-              args: [
-                knowledgeAccountKey({
-                  tenantId: String(value.tenant_id),
-                  providerKind: String(
-                    value.provider_kind,
-                  ) as ProviderBinding["providerKind"],
-                  providerAccountId: String(value.provider_account_id),
-                  externalConversationId: "knowledge-publication-migration",
-                }),
-                String(value.id),
-              ],
-            });
-          }
-          const publications = await tx.execute(
-            "SELECT p.account_key AS legacy_key, p.generation_id, p.revision, p.published_at, g.tenant_id, g.provider_kind, g.provider_account_id FROM support_knowledge_publications p JOIN support_knowledge_generations g ON g.id = p.generation_id",
-          );
-          for (const row of publications.rows) {
-            const value = row as Record<string, unknown>;
-            const key = knowledgeAccountKey({
-              tenantId: String(value.tenant_id),
-              providerKind: String(
-                value.provider_kind,
-              ) as ProviderBinding["providerKind"],
-              providerAccountId: String(value.provider_account_id),
-              externalConversationId: "knowledge-publication-migration",
-            });
-            const legacyKey = String(value.legacy_key);
-            if (legacyKey === key) continue;
-            const existing = await tx.execute({
-              sql: "SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?",
-              args: [key],
-            });
-            if (!existing.rows[0])
+          await tx?.rollback();
+        } catch {}
+        if (!isSqliteBusy(error) || attempt === 4) throw error;
+        await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        delay *= 2;
+      }
+    }
+  }
+
+  private async withInitializationLock<T>(operation: () => Promise<T>) {
+    const previous = KnowledgePublicationStore.initializationChain;
+    let release!: () => void;
+    const current = previous.then(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    KnowledgePublicationStore.initializationChain = current;
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private async ensured() {
+    this.ready ??= (async () => {
+      await waitForMastraStorage();
+      // Separate libSQL clients in one process cannot yield while SQLite
+      // synchronously waits on a competing connection. Queue that local case;
+      // the transaction below remains the authority across process boundaries.
+      await this.withInitializationLock(async () => {
+        await this.ensureMigrationTable();
+        await this.applyMigration(
+          1,
+          async (tx) => {
+            await tx.executeMultiple(`
+            CREATE TABLE IF NOT EXISTS support_knowledge_generations (
+              id TEXT PRIMARY KEY, account_key TEXT NOT NULL, tenant_id TEXT NOT NULL,
+              provider_kind TEXT NOT NULL, provider_account_id TEXT NOT NULL,
+              state TEXT NOT NULL CHECK(state IN ('candidate','active','rolled_back','failed')),
+              created_at TEXT NOT NULL, activated_at TEXT, replaced_generation_id TEXT,
+              base_revision INTEGER NOT NULL DEFAULT 0,
+              UNIQUE(account_key, id)
+            );
+            CREATE TABLE IF NOT EXISTS support_knowledge_documents (
+              generation_id TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL,
+              text TEXT NOT NULL, version TEXT NOT NULL, document_hash TEXT NOT NULL,
+              effective_at TEXT NOT NULL, indexed_at TEXT NOT NULL, expires_at TEXT,
+              provider_kind TEXT NOT NULL, provider_account_id TEXT NOT NULL,
+              PRIMARY KEY(generation_id, source, document_hash)
+            );
+            CREATE TABLE IF NOT EXISTS support_knowledge_publications (
+              account_key TEXT PRIMARY KEY, generation_id TEXT NOT NULL, revision INTEGER NOT NULL,
+              published_at TEXT NOT NULL
+            );
+          `);
+          },
+          async (tx) => {
+            await this.assertGenerationColumns(tx, [
+              "id",
+              "account_key",
+              "tenant_id",
+              "provider_kind",
+              "provider_account_id",
+            ]);
+          },
+        );
+        await this.applyMigration(
+          2,
+          async (tx) => {
+            // Older NUL-delimited bindings were truncated by the SQLite client.
+            // Re-key every generation from its independently persisted fields,
+            // then retain each legacy serving pointer under that generation's
+            // exact account tuple. A pointer that was already re-keyed wins.
+            const generations = await tx.execute(
+              "SELECT id, tenant_id, provider_kind, provider_account_id FROM support_knowledge_generations",
+            );
+            for (const row of generations.rows) {
+              const value = row as Record<string, unknown>;
               await tx.execute({
-                sql: "INSERT INTO support_knowledge_publications(account_key, generation_id, revision, published_at) VALUES (?, ?, ?, ?)",
+                sql: "UPDATE support_knowledge_generations SET account_key = ? WHERE id = ?",
                 args: [
-                  key,
-                  String(value.generation_id),
-                  Number(value.revision),
-                  String(value.published_at),
+                  knowledgeAccountKey({
+                    tenantId: String(value.tenant_id),
+                    providerKind: String(
+                      value.provider_kind,
+                    ) as ProviderBinding["providerKind"],
+                    providerAccountId: String(value.provider_account_id),
+                    externalConversationId: "knowledge-publication-migration",
+                  }),
+                  String(value.id),
                 ],
               });
-            await tx.execute({
-              sql: "DELETE FROM support_knowledge_publications WHERE account_key = ?",
-              args: [legacyKey],
-            });
-          }
-          await tx.execute({
-            sql: "INSERT INTO support_knowledge_schema_migrations(version, applied_at) VALUES (2, ?)",
-            args: [new Date().toISOString()],
-          });
-          await tx.commit();
-        } catch (error) {
-          try {
-            await tx.rollback();
-          } catch {}
-          throw error;
-        }
-      }
-      const manifestMigration = await this.client.execute({
-        sql: "SELECT version FROM support_knowledge_schema_migrations WHERE version = 3",
-      });
-      if (!manifestMigration.rows[0]) {
-        const tx = await this.client.transaction("write");
-        try {
-          // This is intentionally additive. Existing generations are given a
-          // deterministic snapshot of their current authoritative rows, so a
-          // valid historical generation remains eligible for rollback.
-          await tx.execute(
-            "ALTER TABLE support_knowledge_generations ADD COLUMN expected_document_count INTEGER",
-          );
-          await tx.execute(
-            "ALTER TABLE support_knowledge_generations ADD COLUMN manifest_hash TEXT",
-          );
-          const generations = await tx.execute(
-            "SELECT id, tenant_id, provider_kind, provider_account_id FROM support_knowledge_generations",
-          );
-          for (const row of generations.rows) {
-            const generation = row as Record<string, unknown>;
-            const documents = await tx.execute({
-              sql: "SELECT source, title, text, version, document_hash, effective_at, indexed_at, expires_at FROM support_knowledge_documents WHERE generation_id = ?",
-              args: [String(generation.id)],
-            });
-            const binding = {
-              tenantId: String(generation.tenant_id),
-              providerKind: String(
-                generation.provider_kind,
-              ) as ProviderBinding["providerKind"],
-              providerAccountId: String(generation.provider_account_id),
-            };
-            const manifestDocuments = documents.rows.map((document) =>
-              documentFromRow(document as Record<string, unknown>),
+            }
+            const publications = await tx.execute(
+              "SELECT p.account_key AS legacy_key, p.generation_id, p.revision, p.published_at, g.tenant_id, g.provider_kind, g.provider_account_id FROM support_knowledge_publications p JOIN support_knowledge_generations g ON g.id = p.generation_id",
             );
-            await tx.execute({
-              sql: "UPDATE support_knowledge_generations SET expected_document_count = ?, manifest_hash = ? WHERE id = ?",
-              args: [
-                manifestDocuments.length,
-                manifestHashFor(binding, manifestDocuments),
-                String(generation.id),
-              ],
-            });
-          }
-          await tx.execute({
-            sql: "INSERT INTO support_knowledge_schema_migrations(version, applied_at) VALUES (3, ?)",
-            args: [new Date().toISOString()],
-          });
-          await tx.commit();
-        } catch (error) {
-          try {
-            await tx.rollback();
-          } catch {}
-          throw error;
-        }
-      }
+            for (const row of publications.rows) {
+              const value = row as Record<string, unknown>;
+              const key = knowledgeAccountKey({
+                tenantId: String(value.tenant_id),
+                providerKind: String(
+                  value.provider_kind,
+                ) as ProviderBinding["providerKind"],
+                providerAccountId: String(value.provider_account_id),
+                externalConversationId: "knowledge-publication-migration",
+              });
+              const legacyKey = String(value.legacy_key);
+              if (legacyKey === key) continue;
+              const existing = await tx.execute({
+                sql: "SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?",
+                args: [key],
+              });
+              if (!existing.rows[0])
+                await tx.execute({
+                  sql: "INSERT INTO support_knowledge_publications(account_key, generation_id, revision, published_at) VALUES (?, ?, ?, ?)",
+                  args: [
+                    key,
+                    String(value.generation_id),
+                    Number(value.revision),
+                    String(value.published_at),
+                  ],
+                });
+              await tx.execute({
+                sql: "DELETE FROM support_knowledge_publications WHERE account_key = ?",
+                args: [legacyKey],
+              });
+            }
+          },
+          async (tx) => {
+            await this.assertGenerationColumns(tx, [
+              "account_key",
+              "tenant_id",
+              "provider_kind",
+              "provider_account_id",
+            ]);
+          },
+        );
+        await this.applyMigration(
+          3,
+          async (tx) => {
+            // This is intentionally additive. Existing generations are given a
+            // deterministic snapshot of their current authoritative rows, so a
+            // valid historical generation remains eligible for rollback.
+            await tx.execute(
+              "ALTER TABLE support_knowledge_generations ADD COLUMN expected_document_count INTEGER",
+            );
+            await tx.execute(
+              "ALTER TABLE support_knowledge_generations ADD COLUMN manifest_hash TEXT",
+            );
+            const generations = await tx.execute(
+              "SELECT id, tenant_id, provider_kind, provider_account_id FROM support_knowledge_generations",
+            );
+            for (const row of generations.rows) {
+              const generation = row as Record<string, unknown>;
+              const documents = await tx.execute({
+                sql: "SELECT source, title, text, version, document_hash, effective_at, indexed_at, expires_at, provider_kind, provider_account_id FROM support_knowledge_documents WHERE generation_id = ?",
+                args: [String(generation.id)],
+              });
+              const binding = {
+                tenantId: String(generation.tenant_id),
+                providerKind: String(
+                  generation.provider_kind,
+                ) as ProviderBinding["providerKind"],
+                providerAccountId: String(generation.provider_account_id),
+              };
+              const manifestDocuments = documents.rows.map((document) =>
+                documentFromRow(document as Record<string, unknown>),
+              );
+              await tx.execute({
+                sql: "UPDATE support_knowledge_generations SET expected_document_count = ?, manifest_hash = ? WHERE id = ?",
+                args: [
+                  manifestDocuments.length,
+                  manifestHashFor(
+                    String(generation.id),
+                    binding,
+                    manifestDocuments,
+                  ),
+                  String(generation.id),
+                ],
+              });
+            }
+          },
+          async (tx) => {
+            await this.assertGenerationColumns(tx, [
+              "expected_document_count",
+              "manifest_hash",
+            ]);
+          },
+        );
+        await this.applyMigration(
+          4,
+          async (tx) => {
+            // Version 3 recorded a mutable manifest. Backfill every legacy
+            // generation while it is still writable, then install the local
+            // append-only authority that seals it for activation and rollback.
+            await tx.execute(
+              "ALTER TABLE support_knowledge_generations ADD COLUMN sealed_at TEXT",
+            );
+            const generations = await tx.execute(
+              "SELECT id, tenant_id, provider_kind, provider_account_id FROM support_knowledge_generations",
+            );
+            const sealedAt = new Date().toISOString();
+            for (const row of generations.rows) {
+              const generation = row as Record<string, unknown>;
+              const id = String(generation.id);
+              const documents = await tx.execute({
+                sql: "SELECT source, title, text, version, document_hash, effective_at, indexed_at, expires_at, provider_kind, provider_account_id FROM support_knowledge_documents WHERE generation_id = ?",
+                args: [id],
+              });
+              const binding = {
+                tenantId: String(generation.tenant_id),
+                providerKind: String(
+                  generation.provider_kind,
+                ) as ProviderBinding["providerKind"],
+                providerAccountId: String(generation.provider_account_id),
+              };
+              const manifestDocuments = documents.rows.map((document) =>
+                documentFromRow(document as Record<string, unknown>),
+              );
+              await tx.execute({
+                sql: "UPDATE support_knowledge_generations SET expected_document_count = ?, manifest_hash = ?, sealed_at = ? WHERE id = ?",
+                args: [
+                  manifestDocuments.length,
+                  manifestHashFor(id, binding, manifestDocuments),
+                  sealedAt,
+                  id,
+                ],
+              });
+            }
+            await tx.executeMultiple(`
+            CREATE TRIGGER support_knowledge_sealed_generation_authority
+            BEFORE UPDATE OF account_key, tenant_id, provider_kind, provider_account_id, expected_document_count, manifest_hash
+            ON support_knowledge_generations
+            WHEN OLD.sealed_at IS NOT NULL
+            BEGIN
+              SELECT RAISE(ABORT, 'sealed knowledge generation authority is immutable');
+            END;
+            CREATE TRIGGER support_knowledge_seal_once
+            BEFORE UPDATE OF sealed_at ON support_knowledge_generations
+            WHEN OLD.sealed_at IS NOT NULL OR NEW.sealed_at IS NULL
+            BEGIN
+              SELECT RAISE(ABORT, 'sealed knowledge generation authority is immutable');
+            END;
+            CREATE TRIGGER support_knowledge_sealed_document_insert
+            BEFORE INSERT ON support_knowledge_documents
+            WHEN EXISTS (SELECT 1 FROM support_knowledge_generations WHERE id = NEW.generation_id AND sealed_at IS NOT NULL)
+            BEGIN
+              SELECT RAISE(ABORT, 'sealed knowledge documents are immutable');
+            END;
+            CREATE TRIGGER support_knowledge_sealed_document_update
+            BEFORE UPDATE ON support_knowledge_documents
+            WHEN EXISTS (SELECT 1 FROM support_knowledge_generations WHERE id = OLD.generation_id AND sealed_at IS NOT NULL)
+              OR EXISTS (SELECT 1 FROM support_knowledge_generations WHERE id = NEW.generation_id AND sealed_at IS NOT NULL)
+            BEGIN
+              SELECT RAISE(ABORT, 'sealed knowledge documents are immutable');
+            END;
+            CREATE TRIGGER support_knowledge_sealed_document_delete
+            BEFORE DELETE ON support_knowledge_documents
+            WHEN EXISTS (SELECT 1 FROM support_knowledge_generations WHERE id = OLD.generation_id AND sealed_at IS NOT NULL)
+            BEGIN
+              SELECT RAISE(ABORT, 'sealed knowledge documents are immutable');
+            END;
+          `);
+          },
+          async (tx) => {
+            await this.assertGenerationColumns(tx, ["sealed_at"]);
+            const triggers = await tx.execute(
+              "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name IN ('support_knowledge_sealed_generation_authority', 'support_knowledge_seal_once', 'support_knowledge_sealed_document_insert', 'support_knowledge_sealed_document_update', 'support_knowledge_sealed_document_delete')",
+            );
+            if (triggers.rows.length !== 5)
+              throw new Error(
+                "Knowledge publication migration trigger verification failed.",
+              );
+          },
+        );
+      });
     })();
     await this.ready;
   }
@@ -395,11 +613,15 @@ export class KnowledgePublicationStore {
       ...document,
       indexedAt,
     }));
-    const manifestHash = manifestHashFor(binding, manifestDocuments);
+    const manifestHash = manifestHashFor(
+      generationId,
+      binding,
+      manifestDocuments,
+    );
     const tx = await this.client.transaction("write");
     try {
       await tx.execute({
-        sql: "INSERT INTO support_knowledge_generations(id, account_key, tenant_id, provider_kind, provider_account_id, state, created_at, base_revision, expected_document_count, manifest_hash) VALUES (?, ?, ?, ?, ?, 'candidate', ?, ?, ?, ?)",
+        sql: "INSERT INTO support_knowledge_generations(id, account_key, tenant_id, provider_kind, provider_account_id, state, created_at, base_revision, expected_document_count, manifest_hash, sealed_at) VALUES (?, ?, ?, ?, ?, 'candidate', ?, ?, NULL, NULL, NULL)",
         args: [
           generationId,
           knowledgeAccountKey(binding),
@@ -408,8 +630,6 @@ export class KnowledgePublicationStore {
           binding.providerAccountId,
           now,
           base.revision,
-          manifestDocuments.length,
-          manifestHash,
         ],
       });
       for (const document of manifestDocuments)
@@ -429,6 +649,18 @@ export class KnowledgePublicationStore {
             document.providerAccountId,
           ],
         });
+      // The trigger-protected authority is written only after the complete
+      // document set exists. Commit exposes either this sealed snapshot or no
+      // generation at all.
+      await tx.execute({
+        sql: "UPDATE support_knowledge_generations SET expected_document_count = ?, manifest_hash = ?, sealed_at = ? WHERE id = ?",
+        args: [
+          manifestDocuments.length,
+          manifestHash,
+          new Date().toISOString(),
+          generationId,
+        ],
+      });
       await tx.commit();
     } catch (error) {
       try {
@@ -450,7 +682,7 @@ export class KnowledgePublicationStore {
     const tx = await this.client.transaction("write");
     try {
       const candidate = await tx.execute({
-        sql: "SELECT id, account_key, tenant_id, provider_kind, provider_account_id, state, expected_document_count, manifest_hash FROM support_knowledge_generations WHERE id = ?",
+        sql: "SELECT id, account_key, tenant_id, provider_kind, provider_account_id, state, expected_document_count, manifest_hash, sealed_at FROM support_knowledge_generations WHERE id = ?",
         args: [generationId],
       });
       const candidateRow = candidate.rows[0] as
@@ -477,6 +709,8 @@ export class KnowledgePublicationStore {
         !/^[0-9a-f]{64}$/.test(expectedManifest)
       )
         throw new Error("Knowledge candidate has no valid immutable manifest.");
+      if (!canonicalInstant(candidateRow.sealed_at))
+        throw new Error("Knowledge candidate has no valid sealed authority.");
       const now = new Date().toISOString();
       const nowMilliseconds = Date.parse(now);
       const documents = await tx.execute({
@@ -562,9 +796,14 @@ export class KnowledgePublicationStore {
           effectiveAt: effective.instant,
           indexedAt: indexed.instant,
           expiresAt: expires?.instant,
+          providerKind: binding.providerKind,
+          providerAccountId: binding.providerAccountId,
         });
       }
-      if (manifestHashFor(binding, manifestDocuments) !== expectedManifest)
+      if (
+        manifestHashFor(generationId, binding, manifestDocuments) !==
+        expectedManifest
+      )
         throw new Error(
           "Knowledge candidate has incomplete or inactive source evidence (or altered integrity metadata).",
         );
@@ -636,7 +875,7 @@ export class KnowledgePublicationStore {
     if (!generationId) return [];
     const now = new Date().toISOString();
     const rows = await this.client.execute({
-      sql: "SELECT * FROM support_knowledge_documents WHERE generation_id = ? AND effective_at <= ? AND (expires_at IS NULL OR expires_at > ?)",
+      sql: "SELECT d.* FROM support_knowledge_documents d JOIN support_knowledge_generations g ON g.id = d.generation_id WHERE d.generation_id = ? AND g.sealed_at IS NOT NULL AND effective_at <= ? AND (expires_at IS NULL OR expires_at > ?)",
       args: [generationId, now, now],
     });
     return rows.rows
@@ -672,7 +911,7 @@ export class KnowledgePublicationStore {
   ): Promise<PublishedEvidence | undefined> {
     await this.ensured();
     const row = await this.client.execute({
-      sql: "SELECT d.* FROM support_knowledge_documents d JOIN support_knowledge_generations g ON g.id = d.generation_id WHERE d.generation_id = ? AND d.source = ? AND d.document_hash = ? AND g.account_key = ?",
+      sql: "SELECT d.* FROM support_knowledge_documents d JOIN support_knowledge_generations g ON g.id = d.generation_id WHERE d.generation_id = ? AND d.source = ? AND d.document_hash = ? AND g.account_key = ? AND g.sealed_at IS NOT NULL",
       args: [generationId, source, documentHash, knowledgeAccountKey(binding)],
     });
     const value = row.rows[0] as Record<string, unknown> | undefined;

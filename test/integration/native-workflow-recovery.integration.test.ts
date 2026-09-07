@@ -187,6 +187,7 @@ async function setup(
     quoteFailure?: boolean;
     allowInitialWorkflowFailure?: boolean;
     providerBindings?: CaseProviderBindings;
+    knowledgeExpiresAt?: string;
   },
 ) {
   const path = `/private/tmp/phase003-native-workflow-${crypto.randomUUID()}.db`;
@@ -291,6 +292,15 @@ async function setup(
   await Promise.all(
     configuredBindings.map((candidate) => localRuntime.seed(candidate)),
   );
+  if (options?.knowledgeExpiresAt)
+    await caseStore.getClientForTests().execute({
+      sql: "UPDATE local_knowledge SET expires_at = ? WHERE tenant_id = ? AND provider_account_id = ?",
+      args: [
+        options.knowledgeExpiresAt,
+        bindings.knowledge.tenantId,
+        bindings.knowledge.providerAccountId,
+      ],
+    });
   const { legacyAmountToMoney } = await import("../../src/mastra/lib/money");
   await caseStore.getClientForTests().execute({
     sql: "UPDATE local_orders SET currency = ?, amount_minor = ? WHERE tenant_id = ? AND provider_account_id = ? AND order_id = ?",
@@ -488,6 +498,7 @@ afterEach(async () => {
   await Promise.all(runtimes.splice(0).map((runtime) => runtime.shutdown()));
   vi.doUnmock("../../src/mastra/evals");
   vi.restoreAllMocks();
+  vi.useRealTimers();
   delete process.env.SUPPORT_TEST_DISPATCH_LEASE_MS;
   delete process.env.SUPPORT_TEST_DISPATCH_HEARTBEAT_MS;
   await Promise.all(files.splice(0).map((file) => rm(file, { force: true })));
@@ -505,6 +516,16 @@ function independentCaseBindings(caseId: string): CaseProviderBindings {
     commerce: binding(`commerce-${caseId}`),
     transactions: binding(`transactions-${caseId}`),
     knowledge: binding(`knowledge-${caseId}`),
+  };
+}
+
+function prepareKnowledgeExpiry() {
+  const initial = new Date();
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(initial);
+  return {
+    expiresAt: new Date(initial.getTime() + 1_000).toISOString(),
+    afterExpiry: new Date(initial.getTime() + 1_001),
   };
 }
 
@@ -1560,8 +1581,11 @@ describe("native approval workflow recovery", () => {
 
   it("reuses a durable effect after a crash before workflow completion", async () => {
     const caseId = `effect-crash-${crypto.randomUUID()}`;
+    const expiry = prepareKnowledgeExpiry();
     const { caseStore, mastra, native, recoverApprovedNativeDecisions } =
-      await setup(caseId);
+      await setup(caseId, undefined, undefined, undefined, {
+        knowledgeExpiresAt: expiry.expiresAt,
+      });
     await caseStore.recordApprovalDecision({
       caseId,
       turnId: native.turnId,
@@ -1629,15 +1653,7 @@ describe("native approval workflow recovery", () => {
     expect((await caseStore.get(caseId))?.refundResult).toBeUndefined();
     // The provider effect is already durable. A later expiry must not turn
     // recovery into a rejection or permit a duplicate effect.
-    await caseStore.getClientForTests().execute({
-      sql: "UPDATE support_knowledge_documents SET expires_at = ? WHERE generation_id = (SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?)",
-      args: [
-        "2000-01-01T00:00:00.000Z",
-        knowledgeAccountKey(
-          (await caseStore.get(caseId))!.metadata.providerBinding,
-        ),
-      ],
-    });
+    vi.setSystemTime(expiry.afterExpiry);
 
     expect(
       await recoverApprovedNativeDecisions(mastra, caseStore, {
@@ -1759,20 +1775,15 @@ describe("native approval workflow recovery", () => {
   it("denies an authenticated first refund after knowledge authority expires with independent accounts", async () => {
     const caseId = `independent-accounts-expiry-${crypto.randomUUID()}`;
     const bindings = independentCaseBindings(caseId);
+    const expiry = prepareKnowledgeExpiry();
     const { app, caseStore, native } = await setup(
       caseId,
       undefined,
       undefined,
       undefined,
-      { providerBindings: bindings },
+      { providerBindings: bindings, knowledgeExpiresAt: expiry.expiresAt },
     );
-    await caseStore.getClientForTests().execute({
-      sql: "UPDATE support_knowledge_documents SET expires_at = ? WHERE generation_id = (SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?)",
-      args: [
-        "2000-01-01T00:00:00.000Z",
-        knowledgeAccountKey(bindings.knowledge),
-      ],
-    });
+    vi.setSystemTime(expiry.afterExpiry);
 
     const response = await approveNativeRefund(app, caseId, native.fingerprint);
 
@@ -1825,9 +1836,11 @@ describe("native approval workflow recovery", () => {
   it("reconciles an existing native effect after knowledge expiry with independent accounts", async () => {
     const caseId = `independent-accounts-replay-${crypto.randomUUID()}`;
     const bindings = independentCaseBindings(caseId);
+    const expiry = prepareKnowledgeExpiry();
     const { caseStore, mastra, native, recoverApprovedNativeDecisions } =
       await setup(caseId, undefined, undefined, undefined, {
         providerBindings: bindings,
+        knowledgeExpiresAt: expiry.expiresAt,
       });
     await caseStore.recordApprovalDecision({
       caseId,
@@ -1894,13 +1907,7 @@ describe("native approval workflow recovery", () => {
     expect(providerEffect.rows).toEqual([
       { provider_account_id: bindings.transactions.providerAccountId },
     ]);
-    await caseStore.getClientForTests().execute({
-      sql: "UPDATE support_knowledge_documents SET expires_at = ? WHERE generation_id = (SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?)",
-      args: [
-        "2000-01-01T00:00:00.000Z",
-        knowledgeAccountKey(bindings.knowledge),
-      ],
-    });
+    vi.setSystemTime(expiry.afterExpiry);
 
     expect(
       await recoverApprovedNativeDecisions(mastra, caseStore, {
@@ -1985,11 +1992,15 @@ describe("native approval workflow recovery", () => {
 
   it("escalates an authenticated approval when its bound policy expires during native suspension", async () => {
     const caseId = `policy-expired-approval-${crypto.randomUUID()}`;
-    const { app, binding, caseStore, native } = await setup(caseId);
-    await caseStore.getClientForTests().execute({
-      sql: "UPDATE support_knowledge_documents SET expires_at = ? WHERE generation_id = (SELECT generation_id FROM support_knowledge_publications WHERE account_key = ?)",
-      args: ["2000-01-01T00:00:00.000Z", knowledgeAccountKey(binding)],
-    });
+    const expiry = prepareKnowledgeExpiry();
+    const { app, caseStore, native } = await setup(
+      caseId,
+      undefined,
+      undefined,
+      undefined,
+      { knowledgeExpiresAt: expiry.expiresAt },
+    );
+    vi.setSystemTime(expiry.afterExpiry);
 
     const response = await app.request(
       `http://support.test/support/cases/${caseId}/approve`,

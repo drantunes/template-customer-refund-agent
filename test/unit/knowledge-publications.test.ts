@@ -169,6 +169,7 @@ describe("knowledge publication generations", () => {
         expiresAt: "2026-09-05T22:00:05.000Z",
       },
     ]);
+    const beforeRejectedActivation = await store.publication(expiryBinding);
     vi.setSystemTime(new Date("2026-09-05T22:00:05.000Z"));
     await expect(
       store.activate(
@@ -177,8 +178,8 @@ describe("knowledge publication generations", () => {
         await store.publication(expiryBinding),
       ),
     ).rejects.toThrow("incomplete or inactive");
-    expect(await store.activeGeneration(expiryBinding)).toBe(
-      knownGood.generationId,
+    expect(await store.publication(expiryBinding)).toEqual(
+      beforeRejectedActivation,
     );
 
     vi.setSystemTime(new Date("2026-09-05T22:00:06.000Z"));
@@ -203,11 +204,12 @@ describe("knowledge publication generations", () => {
     );
 
     vi.setSystemTime(new Date("2026-09-05T22:00:10.000Z"));
+    const beforeRejectedRollback = await store.publication(expiryBinding);
     await expect(
       store.rollback(expiryBinding, expiresBeforeRollback.generationId),
     ).rejects.toThrow("incomplete or inactive");
-    expect(await store.activeGeneration(expiryBinding)).toBe(
-      replacement.generationId,
+    expect(await store.publication(expiryBinding)).toEqual(
+      beforeRejectedRollback,
     );
     expect(
       (await store.search(expiryBinding, "documented review", 1))[0]
@@ -215,7 +217,7 @@ describe("knowledge publication generations", () => {
     ).toBe(replacement.generationId);
   });
 
-  it("rejects candidate row and binding tampering without changing the serving pointer or revision", async () => {
+  it("makes every sealed authority field and document row append-only", async () => {
     const tamperBinding = {
       ...binding,
       tenantId: `tamper-${crypto.randomUUID()}`,
@@ -241,27 +243,25 @@ describe("knowledge publication generations", () => {
         source: "policy://two",
       },
     ];
-    const rejectTamperedCandidate = async (
-      alter: (generationId: string) => Promise<void>,
+    const rejectSealedMutation = async (
+      alter: (generationId: string) => Promise<unknown>,
+      message: string,
     ) => {
       const candidate = await store.buildCandidate(
         tamperBinding,
         candidateDocuments(),
       );
-      await alter(candidate.generationId);
-      await expect(
-        store.activate(tamperBinding, candidate.generationId, expected),
-      ).rejects.toThrow(/incomplete or inactive|durable binding/);
+      await expect(alter(candidate.generationId)).rejects.toThrow(message);
       expect(await store.publication(tamperBinding)).toEqual(expected);
     };
 
-    await rejectTamperedCandidate(async (generationId) => {
+    await rejectSealedMutation(async (generationId) => {
       await client.execute({
         sql: "DELETE FROM support_knowledge_documents WHERE generation_id = ? AND source = ?",
         args: [generationId, "policy://one"],
       });
-    });
-    await rejectTamperedCandidate(async (generationId) => {
+    }, "sealed knowledge documents are immutable");
+    await rejectSealedMutation(async (generationId) => {
       await client.execute({
         sql: "INSERT INTO support_knowledge_documents(generation_id, source, title, text, version, document_hash, effective_at, indexed_at, expires_at, provider_kind, provider_account_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
         args: [
@@ -277,8 +277,8 @@ describe("knowledge publication generations", () => {
           tamperBinding.providerAccountId,
         ],
       });
-    });
-    await rejectTamperedCandidate(async (generationId) => {
+    }, "sealed knowledge documents are immutable");
+    await rejectSealedMutation(async (generationId) => {
       await client.execute({
         sql: "UPDATE support_knowledge_documents SET text = ? WHERE generation_id = ? AND source = ?",
         args: [
@@ -287,79 +287,125 @@ describe("knowledge publication generations", () => {
           "policy://one",
         ],
       });
-    });
-    await rejectTamperedCandidate(async (generationId) => {
-      await client.execute({
-        sql: "UPDATE support_knowledge_documents SET document_hash = ? WHERE generation_id = ? AND source = ?",
-        args: ["forged", generationId, "policy://one"],
-      });
-    });
-    await rejectTamperedCandidate(async (generationId) => {
-      await client.execute({
-        sql: "UPDATE support_knowledge_documents SET indexed_at = ? WHERE generation_id = ? AND source = ?",
-        args: ["not-a-timestamp", generationId, "policy://one"],
-      });
-    });
-    await rejectTamperedCandidate(async (generationId) => {
-      await client.execute({
-        sql: "UPDATE support_knowledge_documents SET indexed_at = ? WHERE generation_id = ? AND source = ?",
-        args: ["2026-01-02T00:00:00.000Z", generationId, "policy://one"],
-      });
-    });
-    await rejectTamperedCandidate(async (generationId) => {
-      await client.execute({
-        sql: "UPDATE support_knowledge_generations SET account_key = ? WHERE id = ?",
-        args: ["foreign-account-key", generationId],
-      });
-    });
-    await rejectTamperedCandidate(async (generationId) => {
-      await client.execute({
-        sql: "UPDATE support_knowledge_documents SET provider_account_id = ? WHERE generation_id = ? AND source = ?",
-        args: ["foreign-account", generationId, "policy://one"],
-      });
-    });
-    await rejectTamperedCandidate(async (generationId) => {
-      await client.execute({
-        sql: "UPDATE support_knowledge_generations SET account_key = ?, tenant_id = ?, provider_account_id = ? WHERE id = ?",
-        args: [
-          "foreign-account-key",
-          "foreign-tenant",
-          "foreign-account",
-          generationId,
-        ],
-      });
-    });
-    await rejectTamperedCandidate(async (generationId) => {
-      await client.execute({
-        sql: "UPDATE support_knowledge_documents SET effective_at = ? WHERE generation_id = ? AND source = ?",
-        args: ["2999-01-01T00:00:00.000Z", generationId, "policy://one"],
-      });
-    });
-    await rejectTamperedCandidate(async (generationId) => {
-      await client.execute({
-        sql: "UPDATE support_knowledge_documents SET expires_at = ? WHERE generation_id = ? AND source = ?",
-        args: ["2026-01-01T00:00:00.000Z", generationId, "policy://one"],
-      });
-    });
+    }, "sealed knowledge documents are immutable");
 
-    const rebound = await store.buildCandidate(
-      tamperBinding,
-      candidateDocuments(),
-    );
-    const other = await store.buildCandidate(tamperBinding, [
-      { ...document("unrelated candidate", "v3"), source: "policy://other" },
-    ]);
-    await client.execute({
-      sql: "UPDATE support_knowledge_documents SET generation_id = ? WHERE generation_id = ? AND source = ?",
-      args: [other.generationId, rebound.generationId, "policy://one"],
-    });
-    await expect(
-      store.activate(tamperBinding, rebound.generationId, expected),
-    ).rejects.toThrow("incomplete or inactive");
-    expect(await store.publication(tamperBinding)).toEqual(expected);
+    for (const [column, value] of [
+      ["account_key", "foreign-account-key"],
+      ["tenant_id", "foreign-tenant"],
+      ["provider_kind", "foreign-provider"],
+      ["provider_account_id", "foreign-account"],
+      ["expected_document_count", 99],
+      ["manifest_hash", "f".repeat(64)],
+      ["sealed_at", "2026-09-06T00:00:00.000Z"],
+    ] as const) {
+      await rejectSealedMutation(async (generationId) => {
+        await client.execute({
+          sql: `UPDATE support_knowledge_generations SET ${column} = ? WHERE id = ?`,
+          args: [value, generationId],
+        });
+      }, "sealed knowledge generation authority is immutable");
+    }
   });
 
-  it("rejects rollback of an altered historical generation without changing the current revision", async () => {
+  it("rejects coordinated row, count, manifest, and ownership substitutions before activation", async () => {
+    const tamperBinding = {
+      ...binding,
+      tenantId: `coordinated-${crypto.randomUUID()}`,
+      providerAccountId: `coordinated-${crypto.randomUUID()}`,
+    };
+    const client = createClient({ url: process.env.TURSO_DATABASE_URL! });
+    const store = new KnowledgePublicationStore(client);
+    const knownGood = await store.buildCandidate(tamperBinding, [
+      document("known good policy", "v1"),
+    ]);
+    await store.activate(tamperBinding, knownGood.generationId, {
+      generationId: undefined,
+      revision: 0,
+    });
+    const expected = await store.publication(tamperBinding);
+    const target = await store.buildCandidate(tamperBinding, [
+      { ...document("target one", "v2"), source: "policy://target-one" },
+      { ...document("target two", "v2"), source: "policy://target-two" },
+    ]);
+    const donor = await store.buildCandidate(tamperBinding, [
+      { ...document("donor one", "v3"), source: "policy://donor-one" },
+      { ...document("donor two", "v3"), source: "policy://donor-two" },
+    ]);
+
+    await expect(
+      client.batch(
+        [
+          {
+            sql: "UPDATE support_knowledge_documents SET generation_id = ? WHERE generation_id = ?",
+            args: [target.generationId, donor.generationId],
+          },
+          {
+            sql: "UPDATE support_knowledge_generations SET expected_document_count = ?, manifest_hash = ? WHERE id = ?",
+            args: [2, "d".repeat(64), target.generationId],
+          },
+        ],
+        "write",
+      ),
+    ).rejects.toThrow("sealed knowledge documents are immutable");
+    expect(await store.publication(tamperBinding)).toEqual(expected);
+
+    await expect(
+      client.batch(
+        [
+          {
+            sql: "INSERT INTO support_knowledge_documents(generation_id, source, title, text, version, document_hash, effective_at, indexed_at, expires_at, provider_kind, provider_account_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+            args: [
+              target.generationId,
+              "policy://added",
+              "Added policy",
+              "added after seal",
+              "v2",
+              "a".repeat(64),
+              "2026-01-01T00:00:00.000Z",
+              "2026-09-05T22:00:00.000Z",
+              tamperBinding.providerKind,
+              tamperBinding.providerAccountId,
+            ],
+          },
+          {
+            sql: "UPDATE support_knowledge_generations SET expected_document_count = ?, manifest_hash = ? WHERE id = ?",
+            args: [3, "b".repeat(64), target.generationId],
+          },
+        ],
+        "write",
+      ),
+    ).rejects.toThrow("sealed knowledge documents are immutable");
+    expect(await store.publication(tamperBinding)).toEqual(expected);
+
+    await expect(
+      client.batch(
+        [
+          {
+            sql: "UPDATE support_knowledge_generations SET account_key = ?, tenant_id = ?, provider_kind = ?, provider_account_id = ?, expected_document_count = ?, manifest_hash = ? WHERE id = ?",
+            args: [
+              "foreign-key",
+              "foreign-tenant",
+              "foreign-provider",
+              "foreign-account",
+              2,
+              "c".repeat(64),
+              target.generationId,
+            ],
+          },
+          {
+            sql: "UPDATE support_knowledge_documents SET generation_id = ? WHERE generation_id = ?",
+            args: [target.generationId, donor.generationId],
+          },
+        ],
+        "write",
+      ),
+    ).rejects.toThrow("sealed knowledge generation authority is immutable");
+    await expect(
+      store.activate(tamperBinding, target.generationId, expected),
+    ).resolves.toMatchObject({ generationId: target.generationId });
+  });
+
+  it("keeps rollback usable because historical sealed generations remain intact", async () => {
     const rollbackBinding = {
       ...binding,
       tenantId: `rollback-integrity-${crypto.randomUUID()}`,
@@ -382,14 +428,16 @@ describe("knowledge publication generations", () => {
       current.generationId,
       await store.publication(rollbackBinding),
     );
-    const expected = await store.publication(rollbackBinding);
-    await client.execute({
-      sql: "UPDATE support_knowledge_documents SET text = ? WHERE generation_id = ?",
-      args: ["tampered historical policy", historical.generationId],
-    });
     await expect(
-      store.rollback(rollbackBinding, historical.generationId),
-    ).rejects.toThrow("incomplete or inactive");
-    expect(await store.publication(rollbackBinding)).toEqual(expected);
+      client.execute({
+        sql: "UPDATE support_knowledge_documents SET text = ? WHERE generation_id = ?",
+        args: ["tampered historical policy", historical.generationId],
+      }),
+    ).rejects.toThrow("sealed knowledge documents are immutable");
+    await store.rollback(rollbackBinding, historical.generationId);
+    expect(await store.publication(rollbackBinding)).toMatchObject({
+      generationId: historical.generationId,
+      revision: 3,
+    });
   });
 });

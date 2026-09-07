@@ -16,6 +16,73 @@ afterEach(async () => {
 });
 
 describe("Phase 003 local knowledge migration", () => {
+  it("lets simultaneous clients initialize one fresh publication store and both remain usable", async () => {
+    const path = `/private/tmp/knowledge-concurrent-migration-${crypto.randomUUID()}.db`;
+    paths.push(path, `${path}-shm`, `${path}-wal`);
+    const firstClient = createClient({ url: `file:${path}` });
+    const secondClient = createClient({ url: `file:${path}` });
+    const first = new KnowledgePublicationStore(firstClient);
+    const second = new KnowledgePublicationStore(secondClient);
+    const firstBinding = {
+      tenantId: `first-${crypto.randomUUID()}`,
+      providerKind: "local" as const,
+      providerAccountId: `first-account-${crypto.randomUUID()}`,
+      externalConversationId: "migration-concurrency-test",
+    };
+    const secondBinding = {
+      tenantId: `second-${crypto.randomUUID()}`,
+      providerKind: "local" as const,
+      providerAccountId: `second-account-${crypto.randomUUID()}`,
+      externalConversationId: "migration-concurrency-test",
+    };
+
+    await expect(
+      Promise.all([
+        first.publication(firstBinding),
+        second.publication(secondBinding),
+      ]),
+    ).resolves.toEqual([
+      { generationId: undefined, revision: 0 },
+      { generationId: undefined, revision: 0 },
+    ]);
+    const firstCandidate = await first.buildCandidate(firstBinding, [
+      {
+        source: "policy://first",
+        title: "First policy",
+        text: "first client remains usable after migration",
+        version: "v1",
+        effectiveAt: "2026-01-01T00:00:00.000Z",
+        score: 1,
+      },
+    ]);
+    const secondCandidate = await second.buildCandidate(secondBinding, [
+      {
+        source: "policy://second",
+        title: "Second policy",
+        text: "second client remains usable after migration",
+        version: "v1",
+        effectiveAt: "2026-01-01T00:00:00.000Z",
+        score: 1,
+      },
+    ]);
+    await first.activate(firstBinding, firstCandidate.generationId, {
+      generationId: undefined,
+      revision: 0,
+    });
+    await second.activate(secondBinding, secondCandidate.generationId, {
+      generationId: undefined,
+      revision: 0,
+    });
+    expect(await first.activeGeneration(firstBinding)).toBe(
+      firstCandidate.generationId,
+    );
+    expect(await second.activeGeneration(secondBinding)).toBe(
+      secondCandidate.generationId,
+    );
+    firstClient.close();
+    secondClient.close();
+  });
+
   it("backfills only known versioned fixture applicability and leaves unknown records unpublished", async () => {
     const path = `/private/tmp/knowledge-phase003-${crypto.randomUUID()}.db`;
     paths.push(path, `${path}-shm`, `${path}-wal`);
@@ -165,7 +232,7 @@ describe("Phase 003 local knowledge migration", () => {
     });
     expect(
       await client.execute({
-        sql: "SELECT expected_document_count, manifest_hash FROM support_knowledge_generations WHERE id = ?",
+        sql: "SELECT expected_document_count, manifest_hash, sealed_at FROM support_knowledge_generations WHERE id = ?",
         args: ["legacy-generation"],
       }),
     ).toMatchObject({
@@ -173,6 +240,7 @@ describe("Phase 003 local knowledge migration", () => {
         {
           expected_document_count: 1,
           manifest_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
+          sealed_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
         },
       ],
     });

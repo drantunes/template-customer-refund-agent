@@ -234,6 +234,7 @@ afterEach(async () => {
     closeSharedClients.splice(0).map((close) => close()),
   );
   vi.restoreAllMocks();
+  vi.useRealTimers();
   vi.doUnmock("../../src/mastra/evals");
   vi.doUnmock("@mastra/core/llm");
   await Promise.all(
@@ -1415,14 +1416,26 @@ describe("support workflow HTTP context propagation", () => {
       caseStore: runtimeCaseStore,
       responseAgent,
     } = await loadDeterministicRuntime();
+    const initial = new Date();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(initial);
+    const expiresAt = new Date(initial.getTime() + 1_000).toISOString();
+    const afterExpiry = new Date(initial.getTime() + 1_001);
+    const { defaultLocalBinding, localRuntime } =
+      await import("../../src/mastra/runtime/local-runtime");
+    await localRuntime.seed(defaultLocalBinding());
+    // The workflow publishes this source row before it seals the candidate
+    // generation. Advancing the deterministic clock later makes the sealed
+    // authority expired without mutating its immutable document row.
+    await runtimeCaseStore.getClientForTests().execute({
+      sql: "UPDATE local_knowledge SET expires_at = ? WHERE tenant_id = ? AND provider_account_id = ?",
+      args: [expiresAt, "local-demo", "local-demo"],
+    });
     vi.mocked(responseAgent.generate).mockImplementationOnce(async () => {
-      // Retrieval has already persisted its policy matches. Expire the active
-      // authoritative document while generation is in flight to exercise the
-      // decision-time publication recheck rather than a fabricated draft.
-      await runtimeCaseStore.getClientForTests().execute({
-        sql: "UPDATE support_knowledge_documents SET expires_at = ?",
-        args: ["2000-01-01T00:00:00.000Z"],
-      });
+      // Retrieval has already persisted its policy matches. Advance past the
+      // construction-time applicability window while generation is in flight
+      // to exercise the decision-time publication recheck.
+      vi.setSystemTime(afterExpiry);
       return {
         object: {
           draftResponse: "The duplicate-charge policy confirms your refund.",
