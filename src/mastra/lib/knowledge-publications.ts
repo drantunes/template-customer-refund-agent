@@ -185,6 +185,7 @@ export class KnowledgePublicationStore {
     const generationId = `knowledge_${crypto.randomUUID()}`;
     const seen = new Set<string>();
     const sourceVersions = new Map<string, string>();
+    const sourceVersionPayloads = new Map<string, string>();
     const candidates: Candidate[] = documents.map((document) => {
       if (
         !document.source ||
@@ -221,8 +222,24 @@ export class KnowledgePublicationStore {
       const priorVersion = sourceVersions.get(document.source);
       if (priorVersion && priorVersion !== document.version)
         throw new Error("Knowledge candidate has conflicting source versions.");
+      const sourceVersionIdentity = JSON.stringify([
+        document.source,
+        document.version,
+      ]);
+      const payload = JSON.stringify([
+        document.title,
+        document.text,
+        new Date(effectiveAt).toISOString(),
+        expiresAt === undefined ? null : new Date(expiresAt).toISOString(),
+      ]);
+      const priorPayload = sourceVersionPayloads.get(sourceVersionIdentity);
+      if (priorPayload && priorPayload !== payload)
+        throw new Error(
+          "Knowledge candidate has conflicting source/version payload.",
+        );
       seen.add(identity);
       sourceVersions.set(document.source, document.version);
+      sourceVersionPayloads.set(sourceVersionIdentity, payload);
       return {
         ...document,
         documentHash,
@@ -309,6 +326,22 @@ export class KnowledgePublicationStore {
           `Stale knowledge publication rejected by compare-and-set (expected ${expected.generationId ?? "none"}@${expected.revision}, found ${actual ?? "none"}@${revision}).`,
         );
       const now = new Date().toISOString();
+      const documents = await tx.execute({
+        sql: "SELECT COUNT(*) AS count, SUM(CASE WHEN source = '' OR title = '' OR text = '' OR version = '' OR effective_at IS NULL OR effective_at > ? OR (expires_at IS NOT NULL AND expires_at <= ?) OR provider_kind <> ? OR provider_account_id <> ? THEN 1 ELSE 0 END) AS invalid FROM support_knowledge_documents WHERE generation_id = ?",
+        args: [
+          now,
+          now,
+          binding.providerKind,
+          binding.providerAccountId,
+          generationId,
+        ],
+      });
+      const count = Number(documents.rows[0]?.count ?? 0);
+      const invalid = Number(documents.rows[0]?.invalid ?? 0);
+      if (count === 0 || invalid > 0)
+        throw new Error(
+          "Knowledge candidate has incomplete or inactive source evidence.",
+        );
       await tx.execute({
         sql: "UPDATE support_knowledge_generations SET state = 'active', activated_at = ?, replaced_generation_id = ? WHERE id = ?",
         args: [now, actual ?? null, generationId],

@@ -121,4 +121,97 @@ describe("knowledge publication generations", () => {
     vi.setSystemTime(new Date("2026-09-06T00:00:00.000Z"));
     expect(await store.search(offsetBinding, "offset", 1)).toEqual([]);
   });
+
+  it("rejects duplicate and conflicting payloads for one provider/source version identity", async () => {
+    const identityBinding = {
+      ...binding,
+      tenantId: `identity-${crypto.randomUUID()}`,
+      providerAccountId: `identity-${crypto.randomUUID()}`,
+    };
+    const store = new KnowledgePublicationStore(
+      createClient({ url: process.env.TURSO_DATABASE_URL! }),
+    );
+    const canonical = document("refunds require approval", "v1");
+
+    await expect(
+      store.buildCandidate(identityBinding, [canonical, { ...canonical }]),
+    ).rejects.toThrow("duplicate document identity");
+    await expect(
+      store.buildCandidate(identityBinding, [
+        canonical,
+        document("refunds are automatically approved", "v1"),
+      ]),
+    ).rejects.toThrow("conflicting source/version payload");
+  });
+
+  it("keeps a known-good publication active when activation or rollback finds expired evidence", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-05T22:00:00.000Z"));
+    const expiryBinding = {
+      ...binding,
+      tenantId: `expiry-${crypto.randomUUID()}`,
+      providerAccountId: `expiry-${crypto.randomUUID()}`,
+    };
+    const store = new KnowledgePublicationStore(
+      createClient({ url: process.env.TURSO_DATABASE_URL! }),
+    );
+    const knownGood = await store.buildCandidate(expiryBinding, [
+      document("refunds require approval", "v1"),
+    ]);
+    await store.activate(expiryBinding, knownGood.generationId, {
+      generationId: undefined,
+      revision: 0,
+    });
+
+    const expiresBeforeActivation = await store.buildCandidate(expiryBinding, [
+      {
+        ...document("expired before activation", "v2"),
+        expiresAt: "2026-09-05T22:00:05.000Z",
+      },
+    ]);
+    vi.setSystemTime(new Date("2026-09-05T22:00:05.000Z"));
+    await expect(
+      store.activate(
+        expiryBinding,
+        expiresBeforeActivation.generationId,
+        await store.publication(expiryBinding),
+      ),
+    ).rejects.toThrow("incomplete or inactive");
+    expect(await store.activeGeneration(expiryBinding)).toBe(
+      knownGood.generationId,
+    );
+
+    vi.setSystemTime(new Date("2026-09-05T22:00:06.000Z"));
+    const expiresBeforeRollback = await store.buildCandidate(expiryBinding, [
+      {
+        ...document("expires before rollback", "v3"),
+        expiresAt: "2026-09-05T22:00:10.000Z",
+      },
+    ]);
+    await store.activate(
+      expiryBinding,
+      expiresBeforeRollback.generationId,
+      await store.publication(expiryBinding),
+    );
+    const replacement = await store.buildCandidate(expiryBinding, [
+      document("refunds require a documented review", "v4"),
+    ]);
+    await store.activate(
+      expiryBinding,
+      replacement.generationId,
+      await store.publication(expiryBinding),
+    );
+
+    vi.setSystemTime(new Date("2026-09-05T22:00:10.000Z"));
+    await expect(
+      store.rollback(expiryBinding, expiresBeforeRollback.generationId),
+    ).rejects.toThrow("incomplete or inactive");
+    expect(await store.activeGeneration(expiryBinding)).toBe(
+      replacement.generationId,
+    );
+    expect(
+      (await store.search(expiryBinding, "documented review", 1))[0]
+        ?.generationId,
+    ).toBe(replacement.generationId);
+  });
 });
