@@ -95,6 +95,8 @@ export const SUPPORTED_AXES = [
 ];
 
 const INVALID_JSON_SNAPSHOT = Symbol("invalid-json-snapshot");
+const propertySegment = (key) => ({ kind: "property", key });
+const arrayIndexSegment = (index) => ({ kind: "array-index", index });
 
 function ordinaryDataDescriptor(descriptor) {
   return (
@@ -159,7 +161,7 @@ function canonicalJsonSnapshot(
           descriptor.value,
           ancestors,
           allowsUndefined,
-          [...path, key],
+          [...path, arrayIndexSegment(index)],
         );
         if (entry === INVALID_JSON_SNAPSHOT) return INVALID_JSON_SNAPSHOT;
         snapshot.push(entry);
@@ -182,7 +184,7 @@ function canonicalJsonSnapshot(
         descriptor.value,
         ancestors,
         allowsUndefined,
-        [...path, key],
+        [...path, propertySegment(key)],
       );
       if (entry === INVALID_JSON_SNAPSHOT) return INVALID_JSON_SNAPSHOT;
       Object.defineProperty(snapshot, key, {
@@ -256,17 +258,30 @@ const OPTIONAL_OBSERVATION_KEYS = new Set([
  * an absent optional value by omitting the key rather than assigning undefined.
  * This narrowly admits only native optional fields while copying descriptors.
  */
+function hasPropertySegment(segment, key) {
+  return segment?.kind === "property" && segment.key === key;
+}
+
+function hasArrayIndexSegment(segment) {
+  return (
+    segment?.kind === "array-index" &&
+    Number.isSafeInteger(segment.index) &&
+    segment.index >= 0
+  );
+}
+
 function observationAllowsUndefined(path, key) {
   if (path.length === 0) return OPTIONAL_OBSERVATION_KEYS.has(key);
   return (
     key === "expiresAt" &&
-    (path[0] === "calls" || path[0] === "toolCalls") &&
     path.length === 6 &&
-    /^\d+$/.test(path[1]) &&
-    path[2] === "result" &&
-    path[3] === "sources" &&
-    /^\d+$/.test(path[4]) &&
-    path[5] === "metadata"
+    (hasPropertySegment(path[0], "calls") ||
+      hasPropertySegment(path[0], "toolCalls")) &&
+    hasArrayIndexSegment(path[1]) &&
+    hasPropertySegment(path[2], "result") &&
+    hasPropertySegment(path[3], "sources") &&
+    hasArrayIndexSegment(path[4]) &&
+    hasPropertySegment(path[5], "metadata")
   );
 }
 

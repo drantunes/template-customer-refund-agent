@@ -1398,6 +1398,118 @@ describe("immutable eval reference records", () => {
     expect(reads).toBe(0);
   });
 
+  it("permits expiresAt undefined only through native array index segments", async () => {
+    const record = measuredReference();
+    const cases = [
+      "duplicate-charge",
+      "grounded-policy",
+      "approval-required",
+      "lookup-before-refund",
+      "follow-up-stays-scoped",
+      "clear-resolution",
+    ];
+    const optionalSource = { metadata: { expiresAt: undefined } };
+    const optionalCall = { result: { sources: [optionalSource] } };
+    const variants: Array<{
+      name: string;
+      mutate: (value: Summary) => void;
+    }> = [
+      {
+        name: "numeric record index",
+        mutate: (value) => {
+          value.toolCalls = { 0: optionalCall };
+        },
+      },
+      {
+        name: "leading-zero record indexes",
+        mutate: (value) => {
+          value.toolCalls = {
+            "01": { result: { sources: { "00": optionalSource } } },
+          };
+        },
+      },
+      {
+        name: "negative record index",
+        mutate: (value) => {
+          value.toolCalls = {
+            "-1": { result: { sources: { 0: optionalSource } } },
+          };
+        },
+      },
+      {
+        name: "fractional record index",
+        mutate: (value) => {
+          value.toolCalls = {
+            "1.0": { result: { sources: { 0: optionalSource } } },
+          };
+        },
+      },
+      {
+        name: "record sources below native calls array",
+        mutate: (value) => {
+          value.toolCalls = [{ result: { sources: { 0: optionalSource } } }];
+        },
+      },
+      {
+        name: "record calls above native sources array",
+        mutate: (value) => {
+          value.calls = {
+            0: optionalCall,
+          };
+        },
+      },
+    ];
+
+    for (const id of cases) {
+      const item = caseScore(record, id);
+      const truth = truthForDatasetCase(item.axis, assertionsForCase(id), id);
+      const native = structuredClone(observation(item.evidence.summary));
+      const calls = (native.calls as Array<Record<string, unknown>>) ?? [];
+      const search = calls.find(
+        (call) => call.name === "search_support_knowledge",
+      );
+      if (search) {
+        const sources = (
+          search.result as {
+            sources: Array<{ metadata: Record<string, unknown> }>;
+          }
+        ).sources;
+        sources[0].metadata.expiresAt = undefined;
+      } else {
+        calls.push({
+          name: "search_support_knowledge",
+          result: { sources: [{ metadata: { expiresAt: undefined } }] },
+        });
+      }
+      native.calls = calls;
+      const nativeOutput = scorerInputFromObservation(item.axis, native);
+      expect(
+        scoreAxis(item.axis, nativeOutput, truth),
+        `${item.axis} native`,
+      ).toBe(1);
+      await expect(
+        registeredScorer(item.axis).run({
+          output: nativeOutput,
+          groundTruth: truth,
+        }),
+      ).resolves.toMatchObject({ score: 1 });
+
+      for (const variant of variants) {
+        const malformed = structuredClone(observation(item.evidence.summary));
+        variant.mutate(malformed);
+        const output = scorerInputFromObservation(item.axis, malformed);
+        expect(
+          scoreAxis(item.axis, output, truth),
+          `${item.axis}/${variant.name} direct`,
+        ).toBe(0);
+        await expect(
+          registeredScorer(item.axis).run({ output, groundTruth: truth }),
+          `${item.axis}/${variant.name} registered`,
+        ).resolves.toMatchObject({ score: 0 });
+      }
+    }
+  });
+
   it("keeps factory authorities isolated after a contaminated trajectory", async () => {
     const record = measuredReference();
     const item = caseScore(record, "lookup-before-refund");
