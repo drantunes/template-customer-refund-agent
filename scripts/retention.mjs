@@ -81,6 +81,7 @@ async function sweepCases(client, policy, current = new Date()) {
     dispatchesExpired: 0,
     decisionsRedacted: 0,
     actionsRedacted: 0,
+    feedbackDeleted: 0,
     auditPayloadsRedacted: 0,
     financialReasonsRedacted: 0,
     pendingCasesExpired: 0,
@@ -122,8 +123,10 @@ async function sweepCases(client, policy, current = new Date()) {
               UNION ALL SELECT 1 FROM support_outbox WHERE case_id = ? AND (body <> '[redacted]' OR receipt IS NOT NULL OR last_error IS NOT NULL)
               UNION ALL SELECT 1 FROM support_decisions WHERE case_id = ? AND note IS NOT NULL
               UNION ALL SELECT 1 FROM support_actions WHERE case_id = ? AND data <> '{}'
+              UNION ALL SELECT 1 FROM support_feedback WHERE case_id = ?
               LIMIT 1`,
             args: [
+              String(row.id),
               String(row.id),
               String(row.id),
               String(row.id),
@@ -270,6 +273,11 @@ async function sweepCases(client, policy, current = new Date()) {
           args: [String(row.id)],
         });
         result.actionsRedacted += Number(actions.rowsAffected ?? 0);
+        const feedback = await transaction.execute({
+          sql: "DELETE FROM support_feedback WHERE case_id = ?",
+          args: [String(row.id)],
+        });
+        result.feedbackDeleted += Number(feedback.rowsAffected ?? 0);
       }
       await transaction.commit();
     } catch (error) {
@@ -321,6 +329,7 @@ try {
     "support_outbox",
     "support_decisions",
     "support_actions",
+    "support_feedback",
     "support_audit",
     "support_supervisor_executions",
   ])
@@ -332,6 +341,13 @@ try {
   if (!caseColumns.rows.some((column) => column.name === "accepted_at"))
     throw new Error(
       "Refusing retention cleanup: support schema v9 acceptance-time migration is missing. Start the local app once so its supported migrations finish first.",
+    );
+  const feedbackMigration = await client.execute({
+    sql: "SELECT 1 FROM support_schema_migrations WHERE version = 10",
+  });
+  if (!feedbackMigration.rows[0])
+    throw new Error(
+      "Refusing retention cleanup: support schema v10 feedback migration is missing. Start the local app once so its supported migrations finish first.",
     );
 
   const cases = await sweepCases(client, policy, retentionClock());
