@@ -3,7 +3,7 @@
   "runner": "deterministic-native-observed-runtime-v4",
   "executionMode": "deterministic-scripted-transport-no-paid-routes",
   "implementationSha": "fe78accd3bae14ddb012e65bce670cd02105f646",
-  "runnerSourceHash": "c49d40299f1497ff12ff536a0b58217b3b0faf8c748ca6d712d6059079de8ddb",
+  "runnerSourceHash": "7b53636c691b3f982d50d3a500d0041c536c6cd1a454061a99d587d6ac3a38af",
   "scorerSourceHashes": {
     "src/mastra/evals/index.ts": "e4fd82f8cb0db282c446080890c81786c6786f85ce644b917af2e24ba9267207",
     "src/mastra/evals/deterministic-semantics.js": "0608fd88d0ffc8069ccaf40ba1a781e0647640317a8eb61b0ede67c47411dae5"
@@ -1328,7 +1328,7 @@
   "pricing": "not-applicable-deterministic-transport",
   "evidenceHash": "8b870c610ce42892c84570110d89dacf24ae4b639025b48fee3fcf7aa1adf1a1",
   "regression": "compare-against-fixed-initial-reference",
-  "reportHash": "59e828da64271157176d015d0ffc8f0bc827ee0b05225f20809a7ab94e002180",
+  "reportHash": "1b30ab277ffb2464579a2a70772a85e15808db2e2edd4979d1623edfa1250a08",
   "initialReference": true,
   "historicalComparison": null
 }
