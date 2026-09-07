@@ -1,4 +1,5 @@
 import { createClient } from "@libsql/client";
+import { createHash } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { LocalRuntime } from "../../src/mastra/runtime/local-runtime";
@@ -125,6 +126,29 @@ describe("Phase 003 local knowledge migration", () => {
         sql: "INSERT INTO support_knowledge_publications VALUES (?, ?, 1, ?)",
         args: ["local-demo", "legacy-generation", "2026-09-06T00:00:00.000Z"],
       },
+      {
+        sql: "INSERT INTO support_knowledge_documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+        args: [
+          "legacy-generation",
+          "policy://legacy",
+          "Legacy policy",
+          "legacy refunds require approval",
+          "v1",
+          createHash("sha256")
+            .update(
+              JSON.stringify([
+                "policy://legacy",
+                "v1",
+                "legacy refunds require approval",
+              ]),
+            )
+            .digest("hex"),
+          "2026-01-01T00:00:00.000Z",
+          "2026-09-06T00:00:00.000Z",
+          binding.providerKind,
+          binding.providerAccountId,
+        ],
+      },
     ]);
 
     const publications = new KnowledgePublicationStore(client);
@@ -138,6 +162,39 @@ describe("Phase 003 local knowledge migration", () => {
       }),
     ).toMatchObject({
       rows: [{ account_key: knowledgeAccountKey(binding) }],
+    });
+    expect(
+      await client.execute({
+        sql: "SELECT expected_document_count, manifest_hash FROM support_knowledge_generations WHERE id = ?",
+        args: ["legacy-generation"],
+      }),
+    ).toMatchObject({
+      rows: [
+        {
+          expected_document_count: 1,
+          manifest_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+      ],
+    });
+    const replacement = await publications.buildCandidate(binding, [
+      {
+        source: "policy://replacement",
+        title: "Replacement policy",
+        text: "replacement refunds require a documented review",
+        version: "v2",
+        effectiveAt: "2026-01-01T00:00:00.000Z",
+        score: 1,
+      },
+    ]);
+    await publications.activate(
+      binding,
+      replacement.generationId,
+      await publications.publication(binding),
+    );
+    await publications.rollback(binding, "legacy-generation");
+    expect(await publications.publication(binding)).toMatchObject({
+      generationId: "legacy-generation",
+      revision: 3,
     });
     client.close();
   });

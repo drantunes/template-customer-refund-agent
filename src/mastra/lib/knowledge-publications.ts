@@ -27,6 +27,17 @@ export interface PublishedEvidence extends KnowledgeEvidence {
 }
 
 type Candidate = Omit<PublishedEvidence, "generationId" | "indexedAt">;
+type ManifestDocument = Pick<
+  PublishedEvidence,
+  | "source"
+  | "version"
+  | "title"
+  | "text"
+  | "documentHash"
+  | "effectiveAt"
+  | "indexedAt"
+  | "expiresAt"
+>;
 export interface KnowledgePublication {
   generationId?: string;
   revision: number;
@@ -41,6 +52,76 @@ export const knowledgeAccountKey = (binding: ProviderBinding) =>
     binding.providerKind,
     binding.providerAccountId,
   ]);
+
+const documentHashFor = (source: string, version: string, text: string) =>
+  createHash("sha256")
+    .update(JSON.stringify([source, version, text]))
+    .digest("hex");
+
+/** The manifest is deliberately a hash of a positional array, rather than a
+ * database-specific row encoding. It is stable across SQLite implementations
+ * and binds every serving-relevant document value to its durable account. */
+const manifestHashFor = (
+  binding: Pick<
+    ProviderBinding,
+    "tenantId" | "providerKind" | "providerAccountId"
+  >,
+  documents: ManifestDocument[],
+) => {
+  const rows = documents
+    .map((document) => [
+      document.source,
+      document.version,
+      document.title,
+      document.text,
+      document.documentHash,
+      document.effectiveAt,
+      document.indexedAt,
+      document.expiresAt ?? null,
+    ])
+    .sort((left, right) => {
+      const a = JSON.stringify(left);
+      const b = JSON.stringify(right);
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        binding.tenantId,
+        binding.providerKind,
+        binding.providerAccountId,
+        rows,
+      ]),
+    )
+    .digest("hex");
+};
+
+const valueAsString = (value: unknown) =>
+  typeof value === "string" ? value : undefined;
+
+const documentFromRow = (row: Record<string, unknown>): ManifestDocument => ({
+  source: String(row.source),
+  version: String(row.version),
+  title: String(row.title),
+  text: String(row.text),
+  documentHash: String(row.document_hash),
+  effectiveAt: String(row.effective_at),
+  indexedAt: String(row.indexed_at),
+  expiresAt:
+    row.expires_at === null || row.expires_at === undefined
+      ? undefined
+      : String(row.expires_at),
+});
+
+const canonicalInstant = (value: unknown) => {
+  const instant = valueAsString(value);
+  if (!instant) return undefined;
+  const milliseconds = Date.parse(instant);
+  if (!Number.isFinite(milliseconds)) return undefined;
+  return new Date(milliseconds).toISOString() === instant
+    ? { instant, milliseconds }
+    : undefined;
+};
 
 const tokenize = (value: string) =>
   value.toLowerCase().match(/[a-z0-9]{2,}/g) ?? [];
@@ -168,6 +249,61 @@ export class KnowledgePublicationStore {
           throw error;
         }
       }
+      const manifestMigration = await this.client.execute({
+        sql: "SELECT version FROM support_knowledge_schema_migrations WHERE version = 3",
+      });
+      if (!manifestMigration.rows[0]) {
+        const tx = await this.client.transaction("write");
+        try {
+          // This is intentionally additive. Existing generations are given a
+          // deterministic snapshot of their current authoritative rows, so a
+          // valid historical generation remains eligible for rollback.
+          await tx.execute(
+            "ALTER TABLE support_knowledge_generations ADD COLUMN expected_document_count INTEGER",
+          );
+          await tx.execute(
+            "ALTER TABLE support_knowledge_generations ADD COLUMN manifest_hash TEXT",
+          );
+          const generations = await tx.execute(
+            "SELECT id, tenant_id, provider_kind, provider_account_id FROM support_knowledge_generations",
+          );
+          for (const row of generations.rows) {
+            const generation = row as Record<string, unknown>;
+            const documents = await tx.execute({
+              sql: "SELECT source, title, text, version, document_hash, effective_at, indexed_at, expires_at FROM support_knowledge_documents WHERE generation_id = ?",
+              args: [String(generation.id)],
+            });
+            const binding = {
+              tenantId: String(generation.tenant_id),
+              providerKind: String(
+                generation.provider_kind,
+              ) as ProviderBinding["providerKind"],
+              providerAccountId: String(generation.provider_account_id),
+            };
+            const manifestDocuments = documents.rows.map((document) =>
+              documentFromRow(document as Record<string, unknown>),
+            );
+            await tx.execute({
+              sql: "UPDATE support_knowledge_generations SET expected_document_count = ?, manifest_hash = ? WHERE id = ?",
+              args: [
+                manifestDocuments.length,
+                manifestHashFor(binding, manifestDocuments),
+                String(generation.id),
+              ],
+            });
+          }
+          await tx.execute({
+            sql: "INSERT INTO support_knowledge_schema_migrations(version, applied_at) VALUES (3, ?)",
+            args: [new Date().toISOString()],
+          });
+          await tx.commit();
+        } catch (error) {
+          try {
+            await tx.rollback();
+          } catch {}
+          throw error;
+        }
+      }
     })();
     await this.ready;
   }
@@ -211,11 +347,11 @@ export class KnowledgePublicationStore {
             expiresAt <= Date.now()))
       )
         throw new Error("Knowledge candidate has inactive source evidence.");
-      const documentHash = createHash("sha256")
-        .update(
-          JSON.stringify([document.source, document.version, document.text]),
-        )
-        .digest("hex");
+      const documentHash = documentHashFor(
+        document.source,
+        document.version,
+        document.text,
+      );
       const identity = `${document.source}\u0000${documentHash}`;
       if (seen.has(identity))
         throw new Error("Knowledge candidate has duplicate document identity.");
@@ -254,10 +390,16 @@ export class KnowledgePublicationStore {
         providerAccountId: binding.providerAccountId,
       };
     });
+    const indexedAt = now;
+    const manifestDocuments = candidates.map((document) => ({
+      ...document,
+      indexedAt,
+    }));
+    const manifestHash = manifestHashFor(binding, manifestDocuments);
     const tx = await this.client.transaction("write");
     try {
       await tx.execute({
-        sql: "INSERT INTO support_knowledge_generations(id, account_key, tenant_id, provider_kind, provider_account_id, state, created_at, base_revision) VALUES (?, ?, ?, ?, ?, 'candidate', ?, ?)",
+        sql: "INSERT INTO support_knowledge_generations(id, account_key, tenant_id, provider_kind, provider_account_id, state, created_at, base_revision, expected_document_count, manifest_hash) VALUES (?, ?, ?, ?, ?, 'candidate', ?, ?, ?, ?)",
         args: [
           generationId,
           knowledgeAccountKey(binding),
@@ -266,9 +408,11 @@ export class KnowledgePublicationStore {
           binding.providerAccountId,
           now,
           base.revision,
+          manifestDocuments.length,
+          manifestHash,
         ],
       });
-      for (const document of candidates)
+      for (const document of manifestDocuments)
         await tx.execute({
           sql: "INSERT INTO support_knowledge_documents(generation_id, source, title, text, version, document_hash, effective_at, indexed_at, expires_at, provider_kind, provider_account_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           args: [
@@ -279,7 +423,7 @@ export class KnowledgePublicationStore {
             document.version,
             document.documentHash,
             document.effectiveAt,
-            now,
+            document.indexedAt,
             document.expiresAt ?? null,
             document.providerKind,
             document.providerAccountId,
@@ -306,15 +450,124 @@ export class KnowledgePublicationStore {
     const tx = await this.client.transaction("write");
     try {
       const candidate = await tx.execute({
-        sql: "SELECT state FROM support_knowledge_generations WHERE id = ? AND account_key = ?",
-        args: [generationId, key],
+        sql: "SELECT id, account_key, tenant_id, provider_kind, provider_account_id, state, expected_document_count, manifest_hash FROM support_knowledge_generations WHERE id = ?",
+        args: [generationId],
       });
+      const candidateRow = candidate.rows[0] as
+        Record<string, unknown> | undefined;
       if (
         !(["candidate", "rolled_back"] as const).includes(
-          candidate.rows[0]?.state as "candidate" | "rolled_back",
+          candidateRow?.state as "candidate" | "rolled_back",
         )
       )
         throw new Error("Knowledge candidate is not publishable.");
+      if (
+        candidateRow?.account_key !== key ||
+        candidateRow.tenant_id !== binding.tenantId ||
+        candidateRow.provider_kind !== binding.providerKind ||
+        candidateRow.provider_account_id !== binding.providerAccountId
+      )
+        throw new Error("Knowledge candidate has an invalid durable binding.");
+      const expectedCount = Number(candidateRow.expected_document_count);
+      const expectedManifest = valueAsString(candidateRow.manifest_hash);
+      if (
+        !Number.isSafeInteger(expectedCount) ||
+        expectedCount <= 0 ||
+        !expectedManifest ||
+        !/^[0-9a-f]{64}$/.test(expectedManifest)
+      )
+        throw new Error("Knowledge candidate has no valid immutable manifest.");
+      const now = new Date().toISOString();
+      const nowMilliseconds = Date.parse(now);
+      const documents = await tx.execute({
+        sql: "SELECT generation_id, source, title, text, version, document_hash, effective_at, indexed_at, expires_at, provider_kind, provider_account_id FROM support_knowledge_documents WHERE generation_id = ?",
+        args: [generationId],
+      });
+      if (documents.rows.length !== expectedCount)
+        throw new Error(
+          "Knowledge candidate has incomplete or inactive source evidence (or altered integrity metadata).",
+        );
+      const seen = new Set<string>();
+      const sourceVersions = new Map<string, string>();
+      const sourceVersionPayloads = new Map<string, string>();
+      const manifestDocuments: ManifestDocument[] = [];
+      for (const row of documents.rows) {
+        const document = row as Record<string, unknown>;
+        const source = valueAsString(document.source);
+        const title = valueAsString(document.title);
+        const text = valueAsString(document.text);
+        const version = valueAsString(document.version);
+        const documentHash = valueAsString(document.document_hash);
+        const effective = canonicalInstant(document.effective_at);
+        const indexed = canonicalInstant(document.indexed_at);
+        const expires =
+          document.expires_at === null || document.expires_at === undefined
+            ? undefined
+            : canonicalInstant(document.expires_at);
+        if (
+          document.generation_id !== generationId ||
+          !source ||
+          !title ||
+          !text ||
+          !version ||
+          !documentHash ||
+          !effective ||
+          !indexed ||
+          (document.expires_at !== null &&
+            document.expires_at !== undefined &&
+            !expires) ||
+          effective.milliseconds > nowMilliseconds ||
+          indexed.milliseconds > nowMilliseconds ||
+          (expires &&
+            (expires.milliseconds <= effective.milliseconds ||
+              expires.milliseconds <= nowMilliseconds)) ||
+          document.provider_kind !== binding.providerKind ||
+          document.provider_account_id !== binding.providerAccountId ||
+          documentHash !== documentHashFor(source, version, text)
+        )
+          throw new Error(
+            "Knowledge candidate has incomplete or inactive source evidence (or altered integrity metadata).",
+          );
+        const identity = `${source}\u0000${documentHash}`;
+        if (seen.has(identity))
+          throw new Error(
+            "Knowledge candidate has incomplete or inactive source evidence (or altered integrity metadata).",
+          );
+        const priorVersion = sourceVersions.get(source);
+        if (priorVersion && priorVersion !== version)
+          throw new Error(
+            "Knowledge candidate has incomplete or inactive source evidence (or altered integrity metadata).",
+          );
+        const sourceVersionIdentity = JSON.stringify([source, version]);
+        const payload = JSON.stringify([
+          title,
+          text,
+          effective.instant,
+          expires?.instant ?? null,
+        ]);
+        const priorPayload = sourceVersionPayloads.get(sourceVersionIdentity);
+        if (priorPayload && priorPayload !== payload)
+          throw new Error(
+            "Knowledge candidate has incomplete or inactive source evidence (or altered integrity metadata).",
+          );
+        seen.add(identity);
+        sourceVersions.set(source, version);
+        sourceVersionPayloads.set(sourceVersionIdentity, payload);
+        manifestDocuments.push({
+          source,
+          title,
+          text,
+          version,
+          documentHash,
+          effectiveAt: effective.instant,
+          indexedAt: indexed.instant,
+          expiresAt: expires?.instant,
+        });
+      }
+      if (manifestHashFor(binding, manifestDocuments) !== expectedManifest)
+        throw new Error(
+          "Knowledge candidate has incomplete or inactive source evidence (or altered integrity metadata).",
+        );
       const current = await tx.execute({
         sql: "SELECT generation_id, revision FROM support_knowledge_publications WHERE account_key = ?",
         args: [key],
@@ -324,23 +577,6 @@ export class KnowledgePublicationStore {
       if (actual !== expected.generationId || revision !== expected.revision)
         throw new Error(
           `Stale knowledge publication rejected by compare-and-set (expected ${expected.generationId ?? "none"}@${expected.revision}, found ${actual ?? "none"}@${revision}).`,
-        );
-      const now = new Date().toISOString();
-      const documents = await tx.execute({
-        sql: "SELECT COUNT(*) AS count, SUM(CASE WHEN source = '' OR title = '' OR text = '' OR version = '' OR effective_at IS NULL OR effective_at > ? OR (expires_at IS NOT NULL AND expires_at <= ?) OR provider_kind <> ? OR provider_account_id <> ? THEN 1 ELSE 0 END) AS invalid FROM support_knowledge_documents WHERE generation_id = ?",
-        args: [
-          now,
-          now,
-          binding.providerKind,
-          binding.providerAccountId,
-          generationId,
-        ],
-      });
-      const count = Number(documents.rows[0]?.count ?? 0);
-      const invalid = Number(documents.rows[0]?.invalid ?? 0);
-      if (count === 0 || invalid > 0)
-        throw new Error(
-          "Knowledge candidate has incomplete or inactive source evidence.",
         );
       await tx.execute({
         sql: "UPDATE support_knowledge_generations SET state = 'active', activated_at = ?, replaced_generation_id = ? WHERE id = ?",

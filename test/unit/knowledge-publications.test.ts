@@ -214,4 +214,182 @@ describe("knowledge publication generations", () => {
         ?.generationId,
     ).toBe(replacement.generationId);
   });
+
+  it("rejects candidate row and binding tampering without changing the serving pointer or revision", async () => {
+    const tamperBinding = {
+      ...binding,
+      tenantId: `tamper-${crypto.randomUUID()}`,
+      providerAccountId: `tamper-${crypto.randomUUID()}`,
+    };
+    const client = createClient({ url: process.env.TURSO_DATABASE_URL! });
+    const store = new KnowledgePublicationStore(client);
+    const knownGood = await store.buildCandidate(tamperBinding, [
+      document("refunds require approval", "v1"),
+    ]);
+    await store.activate(tamperBinding, knownGood.generationId, {
+      generationId: undefined,
+      revision: 0,
+    });
+    const expected = await store.publication(tamperBinding);
+    const candidateDocuments = () => [
+      {
+        ...document("two document candidate one", "v2"),
+        source: "policy://one",
+      },
+      {
+        ...document("two document candidate two", "v2"),
+        source: "policy://two",
+      },
+    ];
+    const rejectTamperedCandidate = async (
+      alter: (generationId: string) => Promise<void>,
+    ) => {
+      const candidate = await store.buildCandidate(
+        tamperBinding,
+        candidateDocuments(),
+      );
+      await alter(candidate.generationId);
+      await expect(
+        store.activate(tamperBinding, candidate.generationId, expected),
+      ).rejects.toThrow(/incomplete or inactive|durable binding/);
+      expect(await store.publication(tamperBinding)).toEqual(expected);
+    };
+
+    await rejectTamperedCandidate(async (generationId) => {
+      await client.execute({
+        sql: "DELETE FROM support_knowledge_documents WHERE generation_id = ? AND source = ?",
+        args: [generationId, "policy://one"],
+      });
+    });
+    await rejectTamperedCandidate(async (generationId) => {
+      await client.execute({
+        sql: "INSERT INTO support_knowledge_documents(generation_id, source, title, text, version, document_hash, effective_at, indexed_at, expires_at, provider_kind, provider_account_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+        args: [
+          generationId,
+          "policy://added",
+          "Added policy",
+          "added after candidate build",
+          "v2",
+          "forged",
+          "2026-01-01T00:00:00.000Z",
+          "2026-09-05T22:00:00.000Z",
+          tamperBinding.providerKind,
+          tamperBinding.providerAccountId,
+        ],
+      });
+    });
+    await rejectTamperedCandidate(async (generationId) => {
+      await client.execute({
+        sql: "UPDATE support_knowledge_documents SET text = ? WHERE generation_id = ? AND source = ?",
+        args: [
+          "refunds are automatically approved",
+          generationId,
+          "policy://one",
+        ],
+      });
+    });
+    await rejectTamperedCandidate(async (generationId) => {
+      await client.execute({
+        sql: "UPDATE support_knowledge_documents SET document_hash = ? WHERE generation_id = ? AND source = ?",
+        args: ["forged", generationId, "policy://one"],
+      });
+    });
+    await rejectTamperedCandidate(async (generationId) => {
+      await client.execute({
+        sql: "UPDATE support_knowledge_documents SET indexed_at = ? WHERE generation_id = ? AND source = ?",
+        args: ["not-a-timestamp", generationId, "policy://one"],
+      });
+    });
+    await rejectTamperedCandidate(async (generationId) => {
+      await client.execute({
+        sql: "UPDATE support_knowledge_documents SET indexed_at = ? WHERE generation_id = ? AND source = ?",
+        args: ["2026-01-02T00:00:00.000Z", generationId, "policy://one"],
+      });
+    });
+    await rejectTamperedCandidate(async (generationId) => {
+      await client.execute({
+        sql: "UPDATE support_knowledge_generations SET account_key = ? WHERE id = ?",
+        args: ["foreign-account-key", generationId],
+      });
+    });
+    await rejectTamperedCandidate(async (generationId) => {
+      await client.execute({
+        sql: "UPDATE support_knowledge_documents SET provider_account_id = ? WHERE generation_id = ? AND source = ?",
+        args: ["foreign-account", generationId, "policy://one"],
+      });
+    });
+    await rejectTamperedCandidate(async (generationId) => {
+      await client.execute({
+        sql: "UPDATE support_knowledge_generations SET account_key = ?, tenant_id = ?, provider_account_id = ? WHERE id = ?",
+        args: [
+          "foreign-account-key",
+          "foreign-tenant",
+          "foreign-account",
+          generationId,
+        ],
+      });
+    });
+    await rejectTamperedCandidate(async (generationId) => {
+      await client.execute({
+        sql: "UPDATE support_knowledge_documents SET effective_at = ? WHERE generation_id = ? AND source = ?",
+        args: ["2999-01-01T00:00:00.000Z", generationId, "policy://one"],
+      });
+    });
+    await rejectTamperedCandidate(async (generationId) => {
+      await client.execute({
+        sql: "UPDATE support_knowledge_documents SET expires_at = ? WHERE generation_id = ? AND source = ?",
+        args: ["2026-01-01T00:00:00.000Z", generationId, "policy://one"],
+      });
+    });
+
+    const rebound = await store.buildCandidate(
+      tamperBinding,
+      candidateDocuments(),
+    );
+    const other = await store.buildCandidate(tamperBinding, [
+      { ...document("unrelated candidate", "v3"), source: "policy://other" },
+    ]);
+    await client.execute({
+      sql: "UPDATE support_knowledge_documents SET generation_id = ? WHERE generation_id = ? AND source = ?",
+      args: [other.generationId, rebound.generationId, "policy://one"],
+    });
+    await expect(
+      store.activate(tamperBinding, rebound.generationId, expected),
+    ).rejects.toThrow("incomplete or inactive");
+    expect(await store.publication(tamperBinding)).toEqual(expected);
+  });
+
+  it("rejects rollback of an altered historical generation without changing the current revision", async () => {
+    const rollbackBinding = {
+      ...binding,
+      tenantId: `rollback-integrity-${crypto.randomUUID()}`,
+      providerAccountId: `rollback-integrity-${crypto.randomUUID()}`,
+    };
+    const client = createClient({ url: process.env.TURSO_DATABASE_URL! });
+    const store = new KnowledgePublicationStore(client);
+    const historical = await store.buildCandidate(rollbackBinding, [
+      document("historical refund policy", "v1"),
+    ]);
+    await store.activate(rollbackBinding, historical.generationId, {
+      generationId: undefined,
+      revision: 0,
+    });
+    const current = await store.buildCandidate(rollbackBinding, [
+      document("current refund policy", "v2"),
+    ]);
+    await store.activate(
+      rollbackBinding,
+      current.generationId,
+      await store.publication(rollbackBinding),
+    );
+    const expected = await store.publication(rollbackBinding);
+    await client.execute({
+      sql: "UPDATE support_knowledge_documents SET text = ? WHERE generation_id = ?",
+      args: ["tampered historical policy", historical.generationId],
+    });
+    await expect(
+      store.rollback(rollbackBinding, historical.generationId),
+    ).rejects.toThrow("incomplete or inactive");
+    expect(await store.publication(rollbackBinding)).toEqual(expected);
+  });
 });
