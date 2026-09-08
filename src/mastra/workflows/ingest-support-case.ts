@@ -12,7 +12,7 @@ import { ownerIdForCustomer } from "../server/auth";
 import { withDispatchLeaseScope } from "../lib/dispatch-lease-scope";
 import { retryOrEscalateOperationalFailure } from "../lib/operational-alerts";
 import { bindingsForIntercomConversation } from "../providers/intercom/config";
-import type { VerifiedIntercomWebhook } from "../providers/intercom/webhook";
+import type { VerifiedIntercomConversationWebhook } from "../providers/intercom/webhook";
 
 const ingressScopeSchema = z.object({
   id: z.string().min(1),
@@ -46,7 +46,7 @@ const normalizeAndPersistStep = createStep({
     const verified = inputData.verifiedProvider;
     const ingress = verified
       ? resolveConfiguredBinding(
-          (verified.event as VerifiedIntercomWebhook).binding,
+          (verified.event as VerifiedIntercomConversationWebhook).binding,
         )
       : resolveConfiguredBinding(defaultLocalBinding("inbound"));
     const normalized = await providerRegistry(ingress)

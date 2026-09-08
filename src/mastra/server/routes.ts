@@ -350,9 +350,9 @@ export const supportInboundRoute = registerApiRoute("/support/inbound", {
   },
 });
 
-/** Public by transport necessity only.  It verifies the raw signed request
- * before parse and passes a discriminated verified ingress to the registered
- * workflow; no header/body value becomes a local authenticated principal. */
+/** Public by transport necessity only. It verifies raw signed requests before
+ * parse. A verified Intercom ping is acknowledged without creating a local
+ * identity or workflow run; bound customer notifications alone reach ingest. */
 export const intercomWebhookRoute = registerApiRoute(
   "/support/webhooks/intercom",
   {
@@ -401,6 +401,11 @@ export const intercomWebhookRoute = registerApiRoute(
           401,
         );
       }
+      // Intercom's setup ping has no conversation ID. It is still authenticated,
+      // account-scoped, and fresh at this point, but must never create a binding
+      // or trigger workflow/remote effects.
+      if (event.kind === "ping")
+        return c.json({ accepted: true, ignored: true });
       // Admin replies/notes and all non-customer events are acknowledged but
       // cannot feed a self-generated reply loop.
       if (!isCustomerConversationEvent(event))

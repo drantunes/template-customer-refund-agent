@@ -32,6 +32,24 @@ function event(createdAt = Math.floor(Date.now() / 1000)) {
     data: { item: { id: "conversation_1" } },
   });
 }
+function ping(
+  createdAt = Math.floor(Date.now() / 1000),
+  appId = "app_123",
+  id: string | null = null,
+) {
+  return JSON.stringify({
+    type: "notification_event",
+    // Matches Intercom's endpoint-validation envelope: pings have no event ID
+    // or delivery references, and are not conversation notifications.
+    id,
+    app_id: appId,
+    topic: "ping",
+    created_at: createdAt,
+    delivery_status: null,
+    self: null,
+    data: { item: { type: "ping", message: "Synthetic setup ping." } },
+  });
+}
 function headers(body: string) {
   return new Headers({
     "content-type": "application/json; charset=utf-8",
@@ -72,6 +90,96 @@ describe("Intercom webhook verification", () => {
         config,
       ),
     ).toThrow("application/json");
+  });
+
+  it("accepts only an authenticated, account-matched, fresh ping without fabricating a conversation binding", () => {
+    const body = ping();
+    const verified = verifyIntercomWebhook(
+      Buffer.from(body),
+      headers(body),
+      config,
+    );
+    expect(verified).toMatchObject({ kind: "ping", id: null, topic: "ping" });
+    expect(verified).not.toHaveProperty("binding");
+
+    const legacyId = ping(undefined, undefined, "evt_ping");
+    expect(
+      verifyIntercomWebhook(Buffer.from(legacyId), headers(legacyId), config),
+    ).toMatchObject({ kind: "ping", id: "evt_ping" });
+
+    expect(() =>
+      verifyIntercomWebhook(
+        Buffer.from(body),
+        new Headers({
+          "content-type": "application/json",
+          "x-hub-signature": "sha1=0000000000000000000000000000000000000000",
+        }),
+        config,
+      ),
+    ).toThrow("signature");
+
+    const wrongAccount = ping(undefined, "other-app");
+    expect(() =>
+      verifyIntercomWebhook(
+        Buffer.from(wrongAccount),
+        headers(wrongAccount),
+        config,
+      ),
+    ).toThrow("account");
+
+    const stale = ping(Math.floor((Date.now() - 301_000) / 1_000));
+    expect(() =>
+      verifyIntercomWebhook(Buffer.from(stale), headers(stale), config),
+    ).toThrow("timestamp");
+  });
+
+  it("continues to require notification and conversation identities for customer events", () => {
+    const nullNotificationId = JSON.stringify({
+      type: "notification_event",
+      id: null,
+      app_id: "app_123",
+      topic: "conversation.user.replied",
+      created_at: Math.floor(Date.now() / 1_000),
+      data: { item: { id: "conversation_1" } },
+    });
+    expect(() =>
+      verifyIntercomWebhook(
+        Buffer.from(nullNotificationId),
+        headers(nullNotificationId),
+        config,
+      ),
+    ).toThrow();
+
+    const missingNotificationId = JSON.stringify({
+      type: "notification_event",
+      app_id: "app_123",
+      topic: "conversation.user.replied",
+      created_at: Math.floor(Date.now() / 1_000),
+      data: { item: { id: "conversation_1" } },
+    });
+    expect(() =>
+      verifyIntercomWebhook(
+        Buffer.from(missingNotificationId),
+        headers(missingNotificationId),
+        config,
+      ),
+    ).toThrow();
+
+    const nullConversationId = JSON.stringify({
+      type: "notification_event",
+      id: "evt_malformed",
+      app_id: "app_123",
+      topic: "conversation.user.replied",
+      created_at: Math.floor(Date.now() / 1_000),
+      data: { item: { id: null } },
+    });
+    expect(() =>
+      verifyIntercomWebhook(
+        Buffer.from(nullConversationId),
+        headers(nullConversationId),
+        config,
+      ),
+    ).toThrow("conversation identity");
   });
 
   it("does not permit an enabled Intercom source to fall back to local configuration", () => {

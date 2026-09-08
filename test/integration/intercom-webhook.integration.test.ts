@@ -30,6 +30,24 @@ function event(topic = "conversation.user.replied", id = "event-1") {
   });
 }
 
+function ping(
+  createdAt = Math.floor(Date.now() / 1_000),
+  appId = "synthetic-app",
+  id: string | null = null,
+) {
+  return JSON.stringify({
+    type: "notification_event",
+    // Provider-shaped endpoint-validation ping: no notification or delivery ID.
+    id,
+    app_id: appId,
+    topic: "ping",
+    created_at: createdAt,
+    delivery_status: null,
+    self: null,
+    data: { item: { type: "ping", message: "Synthetic setup ping." } },
+  });
+}
+
 function signedHeaders(body: string) {
   return {
     "content-type": "application/json",
@@ -58,6 +76,79 @@ afterEach(() => {
 });
 
 describe("Intercom webhook registered HTTP boundary", () => {
+  it("acknowledges a signed ping without binding a conversation or starting ingestion", async () => {
+    configure();
+    const start = vi.fn();
+    const body = ping();
+    const response = await app(start).request(
+      "http://support.test/support/webhooks/intercom",
+      { method: "POST", headers: signedHeaders(body), body },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      accepted: true,
+      ignored: true,
+    });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid, cross-account, stale, and malformed-customer pings or events before ingestion", async () => {
+    configure();
+    const start = vi.fn();
+    const nullIdCustomer = JSON.stringify({
+      type: "notification_event",
+      id: null,
+      app_id: "synthetic-app",
+      topic: "conversation.user.replied",
+      created_at: Math.floor(Date.now() / 1_000),
+      data: { item: { id: 42 } },
+    });
+    const nullConversationIdCustomer = JSON.stringify({
+      type: "notification_event",
+      id: "customer-with-null-conversation",
+      app_id: "synthetic-app",
+      topic: "conversation.user.replied",
+      created_at: Math.floor(Date.now() / 1_000),
+      data: { item: { id: null } },
+    });
+    const missingNotificationIdCustomer = JSON.stringify({
+      type: "notification_event",
+      app_id: "synthetic-app",
+      topic: "conversation.user.replied",
+      created_at: Math.floor(Date.now() / 1_000),
+      data: { item: { id: "conversation-1" } },
+    });
+    const requests = [
+      {
+        body: ping(),
+        headers: {
+          "content-type": "application/json",
+          "x-hub-signature": "sha1=0000000000000000000000000000000000000000",
+        },
+      },
+      { body: ping(undefined, "other-app") },
+      { body: ping(Math.floor((Date.now() - 301_000) / 1_000)) },
+      { body: nullIdCustomer },
+      { body: nullConversationIdCustomer },
+      { body: missingNotificationIdCustomer },
+    ];
+
+    for (const request of requests) {
+      const body = request.body;
+      const response = await app(start).request(
+        "http://support.test/support/webhooks/intercom",
+        {
+          method: "POST",
+          headers: request.headers ?? signedHeaders(body),
+          body,
+        },
+      );
+      expect(response.status).toBe(401);
+    }
+    expect(start).not.toHaveBeenCalled();
+  });
+
   it("accepts only a signed customer event and forwards the verified provider binding to the registered workflow", async () => {
     configure();
     const start = vi.fn().mockResolvedValue({

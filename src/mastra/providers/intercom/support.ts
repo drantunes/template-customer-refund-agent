@@ -6,7 +6,7 @@ import type {
 } from "../contracts";
 import { IntercomClient } from "./client";
 import { type IntercomDevelopmentConfig } from "./config";
-import type { VerifiedIntercomWebhook } from "./webhook";
+import type { VerifiedIntercomConversationWebhook } from "./webhook";
 
 const providerId = z.union([
   z
@@ -137,7 +137,7 @@ export class IntercomSupportProvider implements SupportChannelProvider {
     private readonly client = new IntercomClient(config),
   ) {}
   async normalizeInbound(payload: unknown) {
-    const event = payload as VerifiedIntercomWebhook;
+    const event = payload as VerifiedIntercomConversationWebhook;
     const item = event?.data?.item;
     if (
       !item ||
