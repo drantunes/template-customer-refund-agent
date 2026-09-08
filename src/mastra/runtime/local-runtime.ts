@@ -46,6 +46,7 @@ import {
   refundPolicyEvidenceError,
 } from "../lib/refund-policy-evidence";
 import { knowledgeAccountKey } from "../lib/knowledge-publications";
+import { IntercomHttpError } from "../providers/intercom/client";
 
 // Keep this runtime boundary independent of the workflow module: the workflow
 // itself uses LocalRuntime through providers and importing it here would create
@@ -996,6 +997,7 @@ export async function deliverOutbox(
     claimed += 1;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let lostOwnership = false;
+    let intercomEffectMayHaveOccurred = false;
     const renew = async () => {
       try {
         if (!(await store.renewOutboxLease(item.id, item.leaseToken!)))
@@ -1028,6 +1030,14 @@ export async function deliverOutbox(
       if (lostOwnership) break;
       heartbeat = setInterval(() => void renew(), 10_000);
       heartbeat.unref();
+      // Intercom has no documented idempotency key for these mutations. Record
+      // intent-before-effect so a process loss can become durable uncertainty.
+      if (item.binding.providerKind === "intercom") {
+        if (!(await store.markOutboxStarted(item.id, item.leaseToken!))) {
+          lostOwnership = true;
+          break;
+        }
+      }
       const receipt = await traceOperationalPort({
         mastra: observability?.mastra,
         // Do not use the caller's context or the mutable case projection: a
@@ -1038,15 +1048,83 @@ export async function deliverOutbox(
             : undefined,
         kind: "provider",
         operation: "support.deliver",
-        run: () =>
-          selected
-            .support(item.binding)
-            .deliver(item.binding, item.body, item.status, item.id),
+        run: () => {
+          const support = selected.support(item.binding);
+          // Once the POST boundary is entered, a caught local persistence or
+          // adapter error cannot prove that Intercom did not apply it.
+          const enterIntercomPostBoundary = () => {
+            intercomEffectMayHaveOccurred =
+              item.binding.providerKind === "intercom";
+          };
+          switch (item.operation ?? "reply") {
+            case "note":
+              enterIntercomPostBoundary();
+              return support.addInternalNote(item.binding, item.body, item.id);
+            case "status":
+              enterIntercomPostBoundary();
+              return support.updateStatus(item.binding, item.status, item.id);
+            case "ticket":
+              if (!support.convertToTicket)
+                throw new Error(
+                  "Permanent: configured support provider does not support ticket conversion.",
+                );
+              enterIntercomPostBoundary();
+              return support.convertToTicket(
+                item.binding,
+                { title: item.status, description: item.body },
+                item.id,
+              );
+            default:
+              enterIntercomPostBoundary();
+              return support.deliver(
+                item.binding,
+                item.body,
+                item.status,
+                item.id,
+              );
+          }
+        },
       });
       if (lostOwnership) break;
       await store.completeOutbox(item.id, receipt, item.leaseToken);
     } catch (error) {
       if (lostOwnership) break;
+      const safeIntercomNegativeResponse =
+        error instanceof IntercomHttpError &&
+        !error.ambiguous &&
+        error.status >= 400 &&
+        error.status < 500;
+      // IntercomClient records the request method on its errors. A failed
+      // Conversation GET has not entered a mutation boundary, even though the
+      // durable intent marker was written before invoking the support adapter.
+      const knownPreMutationIntercomReadFailure =
+        error instanceof IntercomHttpError && error.requestMethod === "GET";
+      if (
+        item.binding.providerKind === "intercom" &&
+        intercomEffectMayHaveOccurred &&
+        !safeIntercomNegativeResponse &&
+        !knownPreMutationIntercomReadFailure
+      ) {
+        // Includes receipt-persistence failures after a successful POST and
+        // malformed/missing receipt correlation. If this durable quarantine
+        // itself fails, let that failure propagate with the row still started;
+        // it must never fall through to a pending replay.
+        const quarantined = await store.markOutboxUncertain(
+          item.id,
+          error,
+          item.leaseToken,
+          "started",
+        );
+        if (!quarantined)
+          throw new Error(
+            "Unable to durably quarantine a possibly-applied Intercom effect.",
+          );
+        continue;
+      }
+      if (error instanceof IntercomHttpError && error.ambiguous) {
+        await store.markOutboxUncertain(item.id, error, item.leaseToken);
+        continue;
+      }
       const message = String(error);
       const status = Number(message.match(/\b([1-5]\d\d)\b/)?.[1]);
       const terminal =
@@ -1057,6 +1135,8 @@ export async function deliverOutbox(
         error,
         terminal || item.attempts >= 3,
         item.leaseToken,
+        error instanceof IntercomHttpError ? error.retryAfterMs : undefined,
+        error instanceof IntercomHttpError && error.status === 429,
       );
     } finally {
       if (heartbeat) clearInterval(heartbeat);

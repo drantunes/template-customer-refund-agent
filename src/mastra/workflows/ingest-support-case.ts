@@ -11,6 +11,8 @@ import {
 import { ownerIdForCustomer } from "../server/auth";
 import { withDispatchLeaseScope } from "../lib/dispatch-lease-scope";
 import { retryOrEscalateOperationalFailure } from "../lib/operational-alerts";
+import { bindingsForIntercomConversation } from "../providers/intercom/config";
+import type { VerifiedIntercomConversationWebhook } from "../providers/intercom/webhook";
 
 const ingressScopeSchema = z.object({
   id: z.string().min(1),
@@ -20,7 +22,10 @@ const ingressScopeSchema = z.object({
 });
 const ingestInputSchema = z.object({
   payload: z.unknown(),
-  ingress: ingressScopeSchema,
+  ingress: ingressScopeSchema.optional(),
+  verifiedProvider: z
+    .object({ kind: z.literal("intercom"), event: z.unknown() })
+    .optional(),
 });
 
 const normalizeAndPersistStep = createStep({
@@ -38,31 +43,56 @@ const normalizeAndPersistStep = createStep({
       throw new Error(
         "Inbound acceptance must run through the registered Mastra instance.",
       );
-    const ingress = resolveConfiguredBinding(defaultLocalBinding("inbound"));
+    const verified = inputData.verifiedProvider;
+    const ingress = verified
+      ? resolveConfiguredBinding(
+          (verified.event as VerifiedIntercomConversationWebhook).binding,
+        )
+      : resolveConfiguredBinding(defaultLocalBinding("inbound"));
     const normalized = await providerRegistry(ingress)
       .support(ingress)
       .normalizeInbound(inputData.payload);
     const support = resolveConfiguredBinding(normalized.binding);
-    if (support.tenantId !== inputData.ingress.tenantId)
+    if (!verified && support.tenantId !== inputData.ingress?.tenantId)
       throw new Error(
         "Inbound tenant does not match the authenticated principal.",
       );
-    const verifiedOwner = ownerIdForCustomer(
-      support.tenantId,
-      normalized.customer.email,
-    );
-    const customerIngress = inputData.ingress.roles.includes("customer");
+    // Intercom ownership is derived from the signed event's contact reference,
+    // never from an email/body claim. Local ingress retains seeded identity.
+    const contactId = normalized.rawPayload.contactId;
+    const verifiedOwner = verified
+      ? typeof contactId === "string"
+        ? `intercom:${support.tenantId}:contact:${contactId}`
+        : undefined
+      : ownerIdForCustomer(support.tenantId, normalized.customer.email);
+    const customerIngress =
+      inputData.ingress?.roles.includes("customer") ?? false;
     if (
       !verifiedOwner ||
       (customerIngress &&
-        (inputData.ingress.id !== verifiedOwner ||
+        (inputData.ingress?.id !== verifiedOwner ||
           inputData.ingress.email.toLowerCase() !==
             normalized.customer.email.toLowerCase()))
     )
       throw new Error("Inbound customer does not match the verified owner.");
     // The support adapter owns the conversation reference; externalId is the
     // inbound event identity and may legitimately differ from it.
-    const portBinding = support;
+    const bindings = verified
+      ? bindingsForIntercomConversation(
+          // the registration check above proves this exact account; config
+          // remains the composition-owned authority for companion ports.
+          (
+            await import("../providers/intercom/config")
+          ).intercomDevelopmentConfig()!,
+          support.externalConversationId,
+        )
+      : {
+          support,
+          commerce: support,
+          transactions: support,
+          knowledge: support,
+        };
+    const portBinding = bindings.support;
     const resolveRun = await mastra
       .getWorkflow("resolveSupportCaseWorkflow")
       .createRun();
@@ -87,10 +117,10 @@ const normalizeAndPersistStep = createStep({
         ownerId: verifiedOwner,
         providerBinding: portBinding,
         providerBindings: {
-          support: { ...portBinding },
-          commerce: { ...portBinding },
-          transactions: { ...portBinding },
-          knowledge: { ...portBinding },
+          support: { ...bindings.support },
+          commerce: { ...bindings.commerce },
+          transactions: { ...bindings.transactions },
+          knowledge: { ...bindings.knowledge },
         },
       },
     };

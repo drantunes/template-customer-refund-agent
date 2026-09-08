@@ -5,7 +5,7 @@
  */
 export interface ProviderBinding {
   tenantId: string;
-  providerKind: "local";
+  providerKind: "local" | "intercom";
   providerAccountId: string;
   externalConversationId: string;
 }
@@ -26,11 +26,11 @@ export interface Money {
 }
 
 export interface SupportChannelProvider {
-  readonly kind: "local";
+  readonly kind: ProviderBinding["providerKind"];
   normalizeInbound(payload: unknown): Promise<{
     binding: ProviderBinding;
     externalId: string;
-    source: "mock-email" | "chat";
+    source: "mock-email" | "chat" | "intercom-conversation";
     customer: { email: string; name?: string };
     subject: string;
     message: {
@@ -58,10 +58,17 @@ export interface SupportChannelProvider {
     status: string,
     idempotencyKey: string,
   ): Promise<DeliveryReceipt>;
+  /** Conversation remains canonical.  This is deliberately optional and is
+   * called only by a configured structured-escalation intent. */
+  convertToTicket?(
+    binding: ProviderBinding,
+    input: { title: string; description: string },
+    idempotencyKey: string,
+  ): Promise<DeliveryReceipt>;
 }
 
 export interface CommerceProvider {
-  readonly kind: "local";
+  readonly kind: ProviderBinding["providerKind"];
   findOrder(
     binding: ProviderBinding,
     email: string,
@@ -75,7 +82,7 @@ export interface CommerceProvider {
 }
 
 export interface TransactionalActionProvider {
-  readonly kind: "local";
+  readonly kind: ProviderBinding["providerKind"];
   quoteRefund(command: RefundCommand): Promise<RefundQuote>;
   issueRefund(
     command: RefundCommand,
@@ -84,7 +91,7 @@ export interface TransactionalActionProvider {
 }
 
 export interface KnowledgeProvider {
-  readonly kind: "local";
+  readonly kind: ProviderBinding["providerKind"];
   search(
     binding: ProviderBinding,
     query: string,
@@ -150,7 +157,8 @@ export interface RefundQuote {
 export interface DeliveryReceipt {
   receiptId: string;
   deliveredAt: string;
-  providerMessageId: string;
+  /** Present only when the provider proved a message/part was created. */
+  providerMessageId?: string;
 }
 export interface KnowledgeEvidence {
   title: string;

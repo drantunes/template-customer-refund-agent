@@ -1,6 +1,10 @@
 import { z } from "zod";
 
-export const caseSourceSchema = z.enum(["mock-email", "chat"]);
+export const caseSourceSchema = z.enum([
+  "mock-email",
+  "chat",
+  "intercom-conversation",
+]);
 export type CaseSource = z.infer<typeof caseSourceSchema>;
 
 export const caseStatusSchema = z.enum([

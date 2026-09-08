@@ -12,7 +12,7 @@ const chunkAndEmbedStep = createStep({
   inputSchema: z.object({
     binding: z.object({
       tenantId: z.string().min(1),
-      providerKind: z.literal("local"),
+      providerKind: z.enum(["local", "intercom"]),
       providerAccountId: z.string().min(1),
       externalConversationId: z.string().min(1),
     }),
@@ -42,7 +42,7 @@ export const indexSupportKnowledgeWorkflow = createWorkflow({
   inputSchema: z.object({
     binding: z.object({
       tenantId: z.string().min(1),
-      providerKind: z.literal("local"),
+      providerKind: z.enum(["local", "intercom"]),
       providerAccountId: z.string().min(1),
       externalConversationId: z.string().min(1),
     }),

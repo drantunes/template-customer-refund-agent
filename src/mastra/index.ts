@@ -35,8 +35,13 @@ import {
   ApplicationSpanRedactor,
   RedactingPinoLogger,
 } from "./lib/observability-redaction";
+import { registerConfiguredIntercomProvider } from "./providers/registry";
 
 const retentionPolicy = retentionPolicyFromEnvironment();
+// This is deliberately evaluated during composition: an explicit external
+// opt-in with incomplete development configuration fails rather than routing
+// an Intercom case to local fixtures.
+registerConfiguredIntercomProvider();
 
 export const mastra = new Mastra({
   agents: {

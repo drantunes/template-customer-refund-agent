@@ -1,5 +1,7 @@
 import type { ProviderBinding, ProviderRegistry } from "./contracts";
 import { defaultLocalBinding, localRuntime } from "../runtime/local-runtime";
+import { intercomDevelopmentConfig, intercomBinding } from "./intercom/config";
+import { IntercomProviderRegistry } from "./intercom/registry";
 
 const registryKey = (binding: ProviderBinding) =>
   `${binding.tenantId}\u0000${binding.providerKind}\u0000${binding.providerAccountId}`;
@@ -44,6 +46,15 @@ export function resetProviderRegistryForTests() {
   });
 }
 
+/** Register the opt-in development account once at process composition. */
+export function registerConfiguredIntercomProvider() {
+  const config = intercomDevelopmentConfig();
+  if (!config) return undefined;
+  const binding = intercomBinding(config, "configured");
+  registerProviderRegistry(new IntercomProviderRegistry(config), [binding]);
+  return config;
+}
+
 /** Reject typoed/redirected accounts before a port can perform an effect. */
 export function resolveConfiguredBinding(
   binding: ProviderBinding,
@@ -68,6 +79,9 @@ export function providerRegistry(binding: ProviderBinding): ProviderRegistry {
 
 /** Local fixture seeding is allowed only for explicit file-backed development data. */
 export async function ensureProviderFixtures(binding: ProviderBinding) {
+  // External adapters own their source data.  Never seed or reset local
+  // fixtures merely because an Intercom knowledge publication is requested.
+  if (binding.providerKind !== "local") return;
   const url = process.env.TURSO_DATABASE_URL || "file:./mastra.db";
   if (!url.startsWith("file:"))
     throw new Error(

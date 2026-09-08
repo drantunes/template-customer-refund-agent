@@ -47,6 +47,15 @@ import {
   type SupportPrincipal,
 } from "./auth";
 import { loginRequestSchema, loginResponseSchema } from "./contracts";
+import {
+  intercomBinding,
+  intercomDevelopmentConfig,
+} from "../providers/intercom/config";
+import {
+  isCustomerConversationEvent,
+  MAX_INTERCOM_WEBHOOK_BYTES,
+  verifyIntercomWebhook,
+} from "../providers/intercom/webhook";
 
 function principal(c: ContextWithMastra): SupportPrincipal | undefined {
   return c.req.raw?.headers
@@ -340,6 +349,132 @@ export const supportInboundRoute = registerApiRoute("/support/inbound", {
     );
   },
 });
+
+/** Public by transport necessity only. It verifies raw signed requests before
+ * parse. A verified Intercom ping is acknowledged without creating a local
+ * identity or workflow run; bound customer notifications alone reach ingest. */
+export const intercomWebhookRoute = registerApiRoute(
+  "/support/webhooks/intercom",
+  {
+    method: "POST",
+    handler: async (c) => {
+      const config = intercomDevelopmentConfig();
+      if (!config)
+        return c.json(
+          errorResponseSchema.parse({ error: "Intercom is not enabled." }),
+          404,
+        );
+      if (!c.req.raw)
+        return c.json(
+          errorResponseSchema.parse({
+            error: "Webhook transport unavailable.",
+          }),
+          500,
+        );
+      const contentLength = c.req.raw.headers.get("content-length");
+      const declaredLength =
+        contentLength === null ? undefined : Number(contentLength);
+      if (
+        declaredLength !== undefined &&
+        Number.isFinite(declaredLength) &&
+        (declaredLength <= 0 || declaredLength > MAX_INTERCOM_WEBHOOK_BYTES)
+      )
+        return c.json(
+          errorResponseSchema.parse({ error: "Invalid Intercom webhook." }),
+          413,
+        );
+      let raw: Uint8Array;
+      try {
+        raw = await readIntercomWebhookBody(c.req.raw);
+      } catch (error) {
+        return c.json(
+          errorResponseSchema.parse({ error: "Invalid Intercom webhook." }),
+          error instanceof IntercomWebhookTooLargeError ? 413 : 400,
+        );
+      }
+      let event;
+      try {
+        event = verifyIntercomWebhook(raw, c.req.raw.headers, config);
+      } catch {
+        return c.json(
+          errorResponseSchema.parse({ error: "Invalid Intercom webhook." }),
+          401,
+        );
+      }
+      // Intercom's setup ping has no conversation ID. It is still authenticated,
+      // account-scoped, and fresh at this point, but must never create a binding
+      // or trigger workflow/remote effects.
+      if (event.kind === "ping")
+        return c.json({ accepted: true, ignored: true });
+      // Admin replies/notes and all non-customer events are acknowledged but
+      // cannot feed a self-generated reply loop.
+      if (!isCustomerConversationEvent(event))
+        return c.json({ accepted: true, ignored: true });
+      const mastra = c.get("mastra");
+      const run = await mastra
+        .getWorkflow("ingestSupportCaseWorkflow")
+        .createRun();
+      try {
+        const result = await run.start({
+          inputData: {
+            payload: event,
+            verifiedProvider: { kind: "intercom", event },
+          },
+          requestContext: c.get("requestContext"),
+        });
+        if (result.status !== "success") throw new Error("inbound failed");
+        return c.json(
+          inboundSupportResponseSchema.parse({
+            caseId: result.result.caseId,
+            workflowRunId: result.result.workflowRunId,
+            status: "processing",
+          }),
+        );
+      } catch {
+        // Return retryable status only after verification.  The event ID is
+        // durably deduplicated by the same transaction as case acceptance.
+        return c.json(
+          errorResponseSchema.parse({ error: "Intercom ingestion failed." }),
+          503,
+        );
+      }
+    },
+  },
+);
+
+class IntercomWebhookTooLargeError extends Error {}
+/** Content-Length is only an early reject. This stream boundary limits chunked
+ * and malformed requests before any raw body is retained for HMAC validation. */
+export async function readIntercomWebhookBody(request: Request) {
+  if (!request.body) throw new Error("Webhook body is unavailable.");
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      size += next.value.byteLength;
+      if (size > MAX_INTERCOM_WEBHOOK_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new IntercomWebhookTooLargeError();
+      }
+      chunks.push(next.value);
+    }
+  } catch (error) {
+    if (error instanceof IntercomWebhookTooLargeError) throw error;
+    throw new Error("Webhook body could not be read.");
+  } finally {
+    reader.releaseLock();
+  }
+  const raw = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    raw.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return raw;
+}
 
 export const supportCaseFollowUpRoute = registerApiRoute(
   "/support/cases/:caseId/follow-ups",
@@ -1287,14 +1422,19 @@ export const supportKnowledgeReindexRoute = registerApiRoute(
       const mastra = c.get("mastra");
       const workflow = mastra.getWorkflow("indexSupportKnowledgeWorkflow");
       const run = await workflow.createRun();
+      const intercom = intercomDevelopmentConfig();
+      const binding =
+        intercom?.knowledgeEnabled && intercom.tenantId === current.tenantId
+          ? intercomBinding(intercom, `reindex:${current.id}`)
+          : {
+              tenantId: current.tenantId,
+              providerKind: "local" as const,
+              providerAccountId: "local-demo",
+              externalConversationId: `reindex:${current.id}`,
+            };
       const result = await run.start({
         inputData: {
-          binding: {
-            tenantId: current.tenantId,
-            providerKind: "local",
-            providerAccountId: "local-demo",
-            externalConversationId: `reindex:${current.id}`,
-          },
+          binding,
           ...(reindexInput.data.validation
             ? { validation: reindexInput.data.validation }
             : {}),
@@ -1315,6 +1455,7 @@ export const supportKnowledgeReindexRoute = registerApiRoute(
 export const supportRoutes = [
   supportLoginRoute,
   supportInboundRoute,
+  intercomWebhookRoute,
   supportCasesListRoute,
   supportCaseDetailRoute,
   supportCaseSupervisorRoute,
