@@ -269,14 +269,28 @@ describe("Phase 005 fenced outbox", () => {
     let posts = 0;
     const support = new IntercomSupportProvider(
       config,
-      new IntercomClient(config, async () => {
+      new IntercomClient(config, async (_input, init) => {
+        if (init?.method === "GET")
+          return Response.json({
+            type: "conversation",
+            id: "conversation",
+            conversation_parts: { conversation_parts: [], total_count: 0 },
+          });
         posts += 1;
         return Response.json({
           type: "conversation",
           id: "conversation",
           conversation_parts: {
             type: "conversation_part.list",
-            conversation_parts: [{ type: "conversation", id: "part-1" }],
+            conversation_parts: [
+              {
+                type: "conversation",
+                id: "part-1",
+                part_type: "comment",
+                author: { type: "admin", id: "admin" },
+                body: "synthetic reply",
+              },
+            ],
             total_count: 1,
           },
         });
@@ -346,7 +360,13 @@ describe("Phase 005 fenced outbox", () => {
     let posts = 0;
     const support = new IntercomSupportProvider(
       config,
-      new IntercomClient(config, async () => {
+      new IntercomClient(config, async (_input, init) => {
+        if (init?.method === "GET")
+          return Response.json({
+            type: "conversation",
+            id: "conversation",
+            conversation_parts: { conversation_parts: [], total_count: 0 },
+          });
         posts += 1;
         return Response.json({
           type: "conversation",

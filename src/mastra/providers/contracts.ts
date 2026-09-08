@@ -157,7 +157,8 @@ export interface RefundQuote {
 export interface DeliveryReceipt {
   receiptId: string;
   deliveredAt: string;
-  providerMessageId: string;
+  /** Present only when the provider proved a message/part was created. */
+  providerMessageId?: string;
 }
 export interface KnowledgeEvidence {
   title: string;

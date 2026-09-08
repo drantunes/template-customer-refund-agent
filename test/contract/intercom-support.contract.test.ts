@@ -28,10 +28,12 @@ function conversationMutation(
   partId: string | number,
   body = "",
   partType = "comment",
+  state?: "open" | "closed",
 ) {
   return {
     type: "conversation",
     id: binding.externalConversationId,
+    ...(state ? { state } : {}),
     conversation_parts: {
       type: "conversation_part.list",
       conversation_parts: [
@@ -47,16 +49,34 @@ function conversationMutation(
     },
   };
 }
+function conversationSnapshot(
+  parts: Array<Record<string, unknown>> = [],
+  state?: "open" | "closed",
+) {
+  return {
+    type: "conversation",
+    id: binding.externalConversationId,
+    ...(state ? { state } : {}),
+    conversation_parts: {
+      type: "conversation_part.list",
+      conversation_parts: parts,
+      total_count: parts.length,
+    },
+  };
+}
 
 describe("Intercom v2.16 support contract", () => {
   it("uses the documented reply and conversation conversion schemas", async () => {
     const requests: Request[] = [];
     const fakeFetch: typeof fetch = async (input, init) => {
       requests.push(new Request(input, init));
+      const url = new URL(String(input));
       return Response.json(
-        new URL(String(input)).pathname.endsWith("/convert")
+        url.pathname.endsWith("/convert")
           ? { type: "ticket", id: "api-ticket", ticket_id: "display-ticket" }
-          : conversationMutation("reply-part-1", "hello"),
+          : init?.method === "GET"
+            ? conversationSnapshot()
+            : conversationMutation("reply-part-1", "hello"),
       );
     };
     const support = new IntercomSupportProvider(
@@ -76,17 +96,18 @@ describe("Intercom v2.16 support contract", () => {
     );
     expect(ticket.providerMessageId).toBe("api-ticket");
     expect(requests[0].headers.get("intercom-version")).toBe("2.16");
-    expect(new URL(requests[0].url).pathname).toBe("/conversations/123/reply");
-    await expect(requests[0].json()).resolves.toMatchObject({
+    expect(new URL(requests[0].url).pathname).toBe("/conversations/123");
+    expect(new URL(requests[1].url).pathname).toBe("/conversations/123/reply");
+    await expect(requests[1].json()).resolves.toMatchObject({
       message_type: "comment",
       type: "admin",
       admin_id: "9",
       body: "hello",
     });
-    expect(new URL(requests[1].url).pathname).toBe(
+    expect(new URL(requests[2].url).pathname).toBe(
       "/conversations/123/convert",
     );
-    await expect(requests[1].json()).resolves.toEqual({
+    await expect(requests[2].json()).resolves.toEqual({
       ticket_type_id: "type_1",
       attributes: {
         _default_title_: "Need review",
@@ -100,11 +121,16 @@ describe("Intercom v2.16 support contract", () => {
     const fakeFetch: typeof fetch = async (input, init) => {
       requests.push(new Request(input, init));
       const count = requests.length;
+      if (init?.method === "GET")
+        return Response.json(
+          conversationSnapshot([], count === 3 ? "closed" : "open"),
+        );
       return Response.json(
         conversationMutation(
-          `part-${count}`,
-          count === 1 ? "synthetic escalation context" : "",
-          count === 1 ? "note" : count === 2 ? "open" : "close",
+          `part-${count / 2}`,
+          count === 2 ? "synthetic escalation context" : "",
+          count === 2 ? "note" : count === 4 ? "open" : "close",
+          count === 4 ? "open" : count === 6 ? "closed" : undefined,
         ),
       );
     };
@@ -128,25 +154,28 @@ describe("Intercom v2.16 support contract", () => {
       ),
     ).rejects.toThrow("not configured");
 
-    expect(requests).toHaveLength(3);
+    expect(requests).toHaveLength(6);
     expect(
       [note, opened, closed].map((receipt) => receipt.providerMessageId),
     ).toEqual(["part-1", "part-2", "part-3"]);
     expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+      "/conversations/123",
       "/conversations/123/reply",
+      "/conversations/123",
       "/conversations/123/parts",
+      "/conversations/123",
       "/conversations/123/parts",
     ]);
-    await expect(requests[0]!.json()).resolves.toMatchObject({
+    await expect(requests[1]!.json()).resolves.toMatchObject({
       message_type: "note",
       type: "admin",
       admin_id: "9",
     });
-    await expect(requests[1]!.json()).resolves.toMatchObject({
+    await expect(requests[3]!.json()).resolves.toMatchObject({
       message_type: "open",
       type: "admin",
     });
-    await expect(requests[2]!.json()).resolves.toMatchObject({
+    await expect(requests[5]!.json()).resolves.toMatchObject({
       message_type: "close",
       type: "admin",
     });
@@ -159,8 +188,12 @@ describe("Intercom v2.16 support contract", () => {
     ] as const) {
       const support = new IntercomSupportProvider(
         config,
-        new IntercomClient(config, async () =>
-          Response.json(conversationMutation(partId)),
+        new IntercomClient(config, async (_input, init) =>
+          Response.json(
+            init?.method === "GET"
+              ? conversationSnapshot()
+              : conversationMutation(partId, "body"),
+          ),
         ),
       );
       await expect(
@@ -176,7 +209,9 @@ describe("Intercom v2.16 support contract", () => {
     let sequence = 0;
     const support = new IntercomSupportProvider(
       config,
-      new IntercomClient(config, async () => {
+      new IntercomClient(config, async (_input, init) => {
+        if (init?.method === "GET")
+          return Response.json(conversationSnapshot());
         sequence += 1;
         return Response.json(
           conversationMutation(`reply-part-${sequence}`, "same target"),
@@ -193,6 +228,271 @@ describe("Intercom v2.16 support contract", () => {
       receiptId: "intercom:reply:reply-part-2",
       providerMessageId: "reply-part-2",
     });
+  });
+
+  it("identifies a reply in a full Conversation response by its new semantic admin part", async () => {
+    const prior = {
+      id: "prior-identical-admin-reply",
+      part_type: "comment",
+      author: { type: "admin", id: "9" },
+      body: "Exact reply body.",
+    };
+    const support = new IntercomSupportProvider(
+      config,
+      new IntercomClient(config, async (_input, init) =>
+        Response.json(
+          init?.method === "GET"
+            ? conversationSnapshot([prior], "open")
+            : conversationSnapshot(
+                [
+                  prior,
+                  {
+                    id: "bot-attribute-update",
+                    part_type: "conversation_attribute_updated_by_admin",
+                    author: { type: "bot", id: "bot" },
+                    body: null,
+                  },
+                  {
+                    id: "automatic-assignment-reply",
+                    part_type: "assignment",
+                    author: { type: "admin", id: "9" },
+                    body: "<p>Exact reply body.</p>",
+                  },
+                ],
+                "open",
+              ),
+        ),
+      ),
+    );
+
+    await expect(
+      support.deliver(binding, "Exact reply body.", "resolved", "ignored"),
+    ).resolves.toMatchObject({
+      receiptId: "intercom:reply:automatic-assignment-reply",
+      providerMessageId: "automatic-assignment-reply",
+    });
+  });
+
+  it("accepts only Intercom's exact escaped paragraph rendering for note receipts", async () => {
+    const body = `Review <policy> & "quote" 'single'.`;
+    const support = new IntercomSupportProvider(
+      config,
+      new IntercomClient(config, async (_input, init) =>
+        Response.json(
+          init?.method === "GET"
+            ? conversationSnapshot([
+                {
+                  id: "historical-system-part",
+                  part_type: "conversation_attribute_updated_by_admin",
+                  author: { type: "bot", id: "bot" },
+                  body: null,
+                },
+              ])
+            : conversationSnapshot([
+                {
+                  id: "historical-system-part",
+                  part_type: "conversation_attribute_updated_by_admin",
+                  author: { type: "bot", id: "bot" },
+                  body: null,
+                },
+                {
+                  id: "wrapped-note",
+                  part_type: "note",
+                  author: { type: "admin", id: "9" },
+                  body: "<p>Review &lt;policy&gt; &amp; &quot;quote&quot; &#39;single&#39;.</p>",
+                },
+              ]),
+        ),
+      ),
+    );
+
+    await expect(
+      support.addInternalNote(binding, body, "ignored"),
+    ).resolves.toMatchObject({
+      receiptId: "intercom:note:wrapped-note",
+      providerMessageId: "wrapped-note",
+    });
+  });
+
+  it("rejects semantically different HTML that only looks like the sent reply", async () => {
+    const support = new IntercomSupportProvider(
+      config,
+      new IntercomClient(config, async (_input, init) =>
+        Response.json(
+          init?.method === "GET"
+            ? conversationSnapshot()
+            : conversationSnapshot([
+                {
+                  id: "same-visible-text-extra-content",
+                  part_type: "assignment",
+                  author: { type: "admin", id: "9" },
+                  body: "<p>Visible reply.</p><!-- different provider content -->",
+                },
+              ]),
+        ),
+      ),
+    );
+
+    await expect(
+      support.deliver(binding, "Visible reply.", "resolved", "ignored"),
+    ).rejects.toThrow("cannot unambiguously");
+  });
+
+  it("quarantines ambiguous concurrent matching reply parts instead of selecting by position", async () => {
+    const support = new IntercomSupportProvider(
+      config,
+      new IntercomClient(config, async (_input, init) =>
+        Response.json(
+          init?.method === "GET"
+            ? conversationSnapshot()
+            : conversationSnapshot([
+                {
+                  id: "candidate-a",
+                  part_type: "comment",
+                  author: { type: "admin", id: "9" },
+                  body: "Same reply.",
+                },
+                {
+                  id: "candidate-b",
+                  part_type: "assignment",
+                  author: { type: "admin", id: "9" },
+                  body: "Same reply.",
+                },
+              ]),
+        ),
+      ),
+    );
+    await expect(
+      support.deliver(binding, "Same reply.", "resolved", "ignored"),
+    ).rejects.toThrow("cannot unambiguously");
+  });
+
+  it("records a verified status no-op without claiming a created provider part", async () => {
+    let posts = 0;
+    const support = new IntercomSupportProvider(
+      config,
+      new IntercomClient(config, async (_input, init) => {
+        if (init?.method === "POST") posts += 1;
+        return Response.json(conversationSnapshot([], "closed"));
+      }),
+    );
+    await expect(
+      support.updateStatus(binding, "resolved", "ignored"),
+    ).resolves.toEqual({
+      receiptId: "intercom:status:no-op:123",
+      deliveredAt: expect.any(String),
+    });
+    expect(posts).toBe(0);
+  });
+
+  it("accepts null status bodies only as no-body and rejects status content", async () => {
+    for (const [body, expected] of [
+      [null, true],
+      ["unexpected status content", false],
+    ] as const) {
+      const support = new IntercomSupportProvider(
+        config,
+        new IntercomClient(config, async (_input, init) =>
+          Response.json(
+            init?.method === "GET"
+              ? conversationSnapshot([], "open")
+              : conversationSnapshot(
+                  [
+                    {
+                      id: "new-status-part",
+                      part_type: "close",
+                      author: { type: "admin", id: "9" },
+                      body,
+                    },
+                  ],
+                  "closed",
+                ),
+          ),
+        ),
+      );
+      const result = support.updateStatus(binding, "resolved", "ignored");
+      if (expected)
+        await expect(result).resolves.toMatchObject({
+          receiptId: "intercom:status:new-status-part",
+          providerMessageId: "new-status-part",
+        });
+      else await expect(result).rejects.toThrow("cannot unambiguously");
+    }
+  });
+
+  it("rejects status mutation receipts whose full Conversation lacks or contradicts the desired state", async () => {
+    for (const state of [undefined, "open"] as const) {
+      let posts = 0;
+      const support = new IntercomSupportProvider(
+        config,
+        new IntercomClient(config, async (_input, init) => {
+          if (init?.method === "POST") posts += 1;
+          return Response.json(
+            init?.method === "GET"
+              ? conversationSnapshot([], "open")
+              : conversationSnapshot(
+                  [
+                    {
+                      id: "new-close-part",
+                      part_type: "close",
+                      author: { type: "admin", id: "9" },
+                      body: null,
+                    },
+                  ],
+                  state,
+                ),
+          );
+        }),
+      );
+
+      await expect(
+        support.updateStatus(binding, "resolved", "ignored"),
+      ).rejects.toThrow("does not demonstrate the desired Conversation state");
+      expect(posts).toBe(1);
+    }
+  });
+
+  it("does not POST when the pre-mutation Conversation read fails", async () => {
+    let posts = 0;
+    const support = new IntercomSupportProvider(
+      config,
+      new IntercomClient(config, async (_input, init) => {
+        if (init?.method === "POST") posts += 1;
+        return new Response("", { status: 500 });
+      }),
+    );
+    await expect(
+      support.deliver(binding, "Never sent.", "resolved", "ignored"),
+    ).rejects.toMatchObject({ status: 500, ambiguous: false });
+    expect(posts).toBe(0);
+  });
+
+  it("does not POST replies or notes when the pre-mutation Conversation binding or snapshot is malformed", async () => {
+    for (const response of [
+      { type: "conversation", id: binding.externalConversationId },
+      { type: "conversation", id: "other-conversation" },
+    ]) {
+      for (const operation of ["reply", "note"] as const) {
+        let posts = 0;
+        const support = new IntercomSupportProvider(
+          config,
+          new IntercomClient(config, async (_input, init) => {
+            if (init?.method === "POST") posts += 1;
+            return Response.json(response);
+          }),
+        );
+        const result =
+          operation === "reply"
+            ? support.deliver(binding, "Never sent.", "resolved", "ignored")
+            : support.addInternalNote(binding, "Never sent.", "ignored");
+        await expect(result).rejects.toThrow(
+          response.id === "other-conversation"
+            ? "does not match the bound Conversation"
+            : "lacks a conversation-part snapshot",
+        );
+        expect(posts).toBe(0);
+      }
+    }
   });
 
   it("keeps optional articles tenant-bound, source-versioned, and fresh before publication", async () => {
@@ -382,7 +682,11 @@ describe("Intercom v2.16 support contract", () => {
     ]) {
       const support = new IntercomSupportProvider(
         config,
-        new IntercomClient(config, async () => Response.json(response)),
+        new IntercomClient(config, async (_input, init) =>
+          Response.json(
+            init?.method === "GET" ? conversationSnapshot() : response,
+          ),
+        ),
       );
       await expect(
         support.deliver(binding, "body", "resolved", "ignored"),
@@ -392,8 +696,12 @@ describe("Intercom v2.16 support contract", () => {
     for (const partId of ["", "   "]) {
       const support = new IntercomSupportProvider(
         config,
-        new IntercomClient(config, async () =>
-          Response.json(conversationMutation(partId)),
+        new IntercomClient(config, async (_input, init) =>
+          Response.json(
+            init?.method === "GET"
+              ? conversationSnapshot()
+              : conversationMutation(partId, "body"),
+          ),
         ),
       );
       await expect(

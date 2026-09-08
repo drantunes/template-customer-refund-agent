@@ -36,7 +36,7 @@ const receiptSchema = z
   .object({
     receiptId: z.string().min(1),
     deliveredAt: z.iso.datetime(),
-    providerMessageId: z.string().min(1),
+    providerMessageId: z.string().min(1).optional(),
   })
   .strict();
 const effectSchema = z

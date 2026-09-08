@@ -171,6 +171,17 @@ async function runtime() {
       if (path.endsWith("/convert"))
         return Response.json({ type: "ticket", id: "intercom-ticket" });
       if (path.startsWith("/conversations/")) {
+        if (request.method === "GET")
+          return Response.json({
+            type: "conversation",
+            id: "conversation-phase005",
+            state: "closed",
+            conversation_parts: {
+              type: "conversation_part.list",
+              conversation_parts: [],
+              total_count: 0,
+            },
+          });
         const payload = (await request.json()) as {
           body?: string;
           message_type?: string;
@@ -178,6 +189,11 @@ async function runtime() {
         return Response.json({
           type: "conversation",
           id: "conversation-phase005",
+          ...(payload.message_type === "close"
+            ? { state: "closed" }
+            : payload.message_type === "open"
+              ? { state: "open" }
+              : {}),
           conversation_parts: {
             type: "conversation_part.list",
             conversation_parts: [

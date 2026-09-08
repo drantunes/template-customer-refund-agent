@@ -17,14 +17,21 @@ const providerId = z.union([
     ),
   z.number(),
 ]);
+const conversationPartResponse = z
+  .object({
+    id: providerId.optional(),
+    part_type: z.string().optional(),
+    body: z.string().nullable().optional(),
+    author: z.unknown().optional(),
+  })
+  .passthrough();
 const conversationResponse = z
   .object({
     id: providerId,
+    state: z.string().optional(),
     conversation_parts: z
       .object({
-        conversation_parts: z
-          .array(z.object({ id: providerId.optional() }).passthrough())
-          .optional(),
+        conversation_parts: z.array(conversationPartResponse).optional(),
       })
       .optional(),
   })
@@ -49,6 +56,43 @@ function record(value: unknown) {
 }
 function stringValue(value: unknown) {
   return typeof value === "string" ? value : undefined;
+}
+function usableProviderPartId(value: unknown): value is string | number {
+  return (
+    (typeof value === "string" && value.trim().length > 0) ||
+    (typeof value === "number" && Number.isFinite(value))
+  );
+}
+/** Preserve a provider identifier's type and bytes while comparing snapshots.
+ * In particular, an API string id is not equivalent to a numeric id that
+ * happens to stringify to the same characters. */
+function providerIdKey(id: string | number) {
+  return `${typeof id}:${id}`;
+}
+function escapedParagraph(body: string) {
+  // Intercom can return a plain-text submission as a single HTML paragraph.
+  // Accept only that one byte-for-byte rendering; do not parse or normalize
+  // arbitrary HTML, because visually similar markup can carry different
+  // message content.
+  return `<p>${body.replace(/[&<>"']/g, (character) => {
+    switch (character) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      case "'":
+        return "&#39;";
+      default:
+        return character;
+    }
+  })}</p>`;
+}
+function matchesSentBody(body: string | null | undefined, sentBody: string) {
+  return body === sentBody || body === escapedParagraph(sentBody);
 }
 function customerAuthor(value: unknown) {
   const author = record(value);
@@ -196,29 +240,116 @@ export class IntercomSupportProvider implements SupportChannelProvider {
     )
       throw new Error("Intercom delivery binding is not configured.");
   }
-  private receipt(
+  private assertConversation(
     binding: ProviderBinding,
     response: z.infer<typeof conversationResponse>,
-    operation: string,
-  ): DeliveryReceipt {
+  ) {
     if (String(response.id) !== binding.externalConversationId)
       throw new Error(
         "Intercom mutation response does not match the bound Conversation.",
       );
-    // The mutation response is a Conversation, so its top-level id is the
-    // immutable target binding, not a delivery receipt. A response with zero
-    // or multiple parts cannot identify this POST's effect unambiguously.
-    const parts = response.conversation_parts?.conversation_parts ?? [];
-    if (parts.length !== 1 || parts[0]?.id === undefined)
+  }
+  private conversationParts(
+    response: z.infer<typeof conversationResponse>,
+    context: "read" | "mutation",
+  ) {
+    const parts = response.conversation_parts?.conversation_parts;
+    if (!parts)
+      throw new Error(
+        `Intercom ${context} response lacks a conversation-part snapshot.`,
+      );
+    return parts;
+  }
+  private assertPreMutationConversation(
+    binding: ProviderBinding,
+    response: z.infer<typeof conversationResponse>,
+  ) {
+    this.assertConversation(binding, response);
+    this.conversationParts(response, "read");
+  }
+  private partWasAuthoredByConfiguredAdmin(
+    part: z.infer<typeof conversationPartResponse>,
+  ) {
+    const author = record(part.author);
+    return (
+      author?.type === "admin" &&
+      (author.id === this.config.adminId ||
+        (typeof author.id === "number" &&
+          Number.isFinite(author.id) &&
+          String(author.id) === this.config.adminId))
+    );
+  }
+  private matchesOperation(
+    part: z.infer<typeof conversationPartResponse>,
+    operation: "reply" | "note" | "status",
+    body: string,
+    status?: "open" | "closed",
+  ) {
+    if (!this.partWasAuthoredByConfiguredAdmin(part)) return false;
+    if (operation === "reply")
+      // An initial reply can be represented as an automatic assignment. It is
+      // still only safe when it carries this exact reply body and admin.
+      return (
+        (part.part_type === "comment" || part.part_type === "assignment") &&
+        matchesSentBody(part.body, body)
+      );
+    if (operation === "note")
+      return part.part_type === "note" && matchesSentBody(part.body, body);
+    return (
+      part.part_type === (status === "closed" ? "close" : "open") &&
+      (part.body === undefined || part.body === null || part.body === "")
+    );
+  }
+  private receipt(
+    binding: ProviderBinding,
+    before: z.infer<typeof conversationResponse>,
+    response: z.infer<typeof conversationResponse>,
+    operation: "reply" | "note" | "status",
+    body: string,
+    status?: "open" | "closed",
+  ): DeliveryReceipt {
+    this.assertConversation(binding, before);
+    this.assertConversation(binding, response);
+    if (operation === "status" && response.state !== status)
+      throw new Error(
+        "Intercom status mutation response does not demonstrate the desired Conversation state.",
+      );
+    const knownPartIds = new Set(
+      this.conversationParts(before, "read")
+        .map((part) => part.id)
+        .filter(usableProviderPartId)
+        .map(providerIdKey),
+    );
+    const candidates = this.conversationParts(response, "mutation").filter(
+      (part) =>
+        usableProviderPartId(part.id) &&
+        !knownPartIds.has(providerIdKey(part.id)) &&
+        this.matchesOperation(part, operation, body, status),
+    );
+    // A full Conversation can include system parts and concurrent changes.
+    // Never pick by list position or body alone: only one novel, semantic
+    // candidate is a receipt for this particular POST.
+    if (candidates.length !== 1 || candidates[0]?.id === undefined)
       throw new Error(
         "Intercom mutation response cannot unambiguously identify its created conversation part.",
       );
-    const id = parts[0].id;
+    const id = candidates[0].id;
+    if (!usableProviderPartId(id))
+      throw new Error(
+        "Intercom mutation response cannot unambiguously identify its created conversation part.",
+      );
     return {
       receiptId: `intercom:${operation}:${id}`,
       providerMessageId: String(id),
       deliveredAt: new Date().toISOString(),
     };
+  }
+  private async conversation(binding: ProviderBinding) {
+    return this.client.request(
+      `/conversations/${encodeURIComponent(binding.externalConversationId)}`,
+      { method: "GET" },
+      conversationResponse,
+    );
   }
   async deliver(
     binding: ProviderBinding,
@@ -227,6 +358,8 @@ export class IntercomSupportProvider implements SupportChannelProvider {
     _idempotencyKey?: string,
   ) {
     this.assert(binding);
+    const before = await this.conversation(binding);
+    this.assertPreMutationConversation(binding, before);
     const response = await this.client.request(
       `/conversations/${encodeURIComponent(binding.externalConversationId)}/reply`,
       {
@@ -240,7 +373,7 @@ export class IntercomSupportProvider implements SupportChannelProvider {
       },
       conversationResponse,
     );
-    return this.receipt(binding, response, "reply");
+    return this.receipt(binding, before, response, "reply", body);
   }
   async addInternalNote(
     binding: ProviderBinding,
@@ -248,6 +381,8 @@ export class IntercomSupportProvider implements SupportChannelProvider {
     _idempotencyKey: string,
   ) {
     this.assert(binding);
+    const before = await this.conversation(binding);
+    this.assertPreMutationConversation(binding, before);
     const response = await this.client.request(
       `/conversations/${encodeURIComponent(binding.externalConversationId)}/reply`,
       {
@@ -261,7 +396,7 @@ export class IntercomSupportProvider implements SupportChannelProvider {
       },
       conversationResponse,
     );
-    return this.receipt(binding, response, "note");
+    return this.receipt(binding, before, response, "note", body);
   }
   async updateStatus(
     binding: ProviderBinding,
@@ -270,6 +405,15 @@ export class IntercomSupportProvider implements SupportChannelProvider {
   ) {
     this.assert(binding);
     const state = status === "resolved" ? "closed" : "open";
+    const before = await this.conversation(binding);
+    this.assertPreMutationConversation(binding, before);
+    if (before.state === state)
+      return {
+        // This is a verified no-op, not evidence that a Conversation part was
+        // created. Keep the bound conversation only in the receipt id.
+        receiptId: `intercom:status:no-op:${binding.externalConversationId}`,
+        deliveredAt: new Date().toISOString(),
+      };
     const messageType = state === "open" ? "open" : "close";
     const response = await this.client.request(
       `/conversations/${encodeURIComponent(binding.externalConversationId)}/parts`,
@@ -284,7 +428,7 @@ export class IntercomSupportProvider implements SupportChannelProvider {
       },
       conversationResponse,
     );
-    return this.receipt(binding, response, "status");
+    return this.receipt(binding, before, response, "status", "", state);
   }
   async convertToTicket(
     binding: ProviderBinding,
