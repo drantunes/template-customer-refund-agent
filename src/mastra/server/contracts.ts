@@ -236,6 +236,32 @@ export const supportOpenApiDocument = {
         },
       },
     },
+    "/support/webhooks/intercom": {
+      post: {
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object" } } },
+        },
+        responses: {
+          "200": {
+            description: "Verified provider event accepted or ignored",
+            content: { "application/json": { schema: { type: "object" } } },
+          },
+          "401": {
+            description: "Invalid webhook signature or payload",
+            content: {
+              "application/json": { schema: jsonSchema(errorResponseSchema) },
+            },
+          },
+          "503": {
+            description: "Verified event could not be persisted",
+            content: {
+              "application/json": { schema: jsonSchema(errorResponseSchema) },
+            },
+          },
+        },
+      },
+    },
     "/support/cases": {
       get: {
         responses: {

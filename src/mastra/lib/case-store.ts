@@ -18,15 +18,24 @@ import {
 import { activeDispatchLeaseScope } from "./dispatch-lease-scope";
 import type { DispatchLeaseScope } from "./dispatch-lease-scope";
 
+const MAX_INTERCOM_PROVIDER_RETRY_DELAY_MS = 30 * 24 * 60 * 60 * 1_000;
+const MAX_INTERCOM_FALLBACK_RETRY_DELAY_MS = 60_000;
+
 export type DispatchState =
   "pending" | "claimed" | "completed" | "suspended" | "failed";
-export type OutboxState = "pending" | "claimed" | "delivered" | "failed";
+export type OutboxState =
+  "pending" | "claimed" | "started" | "delivered" | "failed" | "uncertain";
+export type OutboxOperation = "reply" | "note" | "status" | "ticket";
 export interface OutboxRecord {
   id: string;
   caseId: string;
   binding: ProviderBinding;
   body: string;
   status: string;
+  operation?: OutboxOperation;
+  /** Hash of the immutable operation payload.  A retry cannot mutate it. */
+  payloadFingerprint?: string;
+  nextAttemptAt?: string;
   state: OutboxState;
   attempts: number;
   receipt?: unknown;
@@ -198,6 +207,15 @@ function scopedEventId(binding: ProviderBinding, eventId: string) {
     .digest("hex")}`;
 }
 
+/** Provider message IDs are only unique within their conversation/account.
+ * The app-owned retention mirror has one physical primary key, so qualify its
+ * storage key without changing the domain-visible message identity. */
+function scopedMessageId(caseId: string, messageId: string) {
+  return `message_${createHash("sha256")
+    .update(JSON.stringify([caseId, messageId]))
+    .digest("hex")}`;
+}
+
 export function isRetentionTombstone(supportCase: SupportCase) {
   return (
     (supportCase.metadata as Record<string, unknown>).retentionRedactedAt !==
@@ -226,7 +244,7 @@ export class CaseStore {
   async close() {
     if (this.ownsClient) this.client.close();
   }
-  async migrate(target = 12): Promise<void> {
+  async migrate(target = 13): Promise<void> {
     await this.client.execute(
       "CREATE TABLE IF NOT EXISTS support_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
     );
@@ -234,7 +252,7 @@ export class CaseStore {
       "SELECT version FROM support_schema_migrations ORDER BY version",
     );
     let version = Number(applied.rows.at(-1)?.version ?? 0);
-    if (!Number.isInteger(target) || target < 0 || target > 12)
+    if (!Number.isInteger(target) || target < 0 || target > 13)
       throw new Error("Unsupported support schema target version.");
     // Versions 6 through 8 introduced append-only turn, decision, and audit
     // records. Their inverse would discard or weaken durable financial/replay
@@ -314,6 +332,10 @@ export class CaseStore {
     }
     if (version === 12) {
       await this.up12();
+      return;
+    }
+    if (version === 13) {
+      await this.up13();
       return;
     }
     await this.client.execute({
@@ -826,6 +848,62 @@ export class CaseStore {
       args: [now()],
     });
   }
+  /** Additive outbox evolution.  Legacy rows retain their original binding
+   * and are explicitly represented as reply operations; no provider route is
+   * reinterpreted during migration. */
+  private async up13() {
+    const tx = await this.client.transaction("write");
+    try {
+      for (const sql of [
+        "ALTER TABLE support_outbox ADD COLUMN operation TEXT NOT NULL DEFAULT 'reply'",
+        "ALTER TABLE support_outbox ADD COLUMN payload_fingerprint TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE support_outbox ADD COLUMN next_attempt_at TEXT",
+      ])
+        try {
+          await tx.execute(sql);
+        } catch (error) {
+          if (!String(error).includes("duplicate column")) throw error;
+        }
+      await tx.executeMultiple(`
+        CREATE TABLE IF NOT EXISTS support_outbox_account_limits (
+          tenant_id TEXT NOT NULL, provider_kind TEXT NOT NULL, provider_account_id TEXT NOT NULL,
+          blocked_until TEXT NOT NULL, updated_at TEXT NOT NULL,
+          PRIMARY KEY(tenant_id, provider_kind, provider_account_id)
+        );
+        CREATE INDEX IF NOT EXISTS support_outbox_claimable_v13 ON support_outbox(state, next_attempt_at, created_at);
+      `);
+      const rows = await tx.execute(
+        "SELECT id, binding, body, status, operation, payload_fingerprint FROM support_outbox",
+      );
+      for (const row of rows.rows) {
+        const operation = String(row.operation || "reply");
+        const fingerprint = createHash("sha256")
+          .update(
+            JSON.stringify({
+              binding: JSON.parse(String(row.binding)),
+              operation,
+              body: String(row.body),
+              status: String(row.status),
+            }),
+          )
+          .digest("hex");
+        await tx.execute({
+          sql: "UPDATE support_outbox SET payload_fingerprint = ? WHERE id = ? AND payload_fingerprint = ''",
+          args: [fingerprint, String(row.id)],
+        });
+      }
+      await tx.execute({
+        sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (13, ?)",
+        args: [now()],
+      });
+      await tx.commit();
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
   private async down(version: number) {
     if (version === 3) {
       const count = await this.client.execute(
@@ -1280,7 +1358,7 @@ export class CaseStore {
       await tx.execute({
         sql: "INSERT OR IGNORE INTO support_messages(id, case_id, data, created_at) VALUES (?, ?, ?, ?)",
         args: [
-          input.message.id,
+          scopedMessageId(input.caseId, input.message.id),
           input.caseId,
           JSON.stringify(input.message),
           input.message.createdAt,
@@ -1467,7 +1545,7 @@ export class CaseStore {
         await tx.execute({
           sql: "INSERT INTO support_messages(id, case_id, data, created_at) VALUES (?, ?, ?, ?)",
           args: [
-            message.id,
+            scopedMessageId(persisted.id, message.id),
             persisted.id,
             JSON.stringify(message),
             message.createdAt,
@@ -1522,14 +1600,25 @@ export class CaseStore {
   }
   async enqueueDelivery(record: Omit<OutboxRecord, "state" | "attempts">) {
     await this.ensured();
+    const operation = record.operation ?? "reply";
+    const payloadFingerprint =
+      record.payloadFingerprint ??
+      this.outboxFingerprint(
+        record.binding,
+        operation,
+        record.body,
+        record.status,
+      );
     await this.client.execute({
-      sql: "INSERT INTO support_outbox(id, case_id, binding, body, status, state, originating_turn_id, originating_run_id, originating_trace_id, correlation_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
+      sql: "INSERT INTO support_outbox(id, case_id, binding, body, status, operation, payload_fingerprint, state, originating_turn_id, originating_run_id, originating_trace_id, correlation_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
       args: [
         record.id,
         record.caseId,
         JSON.stringify(record.binding),
         record.body,
         record.status,
+        operation,
+        payloadFingerprint,
         record.originatingTurnId ?? null,
         record.originatingRunId ?? null,
         record.originatingTraceId ?? null,
@@ -1550,6 +1639,7 @@ export class CaseStore {
     escalationReason?: string;
     message: CaseMessage;
     outbox: Omit<OutboxRecord, "state" | "attempts">;
+    additionalOutbox?: Array<Omit<OutboxRecord, "state" | "attempts">>;
   }) {
     await this.ensured();
     const tx = await this.client.transaction("write");
@@ -1671,8 +1761,17 @@ export class CaseStore {
           input.caseId,
         ],
       });
+      const operation = input.outbox.operation ?? "reply";
+      const payloadFingerprint =
+        input.outbox.payloadFingerprint ??
+        this.outboxFingerprint(
+          input.outbox.binding,
+          operation,
+          input.outbox.body,
+          input.outbox.status,
+        );
       const prior = await tx.execute({
-        sql: "SELECT case_id, binding, body, status, originating_turn_id, originating_run_id, originating_trace_id, correlation_state FROM support_outbox WHERE id = ?",
+        sql: "SELECT case_id, binding, body, status, operation, payload_fingerprint, originating_turn_id, originating_run_id, originating_trace_id, correlation_state FROM support_outbox WHERE id = ?",
         args: [input.outbox.id],
       });
       if (prior.rows[0]) {
@@ -1681,20 +1780,78 @@ export class CaseStore {
           String(existing.case_id) !== input.caseId ||
           String(existing.body) !== input.outbox.body ||
           String(existing.status) !== input.outbox.status ||
-          String(existing.binding) !== JSON.stringify(input.outbox.binding)
+          String(existing.binding) !== JSON.stringify(input.outbox.binding) ||
+          String(existing.operation ?? "reply") !== operation ||
+          String(existing.payload_fingerprint ?? "") !== payloadFingerprint
         )
           throw new Error(
             "Conflicting replay attempted to enqueue a delivery.",
           );
       } else {
         await tx.execute({
-          sql: "INSERT INTO support_outbox(id, case_id, binding, body, status, state, originating_turn_id, originating_run_id, originating_trace_id, correlation_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
+          sql: "INSERT INTO support_outbox(id, case_id, binding, body, status, operation, payload_fingerprint, state, originating_turn_id, originating_run_id, originating_trace_id, correlation_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
           args: [
             input.outbox.id,
             input.caseId,
             JSON.stringify(input.outbox.binding),
             input.outbox.body,
             input.outbox.status,
+            operation,
+            payloadFingerprint,
+            input.turnId,
+            priorOutcome.rows[0]?.run_id
+              ? String(priorOutcome.rows[0].run_id)
+              : null,
+            typeof existingOutcome?.telemetry?.traceId === "string"
+              ? existingOutcome.telemetry.traceId
+              : null,
+            typeof existingOutcome?.telemetry?.traceId === "string"
+              ? "known"
+              : "unknown",
+            now(),
+            now(),
+          ],
+        });
+      }
+      for (const extra of input.additionalOutbox ?? []) {
+        const extraOperation = extra.operation ?? "reply";
+        const extraFingerprint =
+          extra.payloadFingerprint ??
+          this.outboxFingerprint(
+            extra.binding,
+            extraOperation,
+            extra.body,
+            extra.status,
+          );
+        const existing = await tx.execute({
+          sql: "SELECT case_id, binding, body, status, operation, payload_fingerprint FROM support_outbox WHERE id = ?",
+          args: [extra.id],
+        });
+        if (existing.rows[0]) {
+          const row = existing.rows[0] as Record<string, unknown>;
+          if (
+            String(row.case_id) !== input.caseId ||
+            String(row.binding) !== JSON.stringify(extra.binding) ||
+            String(row.body) !== extra.body ||
+            String(row.status) !== extra.status ||
+            String(row.operation ?? "reply") !== extraOperation ||
+            String(row.payload_fingerprint ?? "") !== extraFingerprint
+          )
+            throw new Error(
+              "Conflicting replay attempted to enqueue an additional delivery.",
+            );
+          continue;
+        }
+        await tx.execute({
+          sql: "INSERT INTO support_outbox(id, case_id, binding, body, status, operation, payload_fingerprint, state, originating_turn_id, originating_run_id, originating_trace_id, correlation_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
+          args: [
+            extra.id,
+            input.caseId,
+            JSON.stringify(extra.binding),
+            extra.body,
+            extra.status,
+            extraOperation,
+            extraFingerprint,
             input.turnId,
             priorOutcome.rows[0]?.run_id
               ? String(priorOutcome.rows[0].run_id)
@@ -2504,6 +2661,20 @@ export class CaseStore {
   async claimOutbox(limit = 10, excludeIds: readonly string[] = []) {
     await this.ensured();
     const claimedAt = now();
+    // A durable marker is written before a non-idempotent Intercom POST.  If a
+    // process disappears after that point, the remote effect is unknowable and
+    // must be escalated rather than reclaimed like an effectless local claim.
+    const interrupted = await this.client.execute({
+      sql: "SELECT id FROM support_outbox WHERE state = 'started' AND lease_until < ? AND json_extract(binding, '$.providerKind') = 'intercom'",
+      args: [claimedAt],
+    });
+    for (const row of interrupted.rows)
+      await this.markOutboxUncertain(
+        String(row.id),
+        "Intercom operation was interrupted after its durable start marker.",
+        undefined,
+        "started",
+      );
     const exhausted = await this.client.execute({
       sql: "SELECT case_id FROM support_outbox WHERE state = 'claimed' AND lease_until < ? AND attempts >= 3",
       args: [claimedAt],
@@ -2558,15 +2729,33 @@ export class CaseStore {
       ? ` AND id NOT IN (${excludeIds.map(() => "?").join(", ")})`
       : "";
     const rows = await this.client.execute({
-      sql: `SELECT * FROM support_outbox WHERE (state = 'pending' OR (state = 'claimed' AND lease_until < ?)) AND attempts < 3${excluded} ORDER BY created_at LIMIT ?`,
-      args: [claimedAt, ...excludeIds, limit],
+      // A rate limit blocks its whole provider account, not unrelated tenants.
+      // Within a case, earlier undelivered operations fence later operations.
+      sql: `SELECT candidate.* FROM support_outbox candidate
+        WHERE (candidate.state = 'pending' OR (candidate.state = 'claimed' AND candidate.lease_until < ?))
+          AND candidate.attempts < 3
+          AND (candidate.next_attempt_at IS NULL OR candidate.next_attempt_at <= ?)
+          AND NOT EXISTS (SELECT 1 FROM support_outbox_account_limits l WHERE l.tenant_id = json_extract(candidate.binding, '$.tenantId') AND l.provider_kind = json_extract(candidate.binding, '$.providerKind') AND l.provider_account_id = json_extract(candidate.binding, '$.providerAccountId') AND l.blocked_until > ?)
+          AND NOT EXISTS (SELECT 1 FROM support_outbox earlier WHERE earlier.case_id = candidate.case_id AND (earlier.created_at < candidate.created_at OR (earlier.created_at = candidate.created_at AND earlier.id < candidate.id)) AND earlier.state <> 'delivered')
+          ${excluded} ORDER BY candidate.created_at, candidate.id LIMIT ?`,
+      args: [claimedAt, claimedAt, claimedAt, ...excludeIds, limit],
     });
     const claimed: OutboxRecord[] = [];
     for (const row of rows.rows) {
       const leaseToken = crypto.randomUUID();
       const changed = await this.client.execute({
-        sql: "UPDATE support_outbox SET state = 'claimed', attempts = attempts + 1, lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND (state = 'pending' OR (state = 'claimed' AND lease_until < ?))",
-        args: [leaseUntil, leaseToken, claimedAt, String(row.id), claimedAt],
+        sql: `UPDATE support_outbox SET state = 'claimed', attempts = attempts + 1, lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND (state = 'pending' OR (state = 'claimed' AND lease_until < ?)) AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+          AND NOT EXISTS (SELECT 1 FROM support_outbox_account_limits l WHERE l.tenant_id = json_extract(support_outbox.binding, '$.tenantId') AND l.provider_kind = json_extract(support_outbox.binding, '$.providerKind') AND l.provider_account_id = json_extract(support_outbox.binding, '$.providerAccountId') AND l.blocked_until > ?)
+          AND NOT EXISTS (SELECT 1 FROM support_outbox earlier WHERE earlier.case_id = support_outbox.case_id AND (earlier.created_at < support_outbox.created_at OR (earlier.created_at = support_outbox.created_at AND earlier.id < support_outbox.id)) AND earlier.state <> 'delivered')`,
+        args: [
+          leaseUntil,
+          leaseToken,
+          claimedAt,
+          String(row.id),
+          claimedAt,
+          claimedAt,
+          claimedAt,
+        ],
       });
       if (Number(changed.rowsAffected) === 1)
         claimed.push({
@@ -2580,7 +2769,7 @@ export class CaseStore {
   async renewOutboxLease(id: string, leaseToken: string) {
     await this.ensured();
     const updated = await this.client.execute({
-      sql: "UPDATE support_outbox SET lease_until = ?, updated_at = ? WHERE id = ? AND lease_token = ? AND state = 'claimed'",
+      sql: "UPDATE support_outbox SET lease_until = ?, updated_at = ? WHERE id = ? AND lease_token = ? AND state IN ('claimed', 'started')",
       args: [
         new Date(Date.now() + 30_000).toISOString(),
         now(),
@@ -2598,11 +2787,96 @@ export class CaseStore {
         : [JSON.stringify(receipt), now(), id],
     });
   }
+  /** Durable pre-effect boundary for providers without a documented idempotency
+   * key.  It is intentionally not used by the local provider's recovery path. */
+  async markOutboxStarted(id: string, leaseToken: string) {
+    await this.ensured();
+    const changed = await this.client.execute({
+      sql: "UPDATE support_outbox SET state = 'started', updated_at = ? WHERE id = ? AND state = 'claimed' AND lease_token = ? AND lease_until > ?",
+      args: [now(), id, leaseToken, now()],
+    });
+    return Number(changed.rowsAffected) === 1;
+  }
+  /** A POST with an unknown outcome is never eligible for automatic replay.
+   * Persist it visibly and project an escalation marker for staff recovery. */
+  async markOutboxUncertain(
+    id: string,
+    error: unknown,
+    leaseToken?: string,
+    expectedState?: "claimed" | "started",
+  ) {
+    await this.ensured();
+    const tx = await this.client.transaction("write");
+    try {
+      const changed = await tx.execute({
+        sql: `UPDATE support_outbox SET state = 'uncertain', last_error = ?, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE id = ?${leaseToken ? " AND lease_token = ?" : ""}${expectedState ? " AND state = ?" : ""}`,
+        args: [
+          String(error),
+          now(),
+          id,
+          ...(leaseToken ? [leaseToken] : []),
+          ...(expectedState ? [expectedState] : []),
+        ],
+      });
+      if (Number(changed.rowsAffected) !== 1) {
+        await tx.rollback();
+        return false;
+      }
+      const outbox = await tx.execute({
+        sql: "SELECT case_id FROM support_outbox WHERE id = ?",
+        args: [id],
+      });
+      const caseId = outbox.rows[0]
+        ? String(outbox.rows[0].case_id)
+        : undefined;
+      if (caseId) {
+        const row = await tx.execute({
+          sql: "SELECT data, version FROM support_cases WHERE id = ?",
+          args: [caseId],
+        });
+        if (row.rows[0]) {
+          const current = parse(row.rows[0] as Record<string, unknown>);
+          const updated = this.withBindings({
+            ...current,
+            status: "escalated",
+            escalationReason:
+              "Outbound Intercom effect has an uncertain remote outcome and requires manual reconciliation.",
+            metadata: {
+              ...current.metadata,
+              deliveryStatus: "uncertain",
+              deliveryError: String(error),
+            },
+            updatedAt: now(),
+          });
+          const write = await tx.execute({
+            sql: "UPDATE support_cases SET data = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+            args: [
+              JSON.stringify(updated),
+              updated.updatedAt,
+              caseId,
+              Number(row.rows[0].version ?? 1),
+            ],
+          });
+          if (Number(write.rowsAffected) !== 1)
+            throw new StaleCaseWriteError(caseId);
+        }
+      }
+      await tx.commit();
+      return true;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
   async retryOutbox(
     id: string,
     error: unknown,
     terminal = false,
     leaseToken?: string,
+    retryAfterMs?: number,
+    rateLimited = false,
   ) {
     await this.ensured();
     const tx = await this.client.transaction("write");
@@ -2610,17 +2884,73 @@ export class CaseStore {
       // The terminal case projection is part of the same fenced transition as
       // the outbox row.  A stale worker therefore cannot overwrite the case
       // after the current owner has delivered the item.
+      const outboxRow = await tx.execute({
+        sql: "SELECT binding, attempts FROM support_outbox WHERE id = ?",
+        args: [id],
+      });
+      const binding = outboxRow.rows[0]
+        ? (JSON.parse(String(outboxRow.rows[0].binding)) as ProviderBinding)
+        : undefined;
+      const providerDelayIsValid =
+        retryAfterMs === undefined ||
+        (Number.isFinite(retryAfterMs) &&
+          retryAfterMs >= 0 &&
+          retryAfterMs <= MAX_INTERCOM_PROVIDER_RETRY_DELAY_MS);
+      if (
+        !terminal &&
+        binding?.providerKind === "intercom" &&
+        !providerDelayIsValid
+      ) {
+        // A provider-directed delay we cannot represent must be surfaced as a
+        // terminal local failure. Never silently bring the retry forward.
+        terminal = true;
+        error = `Permanent: Intercom provider retry delay is outside scheduler bounds. ${String(error)}`;
+      }
+      // Provider-directed waits are retained exactly. Exponential fallback is
+      // separately bounded for local operational recovery.
+      const retryDelayMs =
+        retryAfterMs ??
+        Math.min(
+          Math.max(
+            1_000 * 2 ** Number(outboxRow.rows[0]?.attempts ?? 1),
+            1_000,
+          ),
+          MAX_INTERCOM_FALLBACK_RETRY_DELAY_MS,
+        );
+      const retryAt =
+        !terminal && binding?.providerKind === "intercom"
+          ? new Date(Date.now() + retryDelayMs).toISOString()
+          : null;
+      if (rateLimited && !terminal && binding?.providerKind === "intercom") {
+        await tx.execute({
+          sql: "INSERT INTO support_outbox_account_limits(tenant_id, provider_kind, provider_account_id, blocked_until, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(tenant_id, provider_kind, provider_account_id) DO UPDATE SET blocked_until = CASE WHEN excluded.blocked_until > blocked_until THEN excluded.blocked_until ELSE blocked_until END, updated_at = excluded.updated_at",
+          args: [
+            binding.tenantId,
+            binding.providerKind,
+            binding.providerAccountId,
+            retryAt!,
+            now(),
+          ],
+        });
+      }
       const changed = await tx.execute({
-        sql: `UPDATE support_outbox SET state = ?, last_error = ?, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE id = ?${leaseToken ? " AND lease_token = ?" : ""}`,
+        sql: `UPDATE support_outbox SET state = ?, last_error = ?, next_attempt_at = ?, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE id = ?${leaseToken ? " AND lease_token = ?" : ""}`,
         args: leaseToken
           ? [
               terminal ? "failed" : "pending",
               String(error),
+              retryAt,
               now(),
               id,
               leaseToken,
             ]
-          : [terminal ? "failed" : "pending", String(error), now(), id],
+          : [
+              terminal ? "failed" : "pending",
+              String(error),
+              retryAt,
+              now(),
+              id,
+            ],
       });
       if (Number(changed.rowsAffected) !== 1) {
         await tx.rollback();
@@ -2683,6 +3013,17 @@ export class CaseStore {
       binding: JSON.parse(String(row.binding)),
       body: String(row.body),
       status: String(row.status),
+      operation: ["reply", "note", "status", "ticket"].includes(
+        String(row.operation),
+      )
+        ? (String(row.operation) as OutboxOperation)
+        : "reply",
+      payloadFingerprint: row.payload_fingerprint
+        ? String(row.payload_fingerprint)
+        : undefined,
+      nextAttemptAt: row.next_attempt_at
+        ? String(row.next_attempt_at)
+        : undefined,
       state,
       attempts: Number(row.attempts) + 1,
       receipt: row.receipt ? JSON.parse(String(row.receipt)) : undefined,
@@ -2700,6 +3041,16 @@ export class CaseStore {
       correlationState:
         String(row.correlation_state) === "known" ? "known" : "unknown",
     };
+  }
+  private outboxFingerprint(
+    binding: ProviderBinding,
+    operation: OutboxOperation,
+    body: string,
+    status: string,
+  ) {
+    return createHash("sha256")
+      .update(JSON.stringify({ binding, operation, body, status }))
+      .digest("hex");
   }
   async saveAction(
     caseId: string,

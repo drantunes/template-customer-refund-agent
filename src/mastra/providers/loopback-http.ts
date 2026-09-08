@@ -21,7 +21,7 @@ import { z } from "zod";
 const bindingSchema = z
   .object({
     tenantId: z.string().min(1),
-    providerKind: z.literal("local"),
+    providerKind: z.enum(["local", "intercom"]),
     providerAccountId: z.string().min(1),
     externalConversationId: z.string().min(1),
   })
@@ -117,7 +117,7 @@ const normalizedInboundSchema = z
   .object({
     binding: bindingSchema,
     externalId: z.string().min(1),
-    source: z.enum(["mock-email", "chat"]),
+    source: z.enum(["mock-email", "chat", "intercom-conversation"]),
     customer: z
       .object({ email: z.string().min(1), name: z.string().optional() })
       .strict(),

@@ -32,6 +32,7 @@ import { knowledgePublicationStore } from "../lib/knowledge-publications";
 import { withTrustedCaseReadScope } from "../lib/trusted-run-scope";
 import { publishKnowledge } from "../lib/publish-knowledge";
 import { traceOperationalPort } from "../lib/operational-spans";
+import { intercomDevelopmentConfig } from "../providers/intercom/config";
 
 const caseIdSchema = z.object({ caseId: z.string(), turnId: z.string() });
 
@@ -1119,6 +1120,53 @@ const resolveCaseStep = createStep({
         body: finalResponse,
         status,
       },
+      additionalOutbox:
+        bindingsForPersistedCase(supportCase).support.providerKind ===
+        "intercom"
+          ? [
+              ...(status === "escalated"
+                ? [
+                    {
+                      id: `outbox_${supportCase.id}_${inputData.turnId}_note`,
+                      caseId: supportCase.id,
+                      binding: resolveConfiguredBinding(
+                        bindingsForPersistedCase(supportCase).support,
+                      ),
+                      body:
+                        escalationReason ??
+                        "Support escalation requires staff review.",
+                      status,
+                      operation: "note" as const,
+                    },
+                  ]
+                : []),
+              {
+                id: `outbox_${supportCase.id}_${inputData.turnId}_status`,
+                caseId: supportCase.id,
+                binding: resolveConfiguredBinding(
+                  bindingsForPersistedCase(supportCase).support,
+                ),
+                body: "",
+                status,
+                operation: "status" as const,
+              },
+              ...(status === "escalated" &&
+              intercomDevelopmentConfig()?.ticketTypeId
+                ? [
+                    {
+                      id: `outbox_${supportCase.id}_${inputData.turnId}_ticket`,
+                      caseId: supportCase.id,
+                      binding: resolveConfiguredBinding(
+                        bindingsForPersistedCase(supportCase).support,
+                      ),
+                      body: escalationReason ?? "Support escalation",
+                      status: supportCase.subject,
+                      operation: "ticket" as const,
+                    },
+                  ]
+                : []),
+            ]
+          : undefined,
     });
     await deliverOutbox(undefined, 10, caseStore, { mastra }).catch((error) =>
       mastra
