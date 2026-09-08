@@ -238,6 +238,175 @@ describe("Phase 005 fenced outbox", () => {
     await value.close();
   });
 
+  it("retries a known failed Conversation preflight without issuing a POST", async () => {
+    vi.useFakeTimers();
+    for (const failure of ["http", "network"] as const) {
+      vi.setSystemTime(new Date("2026-09-07T00:00:00.000Z"));
+      const value = await store();
+      const binding = {
+        tenantId: "tenant",
+        providerKind: "intercom" as const,
+        providerAccountId: "account",
+        externalConversationId: `conversation-${failure}`,
+      };
+      await value.enqueueDelivery({
+        id: `preflight-${failure}`,
+        caseId: `preflight-${failure}`,
+        binding,
+        body: "synthetic reply",
+        status: "resolved",
+        operation: "reply",
+      });
+      const config: IntercomDevelopmentConfig = {
+        enabled: true,
+        tenantId: "tenant",
+        accountId: "account",
+        accessToken: "synthetic-token",
+        clientSecret: "synthetic-secret",
+        adminId: "admin",
+        apiBaseUrl: "http://intercom.test",
+        knowledgeEnabled: false,
+      };
+      let reads = 0;
+      let posts = 0;
+      const support = new IntercomSupportProvider(
+        config,
+        new IntercomClient(config, async (_input, init) => {
+          if (init?.method === "GET") {
+            reads += 1;
+            if (reads === 1) {
+              if (failure === "network") throw new TypeError("network down");
+              return new Response("", { status: 503 });
+            }
+            return Response.json({
+              type: "conversation",
+              id: binding.externalConversationId,
+              conversation_parts: { conversation_parts: [], total_count: 0 },
+            });
+          }
+          posts += 1;
+          return Response.json({
+            type: "conversation",
+            id: binding.externalConversationId,
+            conversation_parts: {
+              conversation_parts: [
+                {
+                  id: `reply-${failure}`,
+                  part_type: "comment",
+                  author: { type: "admin", id: "admin" },
+                  body: "synthetic reply",
+                },
+              ],
+              total_count: 1,
+            },
+          });
+        }),
+      );
+      const registry = {
+        support: () => support,
+        commerce: () => {
+          throw new Error("not used");
+        },
+        transactions: () => {
+          throw new Error("not used");
+        },
+        knowledge: () => {
+          throw new Error("not used");
+        },
+      } satisfies ProviderRegistry;
+
+      await deliverOutbox(registry, 10, value);
+      expect(posts).toBe(0);
+      expect(
+        await value.getClientForTests().execute({
+          sql: "SELECT state, attempts, next_attempt_at FROM support_outbox WHERE id = ?",
+          args: [`preflight-${failure}`],
+        }),
+      ).toMatchObject({
+        rows: [
+          {
+            state: "pending",
+            attempts: 1,
+            next_attempt_at: "2026-09-07T00:00:02.000Z",
+          },
+        ],
+      });
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await deliverOutbox(registry, 10, value);
+      expect(posts).toBe(1);
+      expect(
+        await value.getClientForTests().execute({
+          sql: "SELECT state, attempts FROM support_outbox WHERE id = ?",
+          args: [`preflight-${failure}`],
+        }),
+      ).toMatchObject({ rows: [{ state: "delivered", attempts: 2 }] });
+      await value.close();
+    }
+  });
+
+  it("quarantines blank Ticket conversion receipts without replaying their POST", async () => {
+    for (const id of ["", " "]) {
+      const value = await store();
+      const binding = {
+        tenantId: "tenant",
+        providerKind: "intercom" as const,
+        providerAccountId: "account",
+        externalConversationId: `ticket-${JSON.stringify(id)}`,
+      };
+      await value.enqueueDelivery({
+        id: `ticket-${JSON.stringify(id)}`,
+        caseId: `ticket-${JSON.stringify(id)}`,
+        binding,
+        body: "synthetic escalation",
+        status: "Need staff review",
+        operation: "ticket",
+      });
+      const config: IntercomDevelopmentConfig = {
+        enabled: true,
+        tenantId: "tenant",
+        accountId: "account",
+        accessToken: "synthetic-token",
+        clientSecret: "synthetic-secret",
+        adminId: "admin",
+        apiBaseUrl: "http://intercom.test",
+        knowledgeEnabled: false,
+        ticketTypeId: "ticket-type",
+      };
+      let posts = 0;
+      const support = new IntercomSupportProvider(
+        config,
+        new IntercomClient(config, async (_input, init) => {
+          if (init?.method === "POST") posts += 1;
+          return Response.json({ id });
+        }),
+      );
+      const registry = {
+        support: () => support,
+        commerce: () => {
+          throw new Error("not used");
+        },
+        transactions: () => {
+          throw new Error("not used");
+        },
+        knowledge: () => {
+          throw new Error("not used");
+        },
+      } satisfies ProviderRegistry;
+
+      await deliverOutbox(registry, 10, value);
+      await deliverOutbox(registry, 10, value);
+      expect(posts).toBe(1);
+      expect(
+        await value.getClientForTests().execute({
+          sql: "SELECT state, receipt FROM support_outbox WHERE id = ?",
+          args: [`ticket-${JSON.stringify(id)}`],
+        }),
+      ).toMatchObject({ rows: [{ state: "uncertain", receipt: null }] });
+      await value.close();
+    }
+  });
+
   it("quarantines a successful Intercom POST when receipt persistence fails, including after restart", async () => {
     const path = join(tmpdir(), `phase005-outbox-${crypto.randomUUID()}.db`);
     files.push(path, `${path}-wal`, `${path}-shm`);

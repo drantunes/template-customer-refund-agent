@@ -12,6 +12,8 @@ export class IntercomHttpError extends Error {
     readonly retryAfterMs?: number,
     readonly ambiguous = false,
     message?: string,
+    /** The request method is set by this client for reliable preflight handling. */
+    readonly requestMethod?: string,
   ) {
     super(message ?? `Intercom request failed with HTTP ${status}.`);
   }
@@ -36,6 +38,7 @@ export class IntercomClient {
     init: RequestInit = {},
     schema?: z.ZodType<T>,
   ): Promise<T> {
+    const requestMethod = (init.method ?? "GET").toUpperCase();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8_000);
     try {
@@ -62,7 +65,13 @@ export class IntercomClient {
       } catch {
         // A request write may already have reached Intercom.  The caller must
         // persist uncertainty rather than replaying a POST.
-        throw new IntercomHttpError(0, undefined, init.method === "POST");
+        throw new IntercomHttpError(
+          0,
+          undefined,
+          requestMethod === "POST",
+          undefined,
+          requestMethod,
+        );
       }
       if (!response.ok) {
         let retryAfterMs: number | undefined;
@@ -74,6 +83,7 @@ export class IntercomClient {
             undefined,
             false,
             `Permanent: ${String(error)}`,
+            requestMethod,
           );
         }
         // Parse only enough to exercise malformed-error handling; never expose it.
@@ -85,15 +95,19 @@ export class IntercomClient {
         throw new IntercomHttpError(
           response.status,
           retryAfterMs,
-          init.method === "POST" &&
+          requestMethod === "POST" &&
             (response.status === 408 || response.status >= 500),
+          undefined,
+          requestMethod,
         );
       }
       const body = await response.json().catch(() => {
         throw new IntercomHttpError(
           response.status,
           undefined,
-          init.method === "POST",
+          requestMethod === "POST",
+          undefined,
+          requestMethod,
         );
       });
       if (!schema) return body as T;
@@ -104,7 +118,9 @@ export class IntercomClient {
         throw new IntercomHttpError(
           response.status,
           undefined,
-          init.method === "POST",
+          requestMethod === "POST",
+          undefined,
+          requestMethod,
         );
       }
       return parsed.data;

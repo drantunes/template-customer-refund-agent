@@ -1094,10 +1094,16 @@ export async function deliverOutbox(
         !error.ambiguous &&
         error.status >= 400 &&
         error.status < 500;
+      // IntercomClient records the request method on its errors. A failed
+      // Conversation GET has not entered a mutation boundary, even though the
+      // durable intent marker was written before invoking the support adapter.
+      const knownPreMutationIntercomReadFailure =
+        error instanceof IntercomHttpError && error.requestMethod === "GET";
       if (
         item.binding.providerKind === "intercom" &&
         intercomEffectMayHaveOccurred &&
-        !safeIntercomNegativeResponse
+        !safeIntercomNegativeResponse &&
+        !knownPreMutationIntercomReadFailure
       ) {
         // Includes receipt-persistence failures after a successful POST and
         // malformed/missing receipt correlation. If this durable quarantine

@@ -38,7 +38,7 @@ const conversationResponse = z
   .passthrough();
 const ticketResponse = z
   .object({
-    id: z.union([z.string(), z.number()]),
+    id: providerId,
     ticket_id: z.union([z.string(), z.number()]).optional(),
   })
   .passthrough();

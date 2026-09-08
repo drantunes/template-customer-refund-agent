@@ -181,6 +181,39 @@ describe("Intercom v2.16 support contract", () => {
     });
   });
 
+  it("requires a usable Ticket API id while preserving valid string and numeric ids", async () => {
+    for (const id of ["api-ticket", 42] as const) {
+      const support = new IntercomSupportProvider(
+        config,
+        new IntercomClient(config, async () => Response.json({ id })),
+      );
+      await expect(
+        support.convertToTicket!(
+          binding,
+          { title: "Need review", description: "reason" },
+          "ignored",
+        ),
+      ).resolves.toMatchObject({
+        receiptId: `intercom:ticket:${id}`,
+        providerMessageId: String(id),
+      });
+    }
+
+    for (const id of ["", " "]) {
+      const support = new IntercomSupportProvider(
+        config,
+        new IntercomClient(config, async () => Response.json({ id })),
+      );
+      await expect(
+        support.convertToTicket!(
+          binding,
+          { title: "Need review", description: "reason" },
+          "ignored",
+        ),
+      ).rejects.toMatchObject({ status: 200, ambiguous: true });
+    }
+  });
+
   it("preserves valid string and numeric provider part IDs exactly", async () => {
     for (const [partId, expected] of [
       ["part-with-spacing ", "part-with-spacing "],
@@ -463,7 +496,11 @@ describe("Intercom v2.16 support contract", () => {
     );
     await expect(
       support.deliver(binding, "Never sent.", "resolved", "ignored"),
-    ).rejects.toMatchObject({ status: 500, ambiguous: false });
+    ).rejects.toMatchObject({
+      status: 500,
+      ambiguous: false,
+      requestMethod: "GET",
+    });
     expect(posts).toBe(0);
   });
 
