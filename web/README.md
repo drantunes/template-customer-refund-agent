@@ -5,9 +5,8 @@ A Vite + React + [shadcn/ui](https://ui.shadcn.com) app that shows the `mastra-c
 ## Pages
 
 - **`/`**: explainer showing how a case flows through the pipeline and which Mastra primitives are used.
-- **`/portal`**: customer-facing. Send a support message (or fire a canned example email), watch the case resolve in real time, and rate the resolution once it closes.
+- **`/portal`**: customer-facing. Send a support message, follow it in the same case, and see when a refund is waiting for an approval decision.
 - **`/admin`**: support-admin queue. See everything the AI found (triage, retrieved policy, order/subscription data, drafted reply) and approve or reject pending refunds.
-- **`/monitoring`**: containment/escalation rates, refund approvals, customer feedback, token cost, and tool latency/error stats - derived from the case store and Mastra's observability spans.
 
 ## Run it
 

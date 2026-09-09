@@ -1,6 +1,7 @@
 import type { LanguageModelV2 } from "@ai-sdk/provider";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { rm } from "node:fs/promises";
+import { temporaryDatabasePath } from "../support/temp-path";
 
 const files: string[] = [];
 
@@ -74,7 +75,7 @@ afterEach(async () => {
 
 describe("native issue_refund approval", () => {
   it("suspends the real Agent before one authenticated approval creates one effect", async () => {
-    const path = `/private/tmp/phase003-native-${crypto.randomUUID()}.db`;
+    const path = temporaryDatabasePath("phase003-native");
     files.push(path, `${path}-shm`, `${path}-wal`);
     process.env.TURSO_DATABASE_URL = `file:${path}`;
     process.env.SUPPORT_SOURCE = "mock";
@@ -245,7 +246,7 @@ describe("native issue_refund approval", () => {
   });
 
   it("suspends the real Agent and a recorded rejection creates no effect", async () => {
-    const path = `/private/tmp/phase003-native-${crypto.randomUUID()}.db`;
+    const path = temporaryDatabasePath("phase003-native");
     files.push(path, `${path}-shm`, `${path}-wal`);
     process.env.TURSO_DATABASE_URL = `file:${path}`;
     process.env.SUPPORT_SOURCE = "mock";

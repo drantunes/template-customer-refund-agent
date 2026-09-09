@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
 import { serve } from "@hono/node-server";
 import { once } from "node:events";
-import { rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
+import { resolve } from "node:path";
 import { Hono } from "hono";
 import { RequestContext } from "@mastra/core/request-context";
 import {
@@ -9,8 +10,21 @@ import {
   deterministicRefundModel,
   type DeterministicRefundModel,
 } from "../fixtures/deterministic-language-model";
+import { temporaryDatabasePath } from "../support/temp-path";
 
 type Runtime = Awaited<ReturnType<typeof loadDeterministicRuntime>>;
+const captureDocumentationScreenshots =
+  process.env.CAPTURE_LOCAL_DEMO_SCREENSHOTS === "1";
+
+async function captureDocumentationScreenshot(
+  page: import("@playwright/test").Page,
+  name: "local-demo-portal.png" | "local-demo-admin.png",
+) {
+  if (!captureDocumentationScreenshots) return;
+  const assets = resolve(import.meta.dirname, "../../docs/assets");
+  await mkdir(assets, { recursive: true });
+  await page.screenshot({ path: resolve(assets, name), fullPage: true });
+}
 
 const requestedApiPort = process.env.E2E_API_PORT ?? "4111";
 const e2eApiPort = Number(requestedApiPort);
@@ -18,10 +32,11 @@ if (!Number.isInteger(e2eApiPort) || e2eApiPort < 1 || e2eApiPort > 65_535)
   throw new Error("E2E_API_PORT must be an integer from 1 through 65535.");
 
 async function loadDeterministicRuntime() {
-  const databasePath = `/private/tmp/phase003-e2e-${crypto.randomUUID()}.db`;
+  const databasePath = temporaryDatabasePath("phase003-e2e");
   process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
   delete process.env.TURSO_AUTH_TOKEN;
   process.env.SUPPORT_SOURCE = "mock";
+  process.env.COMMERCE_SOURCE = "mock";
   process.env.PHASE003_DISABLE_EVALS = "1";
   process.env.LOCAL_AUTH_SIGNING_KEY =
     "phase003-playwright-signing-key-must-be-at-least-32-characters";
@@ -122,6 +137,10 @@ async function startSupportApi(runtime: Runtime) {
   app.post(
     "/support/cases/:caseId/feedback",
     routes.supportCaseFeedbackRoute.handler,
+  );
+  app.get(
+    "/support/monitoring/summary",
+    routes.supportMonitoringSummaryRoute.handler,
   );
   const server = serve({
     fetch: app.fetch,
@@ -340,6 +359,10 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
           )?.status,
       )
       .toBe("waiting_approval");
+    await expect(
+      page.getByText("A refund was recommended and is waiting for approval."),
+    ).toBeVisible();
+    await captureDocumentationScreenshot(page, "local-demo-portal.png");
     const supportCase = (await runtime.caseStore.list()).find((entry) =>
       entry.id.startsWith("case_"),
     )!;
@@ -407,6 +430,23 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
     await signIn(page, "approver@local.test", "local-approver");
     await expect(page.getByText("Refund approval requested")).toBeVisible();
     await expect(page.locator("code")).toContainText(fingerprint);
+    await expect(page.getByRole("heading", { name: "Monitoring" })).toHaveCount(
+      0,
+    );
+    expect(
+      await page.evaluate(async () => {
+        const session = JSON.parse(
+          localStorage.getItem("support-demo:session") ?? "{}",
+        );
+        return (
+          await fetch("/support/monitoring/summary", {
+            headers: { authorization: `Bearer ${session.token}` },
+          })
+        ).status;
+      }),
+    ).toBe(403);
+    await expect(page.getByText(/Request failed:/)).toHaveCount(0);
+    await captureDocumentationScreenshot(page, "local-demo-admin.png");
     await page.getByRole("button", { name: "Approve refund" }).click();
     await expect(page.getByText("Refund approved")).toBeVisible();
     await expect

@@ -5,12 +5,13 @@ import { LibSQLStore } from "@mastra/libsql";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CaseStore } from "../../src/mastra/lib/case-store";
 import { purgeExpiredWorkflowSnapshots } from "../../src/mastra/runtime/local-runtime";
+import { temporaryDatabasePath } from "../support/temp-path";
 
 const files: string[] = [];
 const execFileAsync = promisify(execFile);
 
 async function storeForTest() {
-  const path = `/private/tmp/phase003-retention-${crypto.randomUUID()}.db`;
+  const path = temporaryDatabasePath("phase003-retention");
   files.push(path, `${path}-shm`, `${path}-wal`);
   const store = new CaseStore({ url: `file:${path}` });
   await store.list();
@@ -767,7 +768,7 @@ describe("DEC-015 retention", () => {
   });
 
   it("runs the local-only CLI against the same bounded durable cleanup contract", async () => {
-    const path = `/private/tmp/phase003-retention-cli-${crypto.randomUUID()}.db`;
+    const path = temporaryDatabasePath("phase003-retention-cli");
     files.push(path, `${path}-shm`, `${path}-wal`);
     const store = new CaseStore({ url: `file:${path}` });
     const old = "2025-05-01T00:00:00.000Z";
@@ -898,7 +899,7 @@ describe("DEC-015 retention", () => {
   });
 
   it("upgrades populated v6/v7 turn history through v9 and refuses every unsupported downgrade without mutation", async () => {
-    const path = `/private/tmp/phase003-migration-${crypto.randomUUID()}.db`;
+    const path = temporaryDatabasePath("phase003-migration");
     files.push(path, `${path}-shm`, `${path}-wal`);
     const store = new CaseStore({ url: `file:${path}` });
     await store.migrate(6);
@@ -999,7 +1000,7 @@ describe("DEC-015 retention", () => {
   });
 
   it("rolls back an ambiguous v9 canonical migration before markers or data change, then backfills trusted acceptance evidence", async () => {
-    const path = `/private/tmp/phase003-v9-conflict-${crypto.randomUUID()}.db`;
+    const path = temporaryDatabasePath("phase003-v9-conflict");
     files.push(path, `${path}-shm`, `${path}-wal`);
     const store = new CaseStore({ url: `file:${path}` });
     await store.migrate(8);

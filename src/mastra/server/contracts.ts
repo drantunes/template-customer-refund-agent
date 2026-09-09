@@ -50,7 +50,9 @@ export const feedbackRequestSchema = caseFeedbackSchema
     comment: true,
   })
   .extend({ responseMessageId: z.string().min(1) });
-export const errorResponseSchema = z.object({ error: z.string() });
+export const errorResponseSchema = z
+  .object({ error: z.string(), result: z.unknown().optional() })
+  .passthrough();
 export const reindexResponseSchema = z.object({
   indexed: z.number().int().nonnegative(),
 });
@@ -180,14 +182,31 @@ const caseIdParameter = {
 } as const;
 
 const jsonSchema = (schema: z.core.$ZodType) => z.toJSONSchema(schema);
+const errorResponse = (description: string) => ({
+  description,
+  content: {
+    "application/json": { schema: jsonSchema(errorResponseSchema) },
+  },
+});
 
 /** A derived OpenAPI 3.1 document used by the local route and contract checks. */
 export const supportOpenApiDocument = {
   openapi: "3.1.0",
   info: { title: "Support demo API", version: "0.1.0" },
+  components: {
+    securitySchemes: {
+      bearerAuth: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "Local session",
+      },
+    },
+  },
+  security: [{ bearerAuth: [] }],
   paths: {
     "/support/auth/login": {
       post: {
+        security: [],
         requestBody: {
           required: true,
           content: {
@@ -202,10 +221,10 @@ export const supportOpenApiDocument = {
             },
           },
           "401": {
-            description: "Invalid credentials",
-            content: {
-              "application/json": { schema: jsonSchema(errorResponseSchema) },
-            },
+            ...errorResponse("Invalid credentials"),
+          },
+          "400": {
+            ...errorResponse("Invalid JSON or credentials payload"),
           },
         },
       },
@@ -228,16 +247,26 @@ export const supportOpenApiDocument = {
             },
           },
           "400": {
-            description: "Invalid payload",
-            content: {
-              "application/json": { schema: jsonSchema(errorResponseSchema) },
-            },
+            ...errorResponse("Invalid inbound payload"),
+          },
+          "401": {
+            ...errorResponse("Authentication required"),
+          },
+          "403": {
+            ...errorResponse("Caller cannot create this case"),
+          },
+          "410": {
+            ...errorResponse("Expired case cannot accept new content"),
+          },
+          "500": {
+            ...errorResponse("Ingestion could not complete"),
           },
         },
       },
     },
     "/support/webhooks/intercom": {
       post: {
+        security: [],
         requestBody: {
           required: true,
           content: { "application/json": { schema: { type: "object" } } },
@@ -248,22 +277,29 @@ export const supportOpenApiDocument = {
             content: { "application/json": { schema: { type: "object" } } },
           },
           "401": {
-            description: "Invalid webhook signature or payload",
-            content: {
-              "application/json": { schema: jsonSchema(errorResponseSchema) },
-            },
+            ...errorResponse("Invalid webhook signature or payload"),
+          },
+          "400": {
+            ...errorResponse("Malformed webhook body"),
+          },
+          "404": {
+            ...errorResponse("Intercom adapter is not enabled"),
+          },
+          "413": {
+            ...errorResponse("Webhook body exceeds the accepted size"),
+          },
+          "500": {
+            ...errorResponse("Webhook transport is unavailable"),
           },
           "503": {
-            description: "Verified event could not be persisted",
-            content: {
-              "application/json": { schema: jsonSchema(errorResponseSchema) },
-            },
+            ...errorResponse("Verified event could not be persisted"),
           },
         },
       },
     },
     "/support/webhooks/stripe": {
       post: {
+        security: [],
         requestBody: {
           required: true,
           content: { "application/json": { schema: { type: "object" } } },
@@ -274,16 +310,22 @@ export const supportOpenApiDocument = {
             content: { "application/json": { schema: { type: "object" } } },
           },
           "401": {
-            description: "Invalid Stripe webhook signature or payload",
-            content: {
-              "application/json": { schema: jsonSchema(errorResponseSchema) },
-            },
+            ...errorResponse("Invalid Stripe webhook signature or payload"),
+          },
+          "400": {
+            ...errorResponse("Malformed webhook body"),
+          },
+          "404": {
+            ...errorResponse("Stripe adapter is not enabled"),
+          },
+          "413": {
+            ...errorResponse("Webhook body exceeds the accepted size"),
+          },
+          "500": {
+            ...errorResponse("Webhook transport is unavailable"),
           },
           "503": {
-            description: "Verified Stripe event could not be reconciled",
-            content: {
-              "application/json": { schema: jsonSchema(errorResponseSchema) },
-            },
+            ...errorResponse("Verified Stripe event could not be reconciled"),
           },
         },
       },
@@ -299,6 +341,9 @@ export const supportOpenApiDocument = {
               },
             },
           },
+          "401": {
+            ...errorResponse("Authentication required"),
+          },
         },
       },
     },
@@ -313,10 +358,13 @@ export const supportOpenApiDocument = {
             },
           },
           "404": {
-            description: "Case not found",
-            content: {
-              "application/json": { schema: jsonSchema(errorResponseSchema) },
-            },
+            ...errorResponse("Case was not found"),
+          },
+          "401": {
+            ...errorResponse("Authentication required"),
+          },
+          "403": {
+            ...errorResponse("Caller cannot access this case"),
           },
         },
       },
@@ -325,7 +373,7 @@ export const supportOpenApiDocument = {
       post: {
         parameters: [caseIdParameter],
         requestBody: {
-          required: false,
+          required: true,
           content: {
             "application/json": { schema: jsonSchema(approvalRequestSchema) },
           },
@@ -336,6 +384,24 @@ export const supportOpenApiDocument = {
             content: {
               "application/json": { schema: jsonSchema(supportCaseSchema) },
             },
+          },
+          "400": {
+            ...errorResponse("Invalid approval payload"),
+          },
+          "401": {
+            ...errorResponse("Authentication required"),
+          },
+          "403": {
+            ...errorResponse("Caller is not an authorized approver"),
+          },
+          "404": {
+            ...errorResponse("Case was not found"),
+          },
+          "409": {
+            ...errorResponse("Approval command or workflow state is stale"),
+          },
+          "500": {
+            ...errorResponse("Approval resume failed"),
           },
         },
       },
@@ -344,7 +410,7 @@ export const supportOpenApiDocument = {
       post: {
         parameters: [caseIdParameter],
         requestBody: {
-          required: false,
+          required: true,
           content: {
             "application/json": { schema: jsonSchema(approvalRequestSchema) },
           },
@@ -355,6 +421,24 @@ export const supportOpenApiDocument = {
             content: {
               "application/json": { schema: jsonSchema(supportCaseSchema) },
             },
+          },
+          "400": {
+            ...errorResponse("Invalid approval payload"),
+          },
+          "401": {
+            ...errorResponse("Authentication required"),
+          },
+          "403": {
+            ...errorResponse("Caller is not an authorized approver"),
+          },
+          "404": {
+            ...errorResponse("Case was not found"),
+          },
+          "409": {
+            ...errorResponse("Approval command or workflow state is stale"),
+          },
+          "500": {
+            ...errorResponse("Approval resume failed"),
           },
         },
       },
@@ -380,10 +464,25 @@ export const supportOpenApiDocument = {
             },
           },
           "400": {
-            description: "Invalid supervisor request",
-            content: {
-              "application/json": { schema: jsonSchema(errorResponseSchema) },
-            },
+            ...errorResponse("Invalid supervisor request"),
+          },
+          "401": {
+            ...errorResponse("Authentication required"),
+          },
+          "403": {
+            ...errorResponse("Caller cannot run the supervisor for this case"),
+          },
+          "404": {
+            ...errorResponse("Case was not found"),
+          },
+          "409": {
+            ...errorResponse("Case is missing verified owner evidence"),
+          },
+          "422": {
+            ...errorResponse("Validation budget blocked the supervisor run"),
+          },
+          "503": {
+            ...errorResponse("Supervisor trace correlation was unavailable"),
           },
         },
       },
@@ -404,6 +503,21 @@ export const supportOpenApiDocument = {
               "application/json": { schema: jsonSchema(supportCaseSchema) },
             },
           },
+          "400": {
+            ...errorResponse("Invalid feedback payload"),
+          },
+          "401": {
+            ...errorResponse("Authentication required"),
+          },
+          "403": {
+            ...errorResponse("Caller cannot access this case"),
+          },
+          "404": {
+            ...errorResponse("Case or response message was not found"),
+          },
+          "410": {
+            ...errorResponse("Expired case cannot accept new content"),
+          },
         },
       },
     },
@@ -422,6 +536,27 @@ export const supportOpenApiDocument = {
             content: {
               "application/json": { schema: jsonSchema(supportCaseSchema) },
             },
+          },
+          "400": {
+            ...errorResponse("Invalid follow-up payload"),
+          },
+          "401": {
+            ...errorResponse("Authentication required"),
+          },
+          "403": {
+            ...errorResponse("Caller cannot append to this case"),
+          },
+          "404": {
+            ...errorResponse("Case was not found"),
+          },
+          "409": {
+            ...errorResponse("Follow-up dispatch lease was lost"),
+          },
+          "410": {
+            ...errorResponse("Expired case cannot accept new content"),
+          },
+          "500": {
+            ...errorResponse("Follow-up resolution failed"),
           },
         },
       },
@@ -442,10 +577,16 @@ export const supportOpenApiDocument = {
             },
           },
           "500": {
-            description: "Indexing failed",
-            content: {
-              "application/json": { schema: jsonSchema(errorResponseSchema) },
-            },
+            ...errorResponse("Indexing failed"),
+          },
+          "400": {
+            ...errorResponse("Invalid reindex request"),
+          },
+          "401": {
+            ...errorResponse("Authentication required"),
+          },
+          "403": {
+            ...errorResponse("Caller is not an administrator"),
           },
         },
       },
@@ -461,6 +602,12 @@ export const supportOpenApiDocument = {
               },
             },
           },
+          "401": {
+            ...errorResponse("Authentication required"),
+          },
+          "403": {
+            ...errorResponse("Caller is not an administrator"),
+          },
         },
       },
     },
@@ -472,6 +619,9 @@ export const supportOpenApiDocument = {
             content: {
               "application/json": { schema: jsonSchema(z.unknown()) },
             },
+          },
+          "401": {
+            ...errorResponse("Authentication required"),
           },
         },
       },

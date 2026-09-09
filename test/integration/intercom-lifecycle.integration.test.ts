@@ -3,6 +3,7 @@ import { rm } from "node:fs/promises";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deterministicJsonModel } from "../fixtures/deterministic-language-model";
+import { temporaryDatabasePath } from "../support/temp-path";
 
 const savedEnvironment = { ...process.env };
 const databases: string[] = [];
@@ -87,7 +88,7 @@ function signedHeaders(body: string) {
 }
 
 async function runtime() {
-  const databasePath = `/private/tmp/phase005-lifecycle-${crypto.randomUUID()}.db`;
+  const databasePath = temporaryDatabasePath("phase005-lifecycle");
   databases.push(databasePath, `${databasePath}-wal`, `${databasePath}-shm`);
   configure(databasePath);
   const requests: Request[] = [];

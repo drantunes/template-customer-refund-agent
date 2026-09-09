@@ -8,6 +8,7 @@ import {
   KnowledgePublicationStore,
   knowledgeAccountKey,
 } from "../../src/mastra/lib/knowledge-publications";
+import { temporaryDatabasePath } from "../support/temp-path";
 
 const paths: string[] = [];
 
@@ -17,7 +18,7 @@ afterEach(async () => {
 
 describe("Phase 003 local knowledge migration", () => {
   it("lets simultaneous clients initialize one fresh publication store and both remain usable", async () => {
-    const path = `/private/tmp/knowledge-concurrent-migration-${crypto.randomUUID()}.db`;
+    const path = temporaryDatabasePath("knowledge-concurrent-migration");
     paths.push(path, `${path}-shm`, `${path}-wal`);
     const firstClient = createClient({ url: `file:${path}` });
     const secondClient = createClient({ url: `file:${path}` });
@@ -84,7 +85,7 @@ describe("Phase 003 local knowledge migration", () => {
   });
 
   it("backfills only known versioned fixture applicability and leaves unknown records unpublished", async () => {
-    const path = `/private/tmp/knowledge-phase003-${crypto.randomUUID()}.db`;
+    const path = temporaryDatabasePath("knowledge-phase003");
     paths.push(path, `${path}-shm`, `${path}-wal`);
     const client = createClient({ url: `file:${path}` });
     const known = POLICY_DOCUMENTS.find(
@@ -141,7 +142,7 @@ describe("Phase 003 local knowledge migration", () => {
   });
 
   it("re-keys a legacy publication pointer from its durable knowledge account", async () => {
-    const path = `/private/tmp/knowledge-key-migration-${crypto.randomUUID()}.db`;
+    const path = temporaryDatabasePath("knowledge-key-migration");
     paths.push(path, `${path}-shm`, `${path}-wal`);
     const client = createClient({ url: `file:${path}` });
     const binding = {

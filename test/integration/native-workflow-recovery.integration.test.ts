@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { issueLocalSession } from "../../src/mastra/server/auth";
 import { knowledgeAccountKey } from "../../src/mastra/lib/knowledge-publications";
 import type { CaseProviderBindings } from "../../src/mastra/providers/contracts";
+import { temporaryDatabasePath } from "../support/temp-path";
 
 const files: string[] = [];
 const runtimes: Array<{ shutdown(): Promise<void> }> = [];
@@ -198,8 +199,7 @@ async function setup(
   },
 ) {
   const path =
-    options?.databasePath ??
-    `/private/tmp/phase003-native-workflow-${crypto.randomUUID()}.db`;
+    options?.databasePath ?? temporaryDatabasePath("phase003-native-workflow");
   if (!files.includes(path)) files.push(path, `${path}-shm`, `${path}-wal`);
   process.env.TURSO_DATABASE_URL = `file:${path}`;
   process.env.SUPPORT_SOURCE = "mock";
@@ -1137,9 +1137,35 @@ describe("native approval workflow recovery", () => {
     );
     process.env.SUPPORT_TEST_DISPATCH_LEASE_MS = "30";
     process.env.SUPPORT_TEST_DISPATCH_HEARTBEAT_MS = "5";
-    const renew = vi.spyOn(caseStore, "renewDispatchLease");
+    const renewDispatchLease = caseStore.renewDispatchLease.bind(caseStore);
+    let observeControlledRenewal = false;
+    let expectedDispatchId: string | undefined;
+    let expectedLeaseToken: string | undefined;
+    let controlledRenewalArgs: readonly [string, string] | undefined;
+    let completeControlledRenewal!: () => void;
+    const controlledRenewal = new Promise<void>((resolve) => {
+      completeControlledRenewal = resolve;
+    });
+    const renew = vi
+      .spyOn(caseStore, "renewDispatchLease")
+      .mockImplementation(async (...args) => {
+        const renewed = await renewDispatchLease(...args);
+        if (
+          observeControlledRenewal &&
+          renewed &&
+          args[0] === expectedDispatchId &&
+          args[1] === expectedLeaseToken
+        ) {
+          controlledRenewalArgs = args;
+          completeControlledRenewal();
+        }
+        return renewed;
+      });
+    const heartbeat = vi.spyOn(globalThis, "setInterval");
 
     let released = false;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
     try {
       const request = app.request(
         `http://support.test/support/cases/${caseId}/follow-ups`,
@@ -1153,13 +1179,57 @@ describe("native approval workflow recovery", () => {
         },
       );
       await enteredSlowTransport;
-      await new Promise((resolve) => setTimeout(resolve, 45));
+      const beforeRenewal = await caseStore.getClientForTests().execute({
+        sql: "SELECT id, turn_id, state, lease_token, lease_until FROM support_dispatch WHERE case_id = ? ORDER BY created_at DESC LIMIT 1",
+        args: [caseId],
+      });
+      const initialLease = beforeRenewal.rows[0] as Record<string, unknown>;
+      expect(["claimed", "started"]).toContain(initialLease.state);
+      expect(heartbeat).toHaveBeenCalledWith(expect.any(Function), 5);
+      const controlledHeartbeat = heartbeat.mock.calls.find(
+        ([, interval]) => interval === 5,
+      )?.[0] as (() => void) | undefined;
+      expect(controlledHeartbeat).toEqual(expect.any(Function));
+      expectedDispatchId = String(initialLease.id);
+      expectedLeaseToken = String(initialLease.lease_token);
+      // The exact production callback renews against a real CaseStore while
+      // Date stays ten milliseconds before expiry. Advancing only Date then
+      // proves the same owned lease survives its original deadline.
+      vi.setSystemTime(
+        new Date(Date.parse(String(initialLease.lease_until)) - 10),
+      );
+      observeControlledRenewal = true;
+      controlledHeartbeat!();
+      await controlledRenewal;
+      expect(controlledRenewalArgs).toEqual([
+        expectedDispatchId,
+        expectedLeaseToken,
+      ]);
       expect(renew.mock.calls.length).toBeGreaterThan(1);
+      const afterRenewal = await caseStore.getClientForTests().execute({
+        sql: "SELECT state, lease_token, lease_until FROM support_dispatch WHERE id = ?",
+        args: [String(initialLease.id)],
+      });
+      const renewedLease = afterRenewal.rows[0] as Record<string, unknown>;
+      expect(renewedLease).toMatchObject({
+        state: initialLease.state,
+        lease_token: initialLease.lease_token,
+      });
+      vi.setSystemTime(
+        new Date(Date.parse(String(initialLease.lease_until)) + 1),
+      );
+      expect(Date.now()).toBeGreaterThan(
+        Date.parse(String(initialLease.lease_until)),
+      );
+      expect(Date.parse(String(renewedLease.lease_until))).toBeGreaterThan(
+        Date.now(),
+      );
       release();
       released = true;
       expect((await request).status).toBe(200);
     } finally {
       if (!released) release();
+      vi.useRealTimers();
     }
   });
 
@@ -1196,25 +1266,94 @@ describe("native approval workflow recovery", () => {
         await slowTransport;
         return issueRefund(command, authorization);
       });
-    const renew = vi.spyOn(caseStore, "renewDispatchLease");
+    const renewDispatchLease = caseStore.renewDispatchLease.bind(caseStore);
+    let observeControlledRenewal = false;
+    let expectedDispatchId: string | undefined;
+    let expectedLeaseToken: string | undefined;
+    let controlledRenewalArgs: readonly [string, string] | undefined;
+    let completeControlledRenewal!: () => void;
+    const controlledRenewal = new Promise<void>((resolve) => {
+      completeControlledRenewal = resolve;
+    });
+    const renew = vi
+      .spyOn(caseStore, "renewDispatchLease")
+      .mockImplementation(async (...args) => {
+        const renewed = await renewDispatchLease(...args);
+        if (
+          observeControlledRenewal &&
+          renewed &&
+          args[0] === expectedDispatchId &&
+          args[1] === expectedLeaseToken
+        ) {
+          controlledRenewalArgs = args;
+          completeControlledRenewal();
+        }
+        return renewed;
+      });
+    const heartbeat = vi.spyOn(globalThis, "setInterval");
 
     let released = false;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
     try {
       const recovery = recoverApprovedNativeDecisions(mastra, caseStore, {
         disableScorers: true,
       });
       await enteredSlowTransport;
-      await new Promise((resolve) => setTimeout(resolve, 45));
+      const beforeRenewal = await caseStore.getClientForTests().execute({
+        sql: "SELECT id, state, lease_token, lease_until FROM support_dispatch WHERE case_id = ? ORDER BY created_at DESC LIMIT 1",
+        args: [caseId],
+      });
+      const initialLease = beforeRenewal.rows[0] as Record<string, unknown>;
+      expect(["claimed", "started"]).toContain(initialLease.state);
+      expect(heartbeat).toHaveBeenCalledWith(expect.any(Function), 5);
+      const controlledHeartbeat = heartbeat.mock.calls.find(
+        ([, interval]) => interval === 5,
+      )?.[0] as (() => void) | undefined;
+      expect(controlledHeartbeat).toEqual(expect.any(Function));
+      expectedDispatchId = String(initialLease.id);
+      expectedLeaseToken = String(initialLease.lease_token);
+      // Exercise the registered callback against the real fenced store before
+      // expiry, then finish the native Agent after the original deadline.
+      vi.setSystemTime(
+        new Date(Date.parse(String(initialLease.lease_until)) - 10),
+      );
+      observeControlledRenewal = true;
+      controlledHeartbeat!();
+      await controlledRenewal;
+      expect(controlledRenewalArgs).toEqual([
+        expectedDispatchId,
+        expectedLeaseToken,
+      ]);
       expect(renew.mock.calls.length).toBeGreaterThan(1);
+      const afterRenewal = await caseStore.getClientForTests().execute({
+        sql: "SELECT state, lease_token, lease_until FROM support_dispatch WHERE id = ?",
+        args: [String(initialLease.id)],
+      });
+      const renewedLease = afterRenewal.rows[0] as Record<string, unknown>;
+      expect(renewedLease).toMatchObject({
+        state: initialLease.state,
+        lease_token: initialLease.lease_token,
+      });
+      vi.setSystemTime(
+        new Date(Date.parse(String(initialLease.lease_until)) + 1),
+      );
+      expect(Date.now()).toBeGreaterThan(
+        Date.parse(String(initialLease.lease_until)),
+      );
+      expect(Date.parse(String(renewedLease.lease_until))).toBeGreaterThan(
+        Date.now(),
+      );
       release();
       released = true;
       expect(await recovery).toBe(1);
+      expect(await localRefundCount(caseStore)).toBe(1);
+      expect((await caseStore.get(caseId))?.status).toBe("resolved");
     } finally {
       if (!released) release();
+      vi.useRealTimers();
       slowProvider.mockRestore();
     }
-    expect(await localRefundCount(caseStore)).toBe(1);
-    expect((await caseStore.get(caseId))?.status).toBe("resolved");
   });
 
   it("does not project a native recovery after its heartbeat loses the replacement token", async () => {

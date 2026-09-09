@@ -4,6 +4,7 @@ import { RequestContext } from "@mastra/core/request-context";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deterministicJsonModel } from "../fixtures/deterministic-language-model";
+import { temporaryDatabasePath } from "../support/temp-path";
 
 const databaseFiles: string[] = [];
 const runtimes: Array<{ shutdown(): Promise<void> }> = [];
@@ -196,7 +197,7 @@ afterEach(async () => {
 
 describe("registered support supervisor read-only acceptance", () => {
   it("executes delegated scoped, foreign, insufficient-evidence, and hostile trajectories through authenticated native turns", async () => {
-    const databasePath = `/private/tmp/phase004-supervisor-${crypto.randomUUID()}.db`;
+    const databasePath = temporaryDatabasePath("phase004-supervisor");
     databaseFiles.push(
       databasePath,
       `${databasePath}-shm`,
