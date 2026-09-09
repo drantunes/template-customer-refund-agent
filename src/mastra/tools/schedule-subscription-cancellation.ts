@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { caseStore } from "../lib/case-store";
 import { activeDispatchLeaseScope } from "../lib/dispatch-lease-scope";
-import { bindingsForPersistedCase } from "../runtime/local-runtime";
+import { bindingsForPersistedCase } from "../runtime/provider-bindings";
 import { structurallyEqual } from "../lib/money";
 import type { SubscriptionCancellationCommand } from "../providers/contracts";
 import {

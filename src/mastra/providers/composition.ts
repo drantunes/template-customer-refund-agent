@@ -3,7 +3,7 @@
  * intentionally only a binding-to-port map, so runtime workers and adapters
  * can use it without creating an ESM initialization cycle.
  */
-import { defaultLocalBinding, localRuntime } from "../runtime/local-runtime";
+import { defaultLocalBinding, localRuntime } from "../runtime/local-provider";
 import { intercomDevelopmentConfig, intercomBinding } from "./intercom/config";
 import { IntercomProviderRegistry } from "./intercom/registry";
 import { registerProviderRegistry } from "./registry";

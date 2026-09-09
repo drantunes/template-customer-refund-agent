@@ -5,7 +5,7 @@ import {
   triageResultSchema,
 } from "../domain/support-case";
 import { caseStore } from "../lib/case-store";
-import { bindingsForPersistedCase } from "../runtime/local-runtime";
+import { bindingsForPersistedCase } from "../runtime/provider-bindings";
 import {
   getActiveCaseOrThrow,
   resolveSupportCaseInputSchema,

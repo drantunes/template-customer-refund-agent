@@ -9,7 +9,7 @@ import { safeEscalationResponse } from "../domain/customer-response";
 import { caseStore } from "../lib/case-store";
 import { knowledgePublicationStore } from "../lib/knowledge-publications";
 import { withTrustedCommerceScope } from "../lib/trusted-run-scope";
-import { bindingsForPersistedCase } from "../runtime/local-runtime";
+import { bindingsForPersistedCase } from "../runtime/provider-bindings";
 import {
   getActiveCaseOrThrow,
   resolveSupportCaseInputSchema,

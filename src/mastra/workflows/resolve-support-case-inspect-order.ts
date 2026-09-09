@@ -11,7 +11,7 @@ import {
   ensureProviderFixtures,
   resolveConfiguredBinding,
 } from "../providers/registry";
-import { bindingsForPersistedCase } from "../runtime/local-runtime";
+import { bindingsForPersistedCase } from "../runtime/provider-bindings";
 import {
   getActiveCaseOrThrow,
   resolveSupportCaseInputSchema,

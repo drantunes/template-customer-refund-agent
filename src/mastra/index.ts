@@ -28,7 +28,7 @@ import {
   lookupSubscriptionTool,
 } from "./tools/lookup-order";
 import { searchSupportKnowledgeTool } from "./tools/search-support-knowledge";
-import { startLocalRuntimeWorkers } from "./runtime/local-runtime";
+import { startLocalRuntimeWorkers } from "./runtime/local-runtime-workers";
 import {
   setMastraStorageReady,
   startAfterStorageReady,

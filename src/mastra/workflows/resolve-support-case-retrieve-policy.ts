@@ -5,7 +5,7 @@ import { publishKnowledge } from "../lib/publish-knowledge";
 import { traceOperationalPort } from "../lib/operational-spans";
 import { withTrustedCaseReadScope } from "../lib/trusted-run-scope";
 import { resolveConfiguredBinding } from "../providers/registry";
-import { bindingsForPersistedCase } from "../runtime/local-runtime";
+import { bindingsForPersistedCase } from "../runtime/provider-bindings";
 import {
   getActiveCaseOrThrow,
   resolveSupportCaseInputSchema,

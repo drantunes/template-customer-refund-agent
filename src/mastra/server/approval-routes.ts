@@ -6,7 +6,7 @@ import {
 } from "../lib/dispatch-lease-scope";
 import { isRefundPolicyEvidenceError } from "../lib/refund-policy-evidence";
 import { resumeApprovedNativeTool } from "../providers/native-execution";
-import { reconcileApprovedRefundEffect } from "../runtime/local-runtime";
+import { reconcileApprovedRefundEffect } from "../runtime/native-approval-recovery";
 import { REQUEST_APPROVAL_STEP_ID } from "../workflows/resolve-support-case";
 import { canAccessCase } from "./auth";
 import { approvalRequestSchema, errorResponseSchema } from "./contracts";

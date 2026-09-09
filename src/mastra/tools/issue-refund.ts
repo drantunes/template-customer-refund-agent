@@ -7,7 +7,7 @@ import {
   moneyToLegacyAmount,
   refundFingerprint,
 } from "../lib/money";
-import { bindingsForPersistedCase } from "../runtime/local-runtime";
+import { bindingsForPersistedCase } from "../runtime/provider-bindings";
 import {
   ensureProviderFixtures,
   providerRegistry,

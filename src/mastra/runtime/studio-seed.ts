@@ -1,5 +1,5 @@
 import { caseStore } from "../lib/case-store";
-import { defaultLocalBinding, localRuntime } from "./local-runtime";
+import { defaultLocalBinding, localRuntime } from "./local-provider";
 
 /** The first native Studio investigation is safe, persisted, and synthetic. */
 export const studioSupervisorDemoCaseId = "studio-demo-order-status";

@@ -4,7 +4,7 @@ import { triageEscalationReason } from "../domain/resolution-decision";
 import { caseStore } from "../lib/case-store";
 import { withTrustedCancellationScope } from "../providers/cancellation-execution";
 import { resolveConfiguredBinding } from "../providers/registry";
-import { bindingsForPersistedCase } from "../runtime/local-runtime";
+import { bindingsForPersistedCase } from "../runtime/provider-bindings";
 import { cancellationFingerprint } from "../tools/schedule-subscription-cancellation";
 import {
   getActiveCaseOrThrow,

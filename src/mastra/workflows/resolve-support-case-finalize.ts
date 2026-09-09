@@ -14,10 +14,8 @@ import {
   resolveConfiguredBinding,
   providerRegistry,
 } from "../providers/registry";
-import {
-  bindingsForPersistedCase,
-  deliverOutbox,
-} from "../runtime/local-runtime";
+import { bindingsForPersistedCase } from "../runtime/provider-bindings";
+import { deliverOutbox } from "../runtime/outbox";
 import { getActiveCaseOrThrow } from "./resolve-support-case-context";
 
 const immutableRefundCommandSchema = z.object({

@@ -11,7 +11,7 @@ import {
   providerRegistry,
   resolveConfiguredBinding,
 } from "../providers/registry";
-import { bindingsForPersistedCase } from "../runtime/local-runtime";
+import { bindingsForPersistedCase } from "../runtime/provider-bindings";
 import { refundExecutionInputSchema } from "../tools/issue-refund";
 import {
   getActiveCaseOrThrow,
