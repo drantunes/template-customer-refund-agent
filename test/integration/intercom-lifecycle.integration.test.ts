@@ -22,7 +22,7 @@ function configure(databasePath: string) {
   process.env.INTERCOM_API_BASE_URL = "http://intercom.test";
   process.env.INTERCOM_KNOWLEDGE_ENABLED = "true";
   process.env.INTERCOM_TICKET_TYPE_ID = "phase005-ticket";
-  process.env.PHASE003_DISABLE_EVALS = "1";
+  process.env.DISABLE_RUNTIME_SCORERS = "1";
 }
 
 function notification(

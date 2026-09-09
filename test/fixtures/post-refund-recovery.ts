@@ -14,7 +14,7 @@ triageAgent.__updateModel({
     intent: "duplicate_charge",
     urgency: "normal",
     sentiment: "negative",
-    requiresHumanReview: true,
+    requiresHumanReview: false,
     confidence: 1,
     rationale: "two-process recovery fixture",
   }) as never,

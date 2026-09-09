@@ -127,6 +127,18 @@ export const draftResolutionSchema = z.object({
   citedSources: z
     .array(z.string())
     .describe("Titles/sources of policy documents actually used."),
+  selectedPolicyExcerpts: z
+    .array(
+      z.object({
+        source: z.string(),
+        excerpt: z.string().min(1).max(600),
+      }),
+    )
+    .max(3)
+    .default([])
+    .describe(
+      "Exact, relevant excerpts from cited policy documents. These are rendered as policy guidance, never as a completed account effect.",
+    ),
   recommendRefund: z.boolean(),
   refundAmount: z.number().optional(),
   refundCurrency: z.string().optional(),

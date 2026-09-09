@@ -15,9 +15,18 @@ import {
   type SupportCase,
 } from "../domain/support-case";
 import {
-  MAX_AUTO_APPROVABLE_REFUND,
+  MAX_STANDARD_REVIEW_REFUND,
   refundExecutionInputSchema,
 } from "../tools/issue-refund";
+import { persistedRefundCommandSchema } from "../domain/refund-command";
+import {
+  escalationReasonForDraft,
+  triageEscalationReason,
+} from "../domain/resolution-decision";
+import {
+  renderGroundedSupportResponse,
+  safeEscalationResponse,
+} from "../domain/customer-response";
 import { caseStore as persistentCaseStore } from "../lib/case-store";
 import { legacyAmountToMoney, refundFingerprint } from "../lib/money";
 import {
@@ -76,19 +85,6 @@ function parsedDraftEvidence(supportCase: SupportCase, citations: string[]) {
   });
 }
 
-const safeEscalationResponse =
-  "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.";
-
-const financialResponseCommandSchema = z.object({
-  approvalCaseId: z.string(),
-  orderId: z.string(),
-  amount: z.number().positive(),
-  currency: z.string(),
-  reason: z.string(),
-  idempotencyKey: z.string(),
-  fingerprint: z.string(),
-});
-
 const immutableRefundCommandSchema = z.object({
   binding: z.object({
     tenantId: z.string(),
@@ -119,17 +115,6 @@ const durableRefundEffectSchema = z.object({
   replayed: z.boolean().optional(),
 });
 
-/** Model text is useful staff context, but it is not an authority to state a
- * financial outcome. Customer-visible status is a projection of durable case
- * facts; this keeps arbitrary prose, paraphrases, and mixed clauses from
- * becoming an effectless financial completion claim. */
-function ordinarySupportResponse(supportCase: SupportCase) {
-  const order = supportCase.orderLookup?.order;
-  if (order && order.status !== "refunded")
-    return `We reviewed your order ${order.orderId}. Its current status is ${order.status}.`;
-  return "We reviewed your request. A support specialist will follow up if further action is needed.";
-}
-
 /** A completed refund message is permitted only when every customer-visible
  * detail is bound back to the same durable effect, immutable command, account,
  * and inbound turn. This intentionally does not inspect model text. */
@@ -138,7 +123,7 @@ async function completedRefundResponse(
   turnId: string,
 ) {
   const metadata = supportCase.metadata as Record<string, unknown>;
-  const command = financialResponseCommandSchema.safeParse(
+  const command = persistedRefundCommandSchema.safeParse(
     metadata.refundCommand,
   );
   const result = supportCase.refundResult;
@@ -630,6 +615,7 @@ const draftResponseStep = createStep({
     // Retrieval is not a decision. Re-read the selected authoritative
     // publication just before committing the draft so expiry, rollback, or a
     // stale/tampered vector result cannot support a customer promise.
+    const authoritativeTexts = new Map<string, string>();
     const applicableEvidence = await Promise.all(
       parsedDraft.citedSources.map(async (citation) => {
         const match = policyMatches.find(
@@ -662,17 +648,21 @@ const draftResponseStep = createStep({
             match.documentHash,
           );
           const now = Date.now();
-          return Boolean(
+          const valid = Boolean(
             authoritative &&
             authoritative.title === match.title &&
             authoritative.version === match.version &&
             authoritative.effectiveAt === match.effectiveAt &&
             authoritative.indexedAt === match.indexedAt &&
             authoritative.expiresAt === match.expiresAt &&
+            authoritative?.text.includes(match.text) &&
             Date.parse(authoritative.effectiveAt) <= now &&
             (!authoritative.expiresAt ||
               Date.parse(authoritative.expiresAt) > now),
           );
+          if (valid && authoritative)
+            authoritativeTexts.set(match.source, authoritative.text);
+          return valid;
         } catch {
           return false;
         }
@@ -680,6 +670,24 @@ const draftResponseStep = createStep({
     );
     const staleOrUnauthoritativeEvidence =
       requiresSupportingCitation && !applicableEvidence.every(Boolean);
+    const invalidPolicySelection =
+      !parsedDraft.requiresEscalation &&
+      (parsedDraft.selectedPolicyExcerpts.length === 0 ||
+        parsedDraft.selectedPolicyExcerpts.some((selection) => {
+          const match = policyMatches.find(
+            (entry) =>
+              (entry.source === selection.source ||
+                entry.title === selection.source) &&
+              parsedDraft.citedSources.some(
+                (citation) =>
+                  citation === entry.source || citation === entry.title,
+              ),
+          );
+          return (
+            !match ||
+            !authoritativeTexts.get(match.source)?.includes(selection.excerpt)
+          );
+        }));
     // A model cannot turn absent, stale, or conflicting evidence into an
     // executable promise. Preserve its text for staff review, but force the
     // durable case down the escalation path and suppress a refund proposal.
@@ -687,11 +695,20 @@ const draftResponseStep = createStep({
     // arbitrary model prose.  Keep the model's proposed text only in staff
     // metadata: even a non-refund draft can falsely assert that a refund was
     // issued or rely on evidence that expired while it was being generated.
-    const mustUseSafeEscalation =
-      (!hasNoRefundCancellationAuthority && parsedDraft.requiresEscalation) ||
-      missingEvidence ||
-      invalidCitation ||
-      staleOrUnauthoritativeEvidence;
+    const writerRequiresEscalation =
+      !hasNoRefundCancellationAuthority && parsedDraft.requiresEscalation;
+    const escalationReason =
+      supportCase.triage?.intent === "account_issue"
+        ? "Account requests require a support specialist with verified account-service access."
+        : escalationReasonForDraft({
+            triage: supportCase.triage,
+            missingEvidence,
+            invalidCitation: invalidCitation || invalidPolicySelection,
+            staleEvidence: staleOrUnauthoritativeEvidence,
+            writerRequiresEscalation,
+            writerReason: parsedDraft.escalationReason,
+          });
+    const mustUseSafeEscalation = escalationReason !== undefined;
     const evidenceSafeDraft = mustUseSafeEscalation
       ? {
           ...parsedDraft,
@@ -701,9 +718,7 @@ const draftResponseStep = createStep({
           refundCurrency: undefined,
           refundReason: undefined,
           requiresEscalation: true,
-          escalationReason: missingEvidence
-            ? "No published policy evidence was retrieved for this case."
-            : "Draft lacks applicable evidence from the active publication.",
+          escalationReason,
         }
       : parsedDraft;
     // A qualifying no-refund cancellation is authorized by the immutable
@@ -754,16 +769,6 @@ const approvalOutputSchema = z.object({
   approved: z.boolean(),
   approverId: z.string().optional(),
   note: z.string().optional(),
-});
-
-const persistedRefundCommandSchema = z.object({
-  approvalCaseId: z.string().min(1),
-  orderId: z.string().min(1),
-  amount: z.number().positive(),
-  currency: z.string().min(1),
-  reason: z.string().min(1),
-  idempotencyKey: z.string().min(1),
-  fingerprint: z.string().min(1),
 });
 
 /** A running snapshot can be restarted after the API accepted a decision but
@@ -970,14 +975,14 @@ const requestApprovalStep = createStep({
     // rule is repeated by LocalRuntime in its provider write transaction.
     if (
       draft.requiresEscalation ||
-      (draft.refundAmount ?? 0) > MAX_AUTO_APPROVABLE_REFUND
+      (draft.refundAmount ?? 0) > MAX_STANDARD_REVIEW_REFUND
     ) {
       if (!draft.requiresEscalation)
         await caseStore.update(supportCase.id, {
           draft: {
             ...draft,
             requiresEscalation: true,
-            escalationReason: `Refund amount ${draft.refundAmount} exceeds the ${MAX_AUTO_APPROVABLE_REFUND} auto-approvable limit and needs manual handling.`,
+            escalationReason: `Refund amount ${draft.refundAmount} exceeds the ${MAX_STANDARD_REVIEW_REFUND} standard review limit and needs manual handling.`,
           },
         });
       return {
@@ -1189,7 +1194,7 @@ const requestApprovalStep = createStep({
 const resolveCaseStep = createStep({
   id: "resolve-case",
   description:
-    "Executes an approved refund, or marks the case resolved/escalated.",
+    "Finalizes a durably executed refund or marks the case resolved/escalated.",
   inputSchema: approvalOutputSchema,
   outputSchema: z.object({
     caseId: z.string(),
@@ -1202,32 +1207,44 @@ const resolveCaseStep = createStep({
       inputData.turnId,
     );
     const draft = supportCase.draft!;
-    let finalResponse = draft.requiresEscalation
-      ? safeEscalationResponse
-      : ordinarySupportResponse(supportCase);
+    const triageReason = triageEscalationReason(supportCase.triage);
+    let finalResponse =
+      draft.requiresEscalation || triageReason
+        ? safeEscalationResponse
+        : renderGroundedSupportResponse(
+            supportCase,
+            draft.selectedPolicyExcerpts,
+          );
     let status: "resolved" | "escalated" = draft.requiresEscalation
       ? "escalated"
       : "resolved";
-    let escalationReason = draft.escalationReason;
+    let escalationReason = triageReason ?? draft.escalationReason;
+    if (triageReason) status = "escalated";
+    const mustEscalate = Boolean(triageReason || draft.requiresEscalation);
 
     const cancellation = (supportCase.metadata as Record<string, unknown>)
       .cancellationEffect as
       { status?: string; cancelsAt?: string } | undefined;
     if (
+      !mustEscalate &&
       supportCase.triage?.intent === "cancellation" &&
       cancellation?.status === "scheduled" &&
       cancellation.cancelsAt
     ) {
       status = "resolved";
       finalResponse = `Your subscription is scheduled to cancel at the end of the current billing period on ${cancellation.cancelsAt}.`;
-    } else if (supportCase.triage?.intent === "cancellation" && !cancellation) {
+    } else if (
+      !mustEscalate &&
+      supportCase.triage?.intent === "cancellation" &&
+      !cancellation
+    ) {
       status = "escalated";
       finalResponse = safeEscalationResponse;
       escalationReason ??=
         "Subscription cancellation was not durably scheduled.";
     }
 
-    if (draft.recommendRefund) {
+    if (draft.recommendRefund && !mustEscalate) {
       if (!inputData.approved) {
         status = "escalated";
         escalationReason = `Refund declined by ${inputData.approverId ?? "reviewer"}${inputData.note ? `: ${inputData.note}` : "."}`;
@@ -1240,9 +1257,9 @@ const resolveCaseStep = createStep({
           status = "escalated";
           escalationReason =
             "Refund was approved but no order id was on file - needs manual handling.";
-        } else if ((draft.refundAmount ?? 0) > MAX_AUTO_APPROVABLE_REFUND) {
+        } else if ((draft.refundAmount ?? 0) > MAX_STANDARD_REVIEW_REFUND) {
           status = "escalated";
-          escalationReason = `Refund amount ${draft.refundAmount} exceeds the ${MAX_AUTO_APPROVABLE_REFUND} auto-approvable limit and needs a senior approver.`;
+          escalationReason = `Refund amount ${draft.refundAmount} exceeds the ${MAX_STANDARD_REVIEW_REFUND} standard review limit and needs a senior approver.`;
         } else {
           if (!mastra)
             throw new Error(
@@ -1369,7 +1386,7 @@ const resolveCaseStep = createStep({
 export const resolveSupportCaseWorkflow = createWorkflow({
   id: "resolve-support-case",
   description:
-    "The core resolution pipeline: classify -> retrieve policy -> inspect order -> draft response -> human refund approval -> execute or escalate.",
+    "The core resolution pipeline: classify -> retrieve policy -> inspect order -> draft response -> human refund approval -> finalize an executed effect or escalate.",
   inputSchema: caseIdSchema,
   outputSchema: z.object({
     caseId: z.string(),

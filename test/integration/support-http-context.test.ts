@@ -97,7 +97,9 @@ async function loadDeterministicRuntime() {
   vi.doMock("../../src/mastra/evals", () => ({
     responseAgentScorers: {},
     triageAgentScorers: {},
-    supportEvalScorerRegistry: {},
+    liveSupportScorerRegistry: {},
+    liveResponseAgentScorers: {},
+    liveTriageAgentScorers: {},
   }));
   vi.doMock("@mastra/core/llm", async (importOriginal) => {
     const actual = await importOriginal<typeof import("@mastra/core/llm")>();

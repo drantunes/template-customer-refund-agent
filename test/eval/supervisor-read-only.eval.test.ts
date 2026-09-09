@@ -204,7 +204,7 @@ describe("registered support supervisor read-only acceptance", () => {
       `${databasePath}-wal`,
     );
     process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
-    process.env.PHASE003_DISABLE_EVALS = "1";
+    process.env.DISABLE_RUNTIME_SCORERS = "1";
     vi.resetModules();
 
     const [

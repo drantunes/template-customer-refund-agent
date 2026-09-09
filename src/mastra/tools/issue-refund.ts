@@ -17,8 +17,9 @@ import { withNativeRefundExecutionAuthorization } from "../providers/native-exec
 import { activePrincipalHasRole } from "../server/auth";
 import { traceOperationalPort } from "../lib/operational-spans";
 import { isRefundPolicyEvidenceError } from "../lib/refund-policy-evidence";
+import { persistedRefundCommandSchema } from "../domain/refund-command";
 
-export const MAX_AUTO_APPROVABLE_REFUND = 1000;
+export const MAX_STANDARD_REVIEW_REFUND = 1000;
 /**
  * An exception alone cannot prove a financial effect failed: a transport can
  * break after the provider commits. Only deterministic provider rejections
@@ -30,15 +31,6 @@ function isConfirmedRefundFailure(error: unknown) {
     String(error),
   );
 }
-const commandSchema = z.object({
-  approvalCaseId: z.string(),
-  orderId: z.string(),
-  amount: z.number().positive(),
-  currency: z.string(),
-  reason: z.string(),
-  idempotencyKey: z.string(),
-  fingerprint: z.string(),
-});
 export const refundExecutionInputSchema = z.object({
   caseId: z.string(),
   orderId: z.string(),
@@ -117,7 +109,7 @@ export const issueRefundTool = createTool({
       throw new Error(
         "Refund execution requires a current authorized decision bound to the native tool call.",
       );
-    const stored = commandSchema.safeParse(
+    const stored = persistedRefundCommandSchema.safeParse(
       (supportCase.metadata as Record<string, unknown>).refundCommand,
     );
     if (!stored.success)

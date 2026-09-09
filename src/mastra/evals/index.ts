@@ -1,4 +1,5 @@
 import { createScorer, type MastraScorers } from "@mastra/core/evals";
+import { getAssistantMessageFromRunOutput } from "@mastra/evals/scorers/utils";
 import {
   canonicalScorerRecord,
   isPlainJsonRecord,
@@ -167,4 +168,64 @@ export const supportEvalScorerRegistry = {
   multiTurnConsistency: multiTurnConsistencyScorer,
   responseStructureSanity: responseStructureSanityScorer,
   conversationCoverage: conversationCoverageScorer,
+};
+
+/**
+ * Runtime scorers are intentionally contract checks only. Dataset quality
+ * axes below require versioned ground truth and are consumed solely by the
+ * deterministic experiment harness; attaching those axes to a live agent run
+ * made an ordinary run look like a failed quality measurement.
+ */
+function liveOutputContractScorer(
+  id: string,
+  name: string,
+  accepts: (output: Record<string, unknown>) => boolean,
+) {
+  return createScorer({
+    id,
+    name,
+    description: `Checks that a native agent run produced the ${name.toLowerCase()} contract; it is not a quality score.`,
+    type: "agent",
+  })
+    .preprocess(({ run }) => {
+      const text = getAssistantMessageFromRunOutput(run.output);
+      if (!text) return {};
+      return plainRecord(topLevelModelOutput(text));
+    })
+    .generateScore(({ results }) =>
+      accepts(results.preprocessStepResult ?? {}) ? 1 : 0,
+    )
+    .generateReason(({ score }) =>
+      score === 1
+        ? "native output contract present"
+        : "native output contract missing; no dataset-quality judgment was made",
+    );
+}
+
+export const liveTriageOutputScorer = liveOutputContractScorer(
+  "live-triage-output-contract",
+  "Triage Output Contract",
+  (output) =>
+    typeof output.intent === "string" &&
+    typeof output.requiresHumanReview === "boolean" &&
+    typeof output.confidence === "number",
+);
+export const liveResponseOutputScorer = liveOutputContractScorer(
+  "live-response-output-contract",
+  "Response Output Contract",
+  (output) =>
+    typeof output.draftResponse === "string" &&
+    typeof output.recommendRefund === "boolean" &&
+    typeof output.requiresEscalation === "boolean",
+);
+
+export const liveTriageAgentScorers: MastraScorers = {
+  outputContract: { scorer: liveTriageOutputScorer },
+};
+export const liveResponseAgentScorers: MastraScorers = {
+  outputContract: { scorer: liveResponseOutputScorer },
+};
+export const liveSupportScorerRegistry = {
+  liveTriageOutputScorer,
+  liveResponseOutputScorer,
 };

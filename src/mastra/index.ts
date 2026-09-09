@@ -13,7 +13,7 @@ import { refundExecutionAgent } from "./agents/refund-execution-agent";
 import { ingestSupportCaseWorkflow } from "./workflows/ingest-support-case";
 import { resolveSupportCaseWorkflow } from "./workflows/resolve-support-case";
 import { indexSupportKnowledgeWorkflow } from "./workflows/index-support-knowledge";
-import { supportEvalScorerRegistry } from "./evals";
+import { liveSupportScorerRegistry } from "./evals";
 import {
   closeSharedLocalSqliteClient,
   getMastraSharedLocalSqliteClient,
@@ -68,7 +68,7 @@ export const mastra = new Mastra({
     issueRefundTool,
     scheduleSubscriptionCancellationTool,
   },
-  scorers: process.env.PHASE003_DISABLE_EVALS ? {} : supportEvalScorerRegistry,
+  scorers: process.env.DISABLE_RUNTIME_SCORERS ? {} : liveSupportScorerRegistry,
   vectors: {
     supportKnowledge: vectorStore,
   },

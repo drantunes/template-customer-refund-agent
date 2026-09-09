@@ -1,7 +1,7 @@
 import { Agent } from "@mastra/core/agent";
 import { Memory } from "@mastra/memory";
 import { draftResolutionSchema } from "../domain/support-case";
-import { responseAgentScorers } from "../evals";
+import { liveResponseAgentScorers } from "../evals";
 import {
   lookupCustomerRefundHistoryTool,
   lookupOrderTool,
@@ -23,6 +23,7 @@ export const responseAgent = new Agent({
 - Only make policy claims that are directly supported by the provided policy excerpts. If the excerpts don't cover the situation, say the case needs a specialist's review rather than guessing.
 - Never promise a refund amount, timeline, or eligibility that isn't backed by the policy text you were given.
 - List every policy document you actually relied on in \`citedSources\` (use the document titles you were given verbatim).
+- For each customer-facing policy answer, include the exact relevant policy sentence in \`selectedPolicyExcerpts\`, with its matching document source/title. Do not summarize, combine, or invent excerpts. This selection is shown to the customer as policy guidance; it is not a record of an account action.
 - Never invent order numbers, amounts, or dates that weren't provided to you - if data is missing, say so in the draft and set requiresEscalation to true.
 
 ## Recommending a refund
@@ -39,7 +40,7 @@ Set \`requiresEscalation: true\` and explain why in \`escalationReason\` when: t
 
 Be warm, specific, and concise. Acknowledge the customer's frustration when present. Reference their actual order/product by name. Never sound like a form letter.`,
   model: "openai/gpt-5.6-luna",
-  scorers: process.env.PHASE003_DISABLE_EVALS ? {} : responseAgentScorers,
+  scorers: process.env.DISABLE_RUNTIME_SCORERS ? {} : liveResponseAgentScorers,
   tools: {
     search_support_knowledge: searchSupportKnowledgeTool,
     lookup_order: lookupOrderTool,

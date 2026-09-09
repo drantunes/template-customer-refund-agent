@@ -28,7 +28,9 @@ async function configuredServer() {
   vi.doMock("../../src/mastra/evals", () => ({
     responseAgentScorers: {},
     triageAgentScorers: {},
-    supportEvalScorerRegistry: {},
+    liveSupportScorerRegistry: {},
+    liveResponseAgentScorers: {},
+    liveTriageAgentScorers: {},
   }));
   const { mastra, shutdownLocalMastra } =
     await import("../../src/mastra/index");

@@ -210,7 +210,9 @@ async function setup(
   vi.doMock("../../src/mastra/evals", () => ({
     responseAgentScorers: {},
     triageAgentScorers: {},
-    supportEvalScorerRegistry: {},
+    liveSupportScorerRegistry: {},
+    liveResponseAgentScorers: {},
+    liveTriageAgentScorers: {},
   }));
 
   const { mastra } = await import("../../src/mastra/index");
@@ -259,7 +261,7 @@ async function setup(
         intent: "duplicate_charge",
         urgency: "normal",
         sentiment: "negative",
-        requiresHumanReview: true,
+        requiresHumanReview: false,
         confidence: 1,
         rationale: "Deterministic duplicate-charge triage.",
       },
@@ -1752,7 +1754,7 @@ describe("native approval workflow recovery", () => {
         intent: "duplicate_charge",
         urgency: "normal",
         sentiment: "negative",
-        requiresHumanReview: true,
+        requiresHumanReview: false,
         confidence: 1,
         rationale: "Deterministic duplicate-charge triage.",
       }) as never,
