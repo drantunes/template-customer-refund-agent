@@ -22,7 +22,7 @@ function configure(databasePath: string) {
   process.env.INTERCOM_API_BASE_URL = "http://intercom.test";
   process.env.INTERCOM_KNOWLEDGE_ENABLED = "true";
   process.env.INTERCOM_TICKET_TYPE_ID = "phase005-ticket";
-  process.env.PHASE003_DISABLE_EVALS = "1";
+  process.env.DISABLE_RUNTIME_SCORERS = "1";
 }
 
 function notification(
@@ -391,7 +391,7 @@ describe("Phase 005 Intercom registered lifecycle", () => {
     );
     expect(await caseStore.turns(caseId)).toHaveLength(2);
 
-    const outbox = await caseStore.getClientForTests().execute({
+    const outbox = await caseStore.getClient().execute({
       sql: "SELECT operation, state FROM support_outbox WHERE id LIKE ? ORDER BY created_at, id",
       args: [`outbox_${caseId}_${initialTurn!.id}_%`],
     });
@@ -426,7 +426,7 @@ describe("Phase 005 Intercom registered lifecycle", () => {
       providerAccountId: "phase005-app",
       externalConversationId: "conversation-phase005",
     };
-    const documents = await caseStore.getClientForTests().execute({
+    const documents = await caseStore.getClient().execute({
       sql: "SELECT d.source, d.version, g.tenant_id, g.provider_kind, g.provider_account_id FROM support_knowledge_documents d JOIN support_knowledge_generations g ON g.id = d.generation_id WHERE d.generation_id = ? ORDER BY d.source",
       args: [publication.generationId!],
     });

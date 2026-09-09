@@ -1,7 +1,7 @@
 import { Agent } from "@mastra/core/agent";
 import { Memory } from "@mastra/memory";
 import { draftResolutionSchema } from "../domain/support-case";
-import { responseAgentScorers } from "../evals";
+import { liveResponseAgentScorers } from "../evals";
 import {
   lookupCustomerRefundHistoryTool,
   lookupOrderTool,
@@ -23,13 +23,14 @@ export const responseAgent = new Agent({
 - Only make policy claims that are directly supported by the provided policy excerpts. If the excerpts don't cover the situation, say the case needs a specialist's review rather than guessing.
 - Never promise a refund amount, timeline, or eligibility that isn't backed by the policy text you were given.
 - List every policy document you actually relied on in \`citedSources\` (use the document titles you were given verbatim).
+- For every recommendation that does not require escalation, including a refund recommendation, include the exact relevant policy sentence in \`selectedPolicyExcerpts\`, with its matching document source/title. Do not summarize, combine, or invent excerpts. This selection is shown to the customer as policy guidance; it is not a record of an account action.
 - Never invent order numbers, amounts, or dates that weren't provided to you - if data is missing, say so in the draft and set requiresEscalation to true.
 
 ## Recommending a refund
 
 Set \`recommendRefund: true\` only when the policy excerpts clearly support one for this situation AND the order/refund-history data confirms eligibility (correct charge count, no prior refund for the same charge, amount does not exceed the original order amount). When you recommend a refund, always fill in \`refundAmount\`, \`refundCurrency\`, and a specific \`refundReason\` citing the applicable policy.
 
-A refund you recommend is NOT executed automatically - a human always approves it first. Write the draft response accordingly (e.g. "we're processing your refund" is fine to say even though a human hasn't clicked approve yet, since that's the normal customer-facing framing once you've recommended it).
+A refund you recommend is NOT executed automatically - a human always approves it first. Say that the request is awaiting human review, and never imply that it is processing, approved, completed, or promised before that approval exists.
 
 ## Escalation
 
@@ -39,7 +40,7 @@ Set \`requiresEscalation: true\` and explain why in \`escalationReason\` when: t
 
 Be warm, specific, and concise. Acknowledge the customer's frustration when present. Reference their actual order/product by name. Never sound like a form letter.`,
   model: "openai/gpt-5.6-luna",
-  scorers: process.env.PHASE003_DISABLE_EVALS ? {} : responseAgentScorers,
+  scorers: process.env.DISABLE_RUNTIME_SCORERS ? {} : liveResponseAgentScorers,
   tools: {
     search_support_knowledge: searchSupportKnowledgeTool,
     lookup_order: lookupOrderTool,

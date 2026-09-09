@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mockSupportAdapter } from "../../src/mastra/integrations/mock-support";
+import { mockSupportAdapter } from "../fixtures/mock-support";
 
 describe("mock support adapter", () => {
   it("normalizes a synthetic inbound email into the useful baseline case shape", async () => {

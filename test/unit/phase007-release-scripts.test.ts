@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { cp, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -44,17 +44,47 @@ function localEnvironment(overrides: Record<string, string> = {}) {
 }
 
 describe("PHASE-007 environment validation", () => {
-  it("accepts the authenticated local mock profile without creating its database", async () => {
+  it("keeps the CI preflight deterministic without an OpenAI key", async () => {
+    const workflow = await readFile(
+      resolve(root, ".github/workflows/ci.yml"),
+      "utf8",
+    );
+    const preflight = workflow.match(
+      /- name: Environment and documentation checks\n        run: \|\n          export LOCAL_AUTH_SIGNING_KEY=ci-local-signing-key-at-least-32-characters\n          npm run check:env -- (?<arguments>.+)\n/,
+    );
+
+    expect(preflight?.groups?.arguments).toBe(
+      "--profile=local --mode=deterministic",
+    );
+
+    const keyFreeEnvironment = localEnvironment();
+    expect(keyFreeEnvironment).not.toHaveProperty("OPENAI_API_KEY");
+
+    const result = run(
+      checkEnv,
+      preflight!.groups!.arguments.split(" "),
+      keyFreeEnvironment,
+    );
+
+    expect(result).toMatchObject({ status: 0 });
+    expect(result.output).toContain(
+      "Environment profile local is valid in deterministic mode.",
+    );
+  });
+
+  it("accepts the explicit deterministic local mock profile without creating its database", async () => {
     const directory = await temporaryDirectory();
     const database = join(directory, "must-not-exist.db");
     const result = run(
       checkEnv,
-      ["--profile=local"],
+      ["--profile=local", "--mode=deterministic"],
       localEnvironment({ TURSO_DATABASE_URL: `file:${database}` }),
     );
 
     expect(result).toMatchObject({ status: 0 });
-    expect(result.output).toContain("Environment profile local is valid.");
+    expect(result.output).toContain(
+      "Environment profile local is valid in deterministic mode.",
+    );
     expect(existsSync(database)).toBe(false);
   });
 
@@ -63,17 +93,50 @@ describe("PHASE-007 environment validation", () => {
       { SUPPORT_SOURCE: "mock", COMMERCE_SOURCE: "mock" },
       localEnvironment({ LOCAL_AUTH_SIGNING_KEY: "short" }),
     ]) {
-      const result = run(checkEnv, ["--profile=local"], environment);
+      const result = run(
+        checkEnv,
+        ["--profile=local", "--mode=deterministic"],
+        environment,
+      );
       expect(result.status).not.toBe(0);
       expect(result.output).toContain("LOCAL_AUTH_SIGNING_KEY");
     }
+  });
+
+  it("requires a non-empty OpenAI key by default and keeps deterministic validation explicit", () => {
+    for (const environment of [
+      localEnvironment(),
+      localEnvironment({ OPENAI_API_KEY: "   " }),
+    ]) {
+      const result = run(checkEnv, ["--profile=local"], environment);
+      expect(result.status).not.toBe(0);
+      expect(result.output).toContain(
+        "OPENAI_API_KEY is required for interactive mode.",
+      );
+    }
+
+    const interactive = run(
+      checkEnv,
+      ["--profile=local"],
+      localEnvironment({ OPENAI_API_KEY: "synthetic-interactive-key" }),
+    );
+    expect(interactive).toMatchObject({ status: 0 });
+    expect(interactive.output).toContain("valid in interactive mode.");
+
+    const unknown = run(
+      checkEnv,
+      ["--profile=local", "--mode=preview"],
+      localEnvironment(),
+    );
+    expect(unknown.status).not.toBe(0);
+    expect(unknown.output).toContain("Unknown environment mode.");
   });
 
   it("validates every enabled provider even when a different named profile is selected", () => {
     const token = "intercom-token-that-must-never-appear-in-errors";
     const result = run(
       checkEnv,
-      ["--profile=stripe"],
+      ["--profile=stripe", "--mode=deterministic"],
       localEnvironment({
         SUPPORT_SOURCE: "intercom",
         INTERCOM_ACCESS_TOKEN: token,
@@ -90,7 +153,7 @@ describe("PHASE-007 environment validation", () => {
     const liveKey = "rk_live_this-value-must-never-appear-in-errors";
     const result = run(
       checkEnv,
-      [],
+      ["--mode=deterministic"],
       localEnvironment({
         COMMERCE_SOURCE: "stripe",
         STRIPE_SANDBOX_ENABLED: "true",

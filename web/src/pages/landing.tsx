@@ -22,14 +22,13 @@ export function Landing() {
         </CardHeader>
         <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground">
           <p>
-            This baseline uses deterministic local mocks. Connect a real support
-            provider only after its adapter and security controls have been
-            implemented and verified.
+            This demo starts with synthetic local orders and policies. Optional
+            Intercom development and Stripe sandbox adapters are configured
+            separately.
           </p>
           <p>
-            First, you'll submit a message to customer support. Then, you'll see
-            the admin dashboard, where you can see how the AI handles each case
-            and when it needs your help.
+            Send a support message, inspect the recorded evidence, and review a
+            proposed refund in the admin dashboard.
           </p>
         </CardContent>
         <CardFooter>

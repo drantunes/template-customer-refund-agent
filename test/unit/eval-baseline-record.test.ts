@@ -9,13 +9,13 @@ import {
   scoreAxis,
   scorerInputFromObservation,
   truthForDatasetCase,
-} from "../../src/mastra/evals/deterministic-semantics.js";
+} from "../eval/support/deterministic-semantics.js";
 import {
   responseAgentScorers,
   scoreDraftResolutionFields,
   supportEvalScorerRegistry,
   triageAgentScorers,
-} from "../../src/mastra/evals/index";
+} from "../eval/support/dataset-scorers";
 
 function measuredReference() {
   return JSON.parse(

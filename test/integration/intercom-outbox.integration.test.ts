@@ -126,7 +126,7 @@ describe("Phase 005 fenced outbox", () => {
     );
     expect(await value.claimOutbox(1)).toEqual([]);
     const row = await value
-      .getClientForTests()
+      .getClient()
       .execute("SELECT state FROM support_outbox WHERE id = 'uncertain'");
     expect(row.rows[0]?.state).toBe("uncertain");
     await value.close();
@@ -230,7 +230,7 @@ describe("Phase 005 fenced outbox", () => {
     expect(posts).toBe(1);
     expect(
       await value
-        .getClientForTests()
+        .getClient()
         .execute(
           "SELECT state FROM support_outbox WHERE id = 'ambiguous-post'",
         ),
@@ -318,7 +318,7 @@ describe("Phase 005 fenced outbox", () => {
       await deliverOutbox(registry, 10, value);
       expect(posts).toBe(0);
       expect(
-        await value.getClientForTests().execute({
+        await value.getClient().execute({
           sql: "SELECT state, attempts, next_attempt_at FROM support_outbox WHERE id = ?",
           args: [`preflight-${failure}`],
         }),
@@ -336,7 +336,7 @@ describe("Phase 005 fenced outbox", () => {
       await deliverOutbox(registry, 10, value);
       expect(posts).toBe(1);
       expect(
-        await value.getClientForTests().execute({
+        await value.getClient().execute({
           sql: "SELECT state, attempts FROM support_outbox WHERE id = ?",
           args: [`preflight-${failure}`],
         }),
@@ -398,7 +398,7 @@ describe("Phase 005 fenced outbox", () => {
       await deliverOutbox(registry, 10, value);
       expect(posts).toBe(1);
       expect(
-        await value.getClientForTests().execute({
+        await value.getClient().execute({
           sql: "SELECT state, receipt FROM support_outbox WHERE id = ?",
           args: [`ticket-${JSON.stringify(id)}`],
         }),
@@ -485,7 +485,7 @@ describe("Phase 005 fenced outbox", () => {
     expect(posts).toBe(1);
     expect(
       await value
-        .getClientForTests()
+        .getClient()
         .execute(
           "SELECT state FROM support_outbox WHERE id = 'receipt-write-failure'",
         ),
@@ -565,7 +565,7 @@ describe("Phase 005 fenced outbox", () => {
     expect(posts).toBe(1);
     expect(
       await value
-        .getClientForTests()
+        .getClient()
         .execute(
           "SELECT state, receipt FROM support_outbox WHERE id = 'malformed-receipt'",
         ),
@@ -597,7 +597,7 @@ describe("Phase 005 fenced outbox", () => {
     });
     const [claimed] = await value.claimOutbox(1);
     await value.markOutboxStarted("crash-after-post", claimed!.leaseToken!);
-    await value.getClientForTests().execute({
+    await value.getClient().execute({
       sql: "UPDATE support_outbox SET lease_until = ? WHERE id = ?",
       args: ["2000-01-01T00:00:00.000Z", "crash-after-post"],
     });
@@ -637,7 +637,7 @@ describe("Phase 005 fenced outbox", () => {
     expect(posts).toBe(0);
     expect(
       await value
-        .getClientForTests()
+        .getClient()
         .execute(
           "SELECT state FROM support_outbox WHERE id = 'crash-after-post'",
         ),
@@ -751,7 +751,7 @@ describe("Phase 005 fenced outbox", () => {
       true,
     );
     expect(
-      await value.getClientForTests().execute({
+      await value.getClient().execute({
         sql: "SELECT next_attempt_at FROM support_outbox WHERE id = ?",
         args: ["a-1"],
       }),

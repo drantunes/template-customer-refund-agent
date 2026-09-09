@@ -1,9 +1,8 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import { caseStore } from "../lib/case-store";
-import { generateCaseId } from "../integrations/support-source";
-import type { SupportCase } from "../domain/support-case";
-import { defaultLocalBinding } from "../runtime/local-runtime";
+import { generateCaseId, type SupportCase } from "../domain/support-case";
+import { defaultLocalBinding } from "../runtime/local-support-provider";
 import {
   providerRegistry,
   resolveConfiguredBinding,

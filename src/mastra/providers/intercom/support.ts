@@ -240,6 +240,38 @@ export class IntercomSupportProvider implements SupportChannelProvider {
     )
       throw new Error("Intercom delivery binding is not configured.");
   }
+  planFinalizationOutbox(input: {
+    status: "resolved" | "escalated";
+    subject: string;
+    escalationReason?: string;
+  }) {
+    const operations: Array<{
+      operation: "note" | "status" | "ticket";
+      body: string;
+      status: string;
+    }> = [
+      {
+        operation: "status",
+        body: "",
+        status: input.status,
+      },
+    ];
+    if (input.status !== "escalated") return operations;
+    const reason =
+      input.escalationReason ?? "Support escalation requires staff review.";
+    operations.unshift({
+      operation: "note",
+      body: reason,
+      status: input.status,
+    });
+    if (this.config.ticketTypeId)
+      operations.push({
+        operation: "ticket",
+        body: reason,
+        status: input.subject,
+      });
+    return operations;
+  }
   private assertConversation(
     binding: ProviderBinding,
     response: z.infer<typeof conversationResponse>,

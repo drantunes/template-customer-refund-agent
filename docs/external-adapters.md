@@ -1,10 +1,10 @@
 # External adapter setup
 
-The default local profile uses `SUPPORT_SOURCE=mock` and `COMMERCE_SOURCE=mock`. It has no provider account requirement and is the only profile used by the ordinary test suite.
+The default local profile uses `SUPPORT_SOURCE=mock` and `COMMERCE_SOURCE=mock`. It has no provider account requirement and is the only profile used by the ordinary test suite. Interactive validation also requires `OPENAI_API_KEY`; use the explicit `--mode=deterministic` only for credential-free validation and tests.
 
 ## Intercom development workspace
 
-Use a separate development workspace and set `SUPPORT_SOURCE=intercom` plus `INTERCOM_DEVELOPMENT_ENABLED=true`. Supply `INTERCOM_TENANT_ID=local-demo`, `INTERCOM_APP_ID`, `INTERCOM_ACCESS_TOKEN`, `INTERCOM_CLIENT_SECRET`, and `INTERCOM_ADMIN_ID`, then run:
+Use a separate development workspace and set `SUPPORT_SOURCE=intercom` plus `INTERCOM_DEVELOPMENT_ENABLED=true`. Supply `OPENAI_API_KEY`, `INTERCOM_TENANT_ID=local-demo`, `INTERCOM_APP_ID`, `INTERCOM_ACCESS_TOKEN`, `INTERCOM_CLIENT_SECRET`, and `INTERCOM_ADMIN_ID`, then run:
 
 ```bash
 npm run check:env -- --profile=intercom
@@ -18,7 +18,7 @@ A Conversation remains the durable canonical reference. Replies, escalation note
 
 ## Stripe test sandbox
 
-Use a test restricted key only. Set `COMMERCE_SOURCE=stripe`, `STRIPE_SANDBOX_ENABLED=true`, `STRIPE_TENANT_ID=local-demo`, `STRIPE_ACCOUNT_ID`, `STRIPE_RESTRICTED_API_KEY`, and `STRIPE_WEBHOOK_SECRET`, then run:
+Use a test restricted key only. Set `OPENAI_API_KEY`, `COMMERCE_SOURCE=stripe`, `STRIPE_SANDBOX_ENABLED=true`, `STRIPE_TENANT_ID=local-demo`, `STRIPE_ACCOUNT_ID`, `STRIPE_RESTRICTED_API_KEY`, and `STRIPE_WEBHOOK_SECRET`, then run:
 
 ```bash
 npm run check:env -- --profile=stripe

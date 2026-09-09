@@ -4,6 +4,7 @@ import {
   type Transaction,
   type TransactionMode,
 } from "@libsql/client";
+import { resolveDatabaseUrl } from "./database-url";
 
 const writeChains = new WeakMap<object, Promise<void>>();
 const serializedClients = new WeakMap<Client, Client>();
@@ -173,7 +174,7 @@ export function serializeSqliteClient(client: Client): Client {
 export function getSharedLocalSqliteClient() {
   sharedLocalClient ??= serializeSqliteClient(
     createClient({
-      url: process.env.TURSO_DATABASE_URL || "file:./mastra.db",
+      url: resolveDatabaseUrl(),
       authToken: process.env.TURSO_AUTH_TOKEN || undefined,
       timeout: 0,
     }),

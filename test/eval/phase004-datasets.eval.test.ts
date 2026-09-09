@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { supportEvalScorerRegistry } from "../../src/mastra/evals";
+import { supportEvalScorerRegistry } from "./support/dataset-scorers";
 
 const expectedAxes = [
   "groundedness",

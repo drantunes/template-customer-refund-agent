@@ -27,7 +27,7 @@ async function loadCharacterizationRuntime(draft: {
   );
   process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
   process.env.SUPPORT_SOURCE = "mock";
-  process.env.PHASE003_DISABLE_EVALS = "1";
+  process.env.DISABLE_RUNTIME_SCORERS = "1";
   vi.resetModules();
   vi.doMock("@mastra/core/llm", async (importOriginal) => {
     const actual = await importOriginal<typeof import("@mastra/core/llm")>();
@@ -48,8 +48,7 @@ async function loadCharacterizationRuntime(draft: {
   // initialized local-runtime export to a concurrent dynamic import.
   const { mastra } = await import("../../src/mastra/index");
   const { caseStore } = await import("../../src/mastra/lib/case-store");
-  const { mockSupportAdapter } =
-    await import("../../src/mastra/integrations/mock-support");
+  const { mockSupportAdapter } = await import("../fixtures/mock-support");
   const { triageAgent } = await import("../../src/mastra/agents/triage-agent");
   const { responseAgent } =
     await import("../../src/mastra/agents/response-agent");
@@ -63,7 +62,7 @@ async function loadCharacterizationRuntime(draft: {
       intent: "duplicate_charge",
       urgency: "normal",
       sentiment: "negative",
-      requiresHumanReview: draft.recommendRefund,
+      requiresHumanReview: false,
       confidence: 1,
       rationale: "Deterministic characterization double.",
     }),
@@ -73,6 +72,13 @@ async function loadCharacterizationRuntime(draft: {
       draftResponse:
         "A deterministic response grounded in the duplicate-charge policy.",
       citedSources: ["duplicate-charge-policy"],
+      selectedPolicyExcerpts: [
+        {
+          source: "duplicate-charge-policy",
+          excerpt:
+            "Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.",
+        },
+      ],
       recommendRefund: draft.recommendRefund,
       refundAmount: draft.refundAmount,
       refundCurrency: draft.recommendRefund ? "USD" : undefined,
@@ -109,7 +115,7 @@ async function loadCharacterizationRuntime(draft: {
     },
   });
   const executionModel = async () => {
-    const action = await caseStore.getClientForTests().execute({
+    const action = await caseStore.getClient().execute({
       sql: "SELECT data FROM support_actions WHERE kind = 'refund-command' ORDER BY created_at DESC LIMIT 1",
     });
     const command = JSON.parse(String(action.rows[0]?.data ?? "{}")) as {
@@ -241,7 +247,7 @@ describe("resolve support case WIP characterization", () => {
         .getWorkflow("resolveSupportCaseWorkflow")
         .getWorkflowRunById(runId),
     ).toMatchObject({ status: "suspended" });
-    const dispatch = await caseStore.getClientForTests().execute({
+    const dispatch = await caseStore.getClient().execute({
       sql: "SELECT state FROM support_dispatch WHERE case_id = ?",
       args: [caseId],
     });
@@ -362,8 +368,7 @@ describe("resolve support case WIP characterization", () => {
       status: "escalated",
       finalResponse:
         "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
-      escalationReason:
-        "Draft lacks applicable evidence from the active publication.",
+      escalationReason: "Second-turn escalation.",
     });
     const turns = await caseStore.turns(supportCase.id);
     expect(turns).toHaveLength(2);
@@ -375,7 +380,7 @@ describe("resolve support case WIP characterization", () => {
       message: { body: "A separate second request must be escalated." },
       outcome: { status: "escalated" },
     });
-    const outbox = await caseStore.getClientForTests().execute({
+    const outbox = await caseStore.getClient().execute({
       sql: "SELECT id, body FROM support_outbox WHERE case_id = ? ORDER BY created_at, id",
       args: [supportCase.id],
     });
@@ -400,6 +405,13 @@ describe("resolve support case WIP characterization", () => {
       model: deterministicJsonModel({
         draftResponse: "A clean resolved answer for the second request.",
         citedSources: ["duplicate-charge-policy"],
+        selectedPolicyExcerpts: [
+          {
+            source: "duplicate-charge-policy",
+            excerpt:
+              "Duplicate-charge refunds do not require the customer to return anything, since no extra product/service was fulfilled.",
+          },
+        ],
         recommendRefund: false,
         requiresEscalation: false,
       }),
@@ -420,7 +432,7 @@ describe("resolve support case WIP characterization", () => {
     expect(second).toMatchObject({
       status: "resolved",
       finalResponse:
-        "We reviewed your order ORD-1001. Its current status is fulfilled.",
+        "The published Duplicate Charge Policy says: “Duplicate-charge refunds do not require the customer to return anything, since no extra product/service was fulfilled.” Your order ORD-1001 is currently recorded as fulfilled. Your Pro Plan - Monthly subscription is currently recorded as active.",
     });
     expect(second?.escalationReason).toBeUndefined();
     const turns = await caseStore.turns(supportCase.id);
@@ -512,7 +524,7 @@ describe("resolve support case WIP characterization", () => {
     await vi.waitFor(async () =>
       expect(
         (
-          await caseStore.getClientForTests().execute({
+          await caseStore.getClient().execute({
             sql: "SELECT state FROM support_dispatch WHERE case_id = ?",
             args: [ingested.result.caseId],
           })
@@ -539,9 +551,41 @@ describe("resolve support case WIP characterization", () => {
     expect(result.status).toBe("success");
     expect(await caseStore.get(supportCase.id)).toMatchObject({
       status: "escalated",
-      escalationReason:
-        "Draft lacks applicable evidence from the active publication.",
+      escalationReason: "Deterministic escalation.",
     });
+  });
+
+  it("makes triage review override a refund draft and preserves its reason", async () => {
+    const runtime = await loadCharacterizationRuntime({
+      recommendRefund: true,
+      requiresEscalation: false,
+      refundAmount: 49,
+    });
+    const { triageAgent } =
+      await import("../../src/mastra/agents/triage-agent");
+    triageAgent.__updateModel({
+      model: deterministicJsonModel({
+        intent: "duplicate_charge",
+        urgency: "high",
+        sentiment: "angry",
+        requiresHumanReview: true,
+        confidence: 0.2,
+        rationale: "The message raises a chargeback concern.",
+      }),
+    });
+    const { recoverLocalWorkflows } =
+      await import("../../src/mastra/runtime/local-runtime");
+    expect(
+      await recoverLocalWorkflows(runtime.mastra, 1, runtime.caseStore),
+    ).toBe(1);
+    expect(await runtime.caseStore.get(runtime.supportCase.id)).toMatchObject({
+      status: "escalated",
+      escalationReason:
+        "Triage requires human review: The message raises a chargeback concern.",
+    });
+    expect(
+      (await runtime.caseStore.get(runtime.supportCase.id))?.refundResult,
+    ).toBeUndefined();
   });
 
   it("reports a failed workflow when the deterministic triage transport returns an invalid result", async () => {
@@ -617,7 +661,7 @@ describe("resolve support case WIP characterization", () => {
       );
       expect(
         (
-          await caseStore.getClientForTests().execute({
+          await caseStore.getClient().execute({
             sql: "SELECT state FROM support_dispatch WHERE case_id = ?",
             args: [first.result.caseId],
           })

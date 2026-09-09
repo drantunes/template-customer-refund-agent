@@ -1,10 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { defineConfig } from "vitest/config";
 
 const inheritedDatabaseSentinel = `file:${join(tmpdir(), `phase001-vitest-inherited-sentinel-${randomUUID()}.db`)}`;
 const databaseIsolationSetup = ["test/support/database-isolation.setup.ts"];
+const webResolve = {
+  alias: {
+    "@": resolve(import.meta.dirname, "web/src"),
+  },
+};
 
 export default defineConfig({
   test: {
@@ -59,9 +64,10 @@ export default defineConfig({
         },
       },
       {
+        resolve: webResolve,
         test: {
           name: "web-unit",
-          include: ["web/src/**/*.unit.test.ts"],
+          include: ["web/src/**/*.unit.test.{ts,tsx}"],
           environment: "node",
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",
@@ -71,9 +77,10 @@ export default defineConfig({
         },
       },
       {
+        resolve: webResolve,
         test: {
           name: "web-integration",
-          include: ["web/src/**/*.integration.test.ts"],
+          include: ["web/src/**/*.integration.test.{ts,tsx}"],
           environment: "node",
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",
@@ -83,9 +90,10 @@ export default defineConfig({
         },
       },
       {
+        resolve: webResolve,
         test: {
           name: "web-contract",
-          include: ["web/src/**/*.contract.test.ts"],
+          include: ["web/src/**/*.contract.test.{ts,tsx}"],
           environment: "node",
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",
@@ -95,9 +103,10 @@ export default defineConfig({
         },
       },
       {
+        resolve: webResolve,
         test: {
           name: "web-eval",
-          include: ["web/src/**/*.eval.test.ts"],
+          include: ["web/src/**/*.eval.test.{ts,tsx}"],
           environment: "node",
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",

@@ -125,7 +125,12 @@ describe("native issue_refund approval", () => {
           idempotencyKey: "native-case",
           fingerprint,
         },
-        nativeApproval: {},
+        nativeApproval: {
+          runId: "native-run-pending",
+          toolCallId: "native-call-pending",
+          fingerprint,
+          turnId: "legacy:native-case",
+        },
       },
     });
     await caseStore.saveAction("native-case", "refund-command", fingerprint, {
@@ -297,7 +302,12 @@ describe("native issue_refund approval", () => {
           idempotencyKey: caseId,
           fingerprint,
         },
-        nativeApproval: {},
+        nativeApproval: {
+          runId: "native-run-pending",
+          toolCallId: "native-call-pending",
+          fingerprint,
+          turnId: `legacy:${caseId}`,
+        },
       },
     });
     await caseStore.saveAction(caseId, "refund-command", fingerprint, {

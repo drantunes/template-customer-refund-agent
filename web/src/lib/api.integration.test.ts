@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { listCases, submitCase } from "./api";
+import {
+  hasAnyRole,
+  listCases,
+  SessionExpiredError,
+  submitCase,
+  type SupportSession,
+} from "./api";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -51,5 +57,54 @@ describe("support API client", () => {
     await expect(listCases()).resolves.toEqual({
       cases: [],
     });
+  });
+
+  it("invalidates only the expired captured session after a 401", async () => {
+    const expiredSession: SupportSession = {
+      token: "expired-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      principal: {
+        id: "customer-alex",
+        email: "alex@example.com",
+        tenantId: "local-demo",
+        roles: ["customer"],
+      },
+    };
+    const currentOtherTabSession = { ...expiredSession, token: "new-token" };
+    const storage = new Map<string, string>([
+      ["support-demo:session", JSON.stringify(currentOtherTabSession)],
+    ]);
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      removeItem: (key: string) => storage.delete(key),
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("", { status: 401 })),
+    );
+
+    await expect(listCases(expiredSession)).rejects.toBeInstanceOf(
+      SessionExpiredError,
+    );
+    expect(storage.get("support-demo:session")).toBe(
+      JSON.stringify(currentOtherTabSession),
+    );
+  });
+
+  it("requires a matching role before a mounted session can enter a surface", () => {
+    const customerSession = {
+      token: "customer-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      principal: {
+        id: "customer-alex",
+        email: "alex@example.com",
+        tenantId: "local-demo",
+        roles: ["customer"],
+      },
+    } satisfies SupportSession;
+
+    expect(hasAnyRole(customerSession, ["customer"])).toBe(true);
+    expect(hasAnyRole(customerSession, ["approver", "admin"])).toBe(false);
   });
 });

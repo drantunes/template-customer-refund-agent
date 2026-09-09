@@ -1,23 +1,20 @@
+import {
+  caseProviderBindingsSchema,
+  providerBindingSchema,
+  type PersistedCaseProviderBindings,
+  type PersistedProviderBinding,
+} from "../domain/support-case.ts";
+
 /**
  * Provider-neutral boundaries used by workflows and tools.  A case stores the
  * binding that selected each port, so a later configuration change cannot
  * redirect an already accepted event or financial effect.
  */
-export interface ProviderBinding {
-  tenantId: string;
-  providerKind: "local" | "intercom" | "stripe";
-  providerAccountId: string;
-  externalConversationId: string;
-}
+export type ProviderBinding = PersistedProviderBinding;
 
 /** A case persists each binding independently; local fixtures use the same
  * account by default, but that convenience never changes a saved case. */
-export interface CaseProviderBindings {
-  support: ProviderBinding;
-  commerce: ProviderBinding;
-  transactions: ProviderBinding;
-  knowledge: ProviderBinding;
-}
+export type CaseProviderBindings = PersistedCaseProviderBindings;
 
 export interface Money {
   /** ISO 4217 code. Amounts are always integer minor units. */
@@ -58,6 +55,17 @@ export interface SupportChannelProvider {
     status: string,
     idempotencyKey: string,
   ): Promise<DeliveryReceipt>;
+  /** Provider-owned follow-up operations for a terminal case. The workflow
+   * persists this normalized plan atomically with its canonical reply. */
+  planFinalizationOutbox?(input: {
+    status: "resolved" | "escalated";
+    subject: string;
+    escalationReason?: string;
+  }): Array<{
+    operation: "note" | "status" | "ticket";
+    body: string;
+    status: string;
+  }>;
   /** Conversation remains canonical.  This is deliberately optional and is
    * called only by a configured structured-escalation intent. */
   convertToTicket?(
@@ -252,23 +260,26 @@ export function sameBinding(
  */
 export function bindingsForCase(case_: {
   externalId: string;
-  metadata: Record<string, unknown>;
-}): CaseProviderBindings {
-  const saved = case_.metadata.providerBindings as
-    CaseProviderBindings | undefined;
-  if (saved?.support && saved.commerce && saved.transactions && saved.knowledge)
-    return saved;
-  const legacy = case_.metadata.providerBinding as ProviderBinding | undefined;
-  const binding = legacy ?? {
-    tenantId: "local-demo",
-    providerKind: "local" as const,
-    providerAccountId: "local-demo",
-    externalConversationId: case_.externalId,
+  metadata: {
+    providerBinding?: ProviderBinding;
+    providerBindings?: CaseProviderBindings;
   };
+}): CaseProviderBindings {
+  if (case_.metadata.providerBindings !== undefined)
+    return caseProviderBindingsSchema.parse(case_.metadata.providerBindings);
+  const selected =
+    case_.metadata.providerBinding !== undefined
+      ? providerBindingSchema.parse(case_.metadata.providerBinding)
+      : {
+          tenantId: "local-demo",
+          providerKind: "local" as const,
+          providerAccountId: "local-demo",
+          externalConversationId: case_.externalId,
+        };
   return {
-    support: binding,
-    commerce: binding,
-    transactions: binding,
-    knowledge: binding,
+    support: selected,
+    commerce: selected,
+    transactions: selected,
+    knowledge: selected,
   };
 }

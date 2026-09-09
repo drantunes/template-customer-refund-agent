@@ -12,7 +12,7 @@ import {
   scorerInputFromObservation,
   trajectoryAuthorityForDatasetCase,
   truthForDatasetCase,
-} from "../../src/mastra/evals/deterministic-semantics.js";
+} from "./support/deterministic-semantics.js";
 import { deterministicJsonModel } from "../fixtures/deterministic-language-model";
 
 type DatasetCase = {
@@ -159,7 +159,7 @@ async function pinDeterministicKnowledgeFixture(
   const { publishKnowledge } =
     await import("../../src/mastra/lib/publish-knowledge");
   const authority = trajectoryAuthorityForDatasetCase(authorityId);
-  const client = caseStore.getClientForTests();
+  const client = caseStore.getClient();
   await client.execute({
     sql: "UPDATE local_knowledge SET expires_at = ? WHERE tenant_id = ? AND provider_account_id = ? AND source = ?",
     args: [
@@ -471,7 +471,7 @@ async function workflowGuardEvidence(evidenceKind: "invalid" | "expired") {
         ? new Date(Date.now() + 60_000).toISOString()
         : undefined;
     if (evidenceKind === "expired")
-      await caseStore.getClientForTests().execute({
+      await caseStore.getClient().execute({
         sql: "UPDATE local_knowledge SET expires_at = ? WHERE tenant_id = ? AND provider_account_id = ? AND source = ?",
         args: [
           expiresAt,
@@ -514,7 +514,7 @@ async function workflowGuardEvidence(evidenceKind: "invalid" | "expired") {
           .createRun({ runId: `phase004-workflow-${id}`, disableScorers: true })
       ).start({ inputData: { caseId: id, turnId: turn.id } });
       const persisted = await caseStore.get(id);
-      const outbox = await caseStore.getClientForTests().execute({
+      const outbox = await caseStore.getClient().execute({
         sql: "SELECT body FROM support_outbox WHERE case_id = ?",
         args: [id],
       });
@@ -576,6 +576,13 @@ async function observedFinancialEvidence(
         deterministicJsonModel({
           draftResponse: "The duplicate charge can be reviewed for a refund.",
           citedSources: ["duplicate-charge-policy"],
+          selectedPolicyExcerpts: [
+            {
+              source: "duplicate-charge-policy",
+              excerpt:
+                "If a customer's order or subscription shows more than one charge for the same billing period, the duplicate charge is eligible for a **full refund of the extra charge only**.",
+            },
+          ],
           recommendRefund: true,
           refundAmount: 49,
           refundCurrency: "USD",
@@ -591,7 +598,7 @@ async function observedFinancialEvidence(
         throw new Error("Financial workflow case was not persisted.");
       const activeTurnId = (current.metadata as Record<string, unknown>)
         .activeTurnId;
-      const action = await caseStore.getClientForTests().execute({
+      const action = await caseStore.getClient().execute({
         sql: "SELECT action.data FROM support_actions AS action JOIN support_turns AS turn ON turn.case_id = action.case_id AND turn.command_fingerprint = action.fingerprint WHERE action.case_id = ? AND action.kind = 'refund-command' AND turn.id = ? LIMIT 1",
         args: [id, activeTurnId],
       });
@@ -754,7 +761,7 @@ async function observedFinancialEvidence(
         ]);
     }
     const refunds = await localRuntime.refunds(configured, "ORD-1001");
-    const durableActions = await caseStore.getClientForTests().execute({
+    const durableActions = await caseStore.getClient().execute({
       sql: "SELECT COUNT(*) AS count FROM support_actions WHERE case_id = ? AND kind IN ('refund-failure', 'refund-uncertain', 'refund-command')",
       args: [id],
     });
@@ -857,7 +864,7 @@ async function caseRefundEffects(
   const { caseStore } = await import("../../src/mastra/lib/case-store");
   const { localRuntime } =
     await import("../../src/mastra/runtime/local-runtime");
-  const actions = await caseStore.getClientForTests().execute({
+  const actions = await caseStore.getClient().execute({
     sql: "SELECT COUNT(*) AS count FROM support_actions WHERE case_id = ? AND kind IN ('refund-command', 'refund-failure', 'refund-uncertain')",
     args: [caseId],
   });
@@ -888,7 +895,7 @@ describe("Phase 004 deterministic native evaluation", () => {
         JSON.parse(await readFile(new URL(file, directory), "utf8")) as Dataset,
       );
     const { supportEvalScorerRegistry } =
-      await import("../../src/mastra/evals");
+      await import("./support/dataset-scorers");
     for (const dataset of datasets)
       for (const item of dataset.cases) {
         const read = await observedReadTrajectory(item.input, {
@@ -1029,7 +1036,7 @@ describe("Phase 004 deterministic native evaluation", () => {
 
   it("makes registered scorers reject mutated observed arguments, results, and answers", async () => {
     const { supportEvalScorerRegistry } =
-      await import("../../src/mastra/evals");
+      await import("./support/dataset-scorers");
     const toolTruth = truthForDatasetCase("tool-call-correctness", {
       readOnlyToolsFirst: true,
     });
@@ -1574,7 +1581,7 @@ describe("Phase 004 deterministic native evaluation", () => {
 
   it("fails multi-turn scoring when native received history is absent or contradicted", async () => {
     const { supportEvalScorerRegistry } =
-      await import("../../src/mastra/evals");
+      await import("./support/dataset-scorers");
     const absent = await observedReadTrajectory("same conversation follow-up", {
       includeMemory: false,
     });
@@ -1665,20 +1672,17 @@ afterAll(async () => {
       .update(await readFile(new URL(import.meta.url)))
       .digest("hex"),
     scorerSourceHashes: {
-      "src/mastra/evals/index.ts": createHash("sha256")
+      "test/eval/support/dataset-scorers.ts": createHash("sha256")
         .update(
           await readFile(
-            new URL("../../src/mastra/evals/index.ts", import.meta.url),
+            new URL("./support/dataset-scorers.ts", import.meta.url),
           ),
         )
         .digest("hex"),
-      "src/mastra/evals/deterministic-semantics.js": createHash("sha256")
+      "test/eval/support/deterministic-semantics.js": createHash("sha256")
         .update(
           await readFile(
-            new URL(
-              "../../src/mastra/evals/deterministic-semantics.js",
-              import.meta.url,
-            ),
+            new URL("./support/deterministic-semantics.js", import.meta.url),
           ),
         )
         .digest("hex"),

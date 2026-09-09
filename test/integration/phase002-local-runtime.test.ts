@@ -22,12 +22,13 @@ import {
   recoverLocalWorkflows,
 } from "../../src/mastra/runtime/local-runtime";
 import { serializeSqliteClient } from "../../src/mastra/lib/sqlite-client";
+import { resolveDatabaseUrl } from "../../src/mastra/lib/database-url";
 import {
   createLocalLoopbackFacade,
   type LoopbackFetch,
   LoopbackHttpCommerceProvider,
   LoopbackHttpProviderRegistry,
-} from "../../src/mastra/providers/loopback-http";
+} from "../../src/mastra/providers/advanced/loopback-http";
 import {
   registerProviderRegistry,
   resetProviderRegistryForTests,
@@ -82,6 +83,15 @@ async function approvedCommand(store: CaseStore, key: string, minor: number) {
     idempotencyKey: key,
   };
   const command = { ...base, fingerprint: refundFingerprint(base) };
+  const persistedCommand = {
+    approvalCaseId: base.approvalCaseId,
+    orderId: base.orderId,
+    amount: moneyToLegacyAmount(base.amount),
+    currency: base.amount.currency,
+    reason: base.reason,
+    idempotencyKey: base.idempotencyKey,
+    fingerprint: command.fingerprint,
+  };
   const turnId = `native-turn-${key}`;
   const nativeRunId = `native-run-${key}`;
   const nativeToolCallId = `native-call-${key}`;
@@ -90,7 +100,7 @@ async function approvedCommand(store: CaseStore, key: string, minor: number) {
     status: "waiting_approval",
     metadata: {
       providerBinding: binding,
-      refundCommand: command,
+      refundCommand: persistedCommand,
       activeTurnId: turnId,
       nativeApproval: {
         runId: nativeRunId,
@@ -122,7 +132,7 @@ async function runtime() {
   files.push(path, `${path}-shm`, `${path}-wal`);
   const store = new CaseStore({ url: `file:${path}` });
   await store.list();
-  const local = new LocalRuntime(store.getClientForTests());
+  const local = new LocalRuntime(store.getClient());
   // Recovery is a trusted knowledge-publication boundary.  Register this
   // fixture's actual local port instead of leaving it to fail before a mocked
   // workflow can exercise recovery behavior.
@@ -173,10 +183,10 @@ describe("Phase 002 persistent local runtime", () => {
   it("preserves unrelated tables while refusing an unsupported durable-schema downgrade and rejecting stale writes", async () => {
     const { store } = await runtime();
     await store
-      .getClientForTests()
+      .getClient()
       .execute("CREATE TABLE mastra_owned_probe (id TEXT PRIMARY KEY)");
     await store
-      .getClientForTests()
+      .getClient()
       .execute("INSERT INTO mastra_owned_probe VALUES ('keep')");
     await store.create(supportCase("legacy"));
     await expect(store.migrate(1)).rejects.toThrow(
@@ -184,11 +194,8 @@ describe("Phase 002 persistent local runtime", () => {
     );
     expect((await store.get("legacy"))?.externalId).toBe("legacy");
     expect(
-      (
-        await store
-          .getClientForTests()
-          .execute("SELECT id FROM mastra_owned_probe")
-      ).rows,
+      (await store.getClient().execute("SELECT id FROM mastra_owned_probe"))
+        .rows,
     ).toHaveLength(1);
     await store.update("legacy", { subject: "Changed" }, 1);
     await expect(
@@ -267,7 +274,7 @@ describe("Phase 002 persistent local runtime", () => {
       "Refusing unsupported downgrade from support schema v22 to v3.",
     );
     const versions = await store
-      .getClientForTests()
+      .getClient()
       .execute(
         "SELECT version FROM support_schema_migrations ORDER BY version",
       );
@@ -277,7 +284,7 @@ describe("Phase 002 persistent local runtime", () => {
     ]);
     expect(
       await store
-        .getClientForTests()
+        .getClient()
         .execute("SELECT id FROM support_cases WHERE id = 'bad-migration'"),
     ).toMatchObject({
       rows: [expect.objectContaining({ id: "bad-migration" })],
@@ -300,7 +307,7 @@ describe("Phase 002 persistent local runtime", () => {
     expect(first).toEqual({ caseId: "case-one", isNew: true });
     expect(second).toEqual({ caseId: "case-one", isNew: false });
     const dispatch = await store
-      .getClientForTests()
+      .getClient()
       .execute(
         "SELECT run_id, state FROM support_dispatch WHERE case_id = 'case-one'",
       );
@@ -362,12 +369,12 @@ describe("Phase 002 persistent local runtime", () => {
         });
       }),
     );
-    const rows = await store.getClientForTests().execute({
+    const rows = await store.getClient().execute({
       sql: "SELECT case_id FROM support_conversations WHERE external_conversation_id = ?",
       args: [conversation],
     });
     expect(rows.rows).toHaveLength(1);
-    const turns = await store.getClientForTests().execute({
+    const turns = await store.getClient().execute({
       sql: "SELECT sequence, event_id FROM support_turns WHERE case_id = ? ORDER BY sequence",
       args: [String(rows.rows[0]?.case_id)],
     });
@@ -379,7 +386,7 @@ describe("Phase 002 persistent local runtime", () => {
       "event-first",
       "event-second",
     ]);
-    const messages = await store.getClientForTests().execute({
+    const messages = await store.getClient().execute({
       sql: "SELECT message_data FROM support_turns WHERE case_id = ? ORDER BY sequence",
       args: [String(rows.rows[0]?.case_id)],
     });
@@ -439,7 +446,7 @@ describe("Phase 002 persistent local runtime", () => {
     ).rejects.toThrow("owned by another principal");
     expect(
       (
-        await store.getClientForTests().execute({
+        await store.getClient().execute({
           sql: "SELECT COUNT(*) AS total FROM support_turns WHERE case_id = ?",
           args: [winnerCaseId],
         })
@@ -529,7 +536,18 @@ describe("Phase 002 persistent local runtime", () => {
     };
     const caseA = await store.get(commandA.approvalCaseId);
     await store.update(commandA.approvalCaseId, {
-      metadata: { ...caseA!.metadata, refundCommand: conflicting },
+      metadata: {
+        ...caseA!.metadata,
+        refundCommand: {
+          approvalCaseId: conflicting.approvalCaseId,
+          orderId: conflicting.orderId,
+          amount: moneyToLegacyAmount(conflicting.amount),
+          currency: conflicting.amount.currency,
+          reason: conflicting.reason,
+          idempotencyKey: conflicting.idempotencyKey,
+          fingerprint: conflicting.fingerprint,
+        },
+      },
     });
     await expect(local.issueRefund(conflicting)).rejects.toThrow(
       "approved native refund tool context",
@@ -545,7 +563,10 @@ describe("Phase 002 persistent local runtime", () => {
     const { path, store, local } = await runtime();
     await local.seed(binding);
     await expect(
-      local.issueRefund(await approvedCommand(store, "zero", 0)),
+      local.issueRefund({
+        ...(await approvedCommand(store, "zero", 1)),
+        amount: money("USD", 0),
+      }),
     ).rejects.toThrow("positive safe integer");
     const secondClient = createClient({ url: `file:${path}` });
     const secondRuntime = new LocalRuntime(secondClient);
@@ -577,7 +598,7 @@ describe("Phase 002 persistent local runtime", () => {
     await expect(
       local.fetchDocument(binding, "duplicate-charge-policy"),
     ).resolves.toMatchObject({ version: "local-v1" });
-    await store.getClientForTests().execute({
+    await store.getClient().execute({
       sql: "INSERT INTO local_orders VALUES (?, ?, 'ORD-extra', 'alex@example.com', 'Extra', 100, 'USD', 'fulfilled', 1, '2026-09-05T00:00:00.000Z')",
       args: [binding.tenantId, binding.providerAccountId],
     });
@@ -657,6 +678,42 @@ describe("Phase 002 persistent local runtime", () => {
     expect(JSON.parse(verification.stdout)).toEqual({ orders: 1, receipts: 1 });
   });
 
+  it("uses one default relative database identity across the CLI and runtime cwd", async () => {
+    const relative = `file:./phase002-cwd-${crypto.randomUUID()}.db`;
+    const expected = resolveDatabaseUrl(relative, process.cwd());
+    files.push(
+      expected.replace("file://", ""),
+      `${expected.replace("file://", "")}-shm`,
+      `${expected.replace("file://", "")}-wal`,
+    );
+    expect(
+      resolveDatabaseUrl(expected, join(process.cwd(), "src/mastra/public")),
+    ).toBe(expected);
+    await execFileAsync("npm", ["run", "local:seed"], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        TURSO_DATABASE_URL: relative,
+        LOCAL_FIXTURE_TENANT: binding.tenantId,
+        LOCAL_FIXTURE_ACCOUNT: binding.providerAccountId,
+      },
+    });
+    const previous = process.env.TURSO_DATABASE_URL;
+    process.env.TURSO_DATABASE_URL = relative;
+    try {
+      const store = new CaseStore({ url: expected });
+      const local = new LocalRuntime(store.getClient());
+      await local.seed(binding);
+      expect(
+        await local.findOrder(binding, "alex@example.com", "ORD-1001"),
+      ).toMatchObject({ orderId: "ORD-1001" });
+      await store.close();
+    } finally {
+      if (previous === undefined) delete process.env.TURSO_DATABASE_URL;
+      else process.env.TURSO_DATABASE_URL = previous;
+    }
+  });
+
   it("shares local commerce conformance through the optional loopback HTTP boundary", async () => {
     const { store, local } = await runtime();
     await local.seed(binding);
@@ -690,9 +747,9 @@ describe("Phase 002 persistent local runtime", () => {
   it("keeps a scheduled local subscription active until its controlled effective time through direct and loopback commerce", async () => {
     const { store } = await runtime();
     let current = new Date("2026-08-31T23:59:59.000Z");
-    const local = new LocalRuntime(store.getClientForTests(), () => current);
+    const local = new LocalRuntime(store.getClient(), () => current);
     await local.seed(binding);
-    await store.getClientForTests().execute({
+    await store.getClient().execute({
       sql: "UPDATE local_subscriptions SET cancel_at_period_end = 1, cancels_at = renews_at WHERE tenant_id = ? AND provider_account_id = ? AND subscription_id = 'SUB-1001'",
       args: [binding.tenantId, binding.providerAccountId],
     });
@@ -816,7 +873,7 @@ describe("Phase 002 persistent local runtime", () => {
     expect(response.status).toBe(400);
     expect(deliveriesAttempted).toBe(0);
     const deliveries = await store
-      .getClientForTests()
+      .getClient()
       .execute("SELECT COUNT(*) AS total FROM local_deliveries");
     expect(deliveries.rows[0]).toMatchObject({ total: 0 });
     await store.close();
@@ -850,7 +907,7 @@ describe("Phase 002 persistent local runtime", () => {
     );
     expect(restart).toHaveBeenCalledTimes(1);
     expect(start).not.toHaveBeenCalled();
-    const dispatches = await store.getClientForTests().execute({
+    const dispatches = await store.getClient().execute({
       sql: "SELECT case_id, state FROM support_dispatch WHERE case_id IN (?, ?)",
       args: [active.id, suspended.id],
     });
@@ -920,7 +977,7 @@ describe("Phase 002 persistent local runtime", () => {
     expect(restart).toHaveBeenCalledOnce();
     expect(
       (
-        await store.getClientForTests().execute({
+        await store.getClient().execute({
           sql: "SELECT state FROM support_dispatch WHERE case_id = ?",
           args: [pending.id],
         })
@@ -952,7 +1009,7 @@ describe("Phase 002 persistent local runtime", () => {
     const support = supportCase("resume-conflict");
     support.status = "waiting_approval";
     await store.acceptInbound(support, "resume-conflict-event", "resume-run");
-    await store.getClientForTests().execute({
+    await store.getClient().execute({
       sql: "UPDATE support_dispatch SET state = 'claimed' WHERE case_id = ?",
       args: [support.id],
     });
@@ -1085,7 +1142,7 @@ describe("Phase 002 persistent local runtime", () => {
     });
     // The separate snapshot assertion intentionally leaves this real follow-up
     // pending; keep it out of the bounded recovery sweep below.
-    await store.getClientForTests().execute({
+    await store.getClient().execute({
       sql: "UPDATE support_dispatch SET state = 'suspended' WHERE case_id = ? AND state = 'pending'",
       args: [waitingApproval.id],
     });
@@ -1196,12 +1253,12 @@ describe("Phase 002 persistent local runtime", () => {
     const receipt = await local
       .support(binding)
       .deliver(binding, claimed.body, claimed.status, claimed.id);
-    await store.getClientForTests().execute({
+    await store.getClient().execute({
       sql: "UPDATE support_outbox SET lease_until = ? WHERE id = ?",
       args: ["2000-01-01T00:00:00.000Z", claimed.id],
     });
     await deliverOutbox(local, 10, store);
-    const persisted = await store.getClientForTests().execute({
+    const persisted = await store.getClient().execute({
       sql: "SELECT state, receipt FROM support_outbox WHERE id = ?",
       args: [claimed.id],
     });
@@ -1261,7 +1318,7 @@ describe("Phase 002 persistent local runtime", () => {
     });
     await deliverOutbox(registry("Loopback HTTP 429"), 10, store);
     const after429 = await store
-      .getClientForTests()
+      .getClient()
       .execute("SELECT state FROM support_outbox WHERE id = 'outbox-429'");
     expect(after429.rows[0]).toMatchObject({ state: "pending" });
     await store.enqueueDelivery({
@@ -1273,7 +1330,7 @@ describe("Phase 002 persistent local runtime", () => {
     });
     await deliverOutbox(registry("Loopback HTTP 400"), 10, store);
     const after400 = await store
-      .getClientForTests()
+      .getClient()
       .execute("SELECT state FROM support_outbox WHERE id = 'outbox-400'");
     expect(after400.rows[0]).toMatchObject({ state: "failed" });
     await store.close();
@@ -1346,7 +1403,7 @@ describe("Phase 002 persistent local runtime", () => {
     // it had already leased the second item while the first delivery waited.
     expect(
       (
-        await store.getClientForTests().execute({
+        await store.getClient().execute({
           sql: "SELECT state, attempts FROM support_outbox WHERE id = ?",
           args: ["batch-second-outbox"],
         })
@@ -1359,7 +1416,7 @@ describe("Phase 002 persistent local runtime", () => {
 
     expect(
       (
-        await store.getClientForTests().execute({
+        await store.getClient().execute({
           sql: "SELECT state, attempts, receipt FROM support_outbox WHERE id = ?",
           args: ["batch-second-outbox"],
         })
@@ -1367,7 +1424,7 @@ describe("Phase 002 persistent local runtime", () => {
     ).toMatchObject({ state: "failed", attempts: 1, receipt: null });
     expect(
       (
-        await store.getClientForTests().execute({
+        await store.getClient().execute({
           sql: "SELECT COUNT(*) AS count FROM local_deliveries WHERE idempotency_key = ?",
           args: ["batch-second-outbox"],
         })
@@ -1423,7 +1480,7 @@ describe("Phase 002 persistent local runtime", () => {
     expect(
       (
         await store
-          .getClientForTests()
+          .getClient()
           .execute(
             "SELECT attempts FROM support_outbox WHERE id IN ('retry-first-outbox', 'retry-second-outbox') ORDER BY id",
           )
@@ -1448,11 +1505,11 @@ describe("Phase 002 persistent local runtime", () => {
     );
     // The two inserts can share a millisecond.  Make the capacity assertion
     // independent of UUID ordering when the recovery queue breaks that tie.
-    await store.getClientForTests().execute({
+    await store.getClient().execute({
       sql: "UPDATE support_dispatch SET created_at = ? WHERE case_id = ?",
       args: ["2026-09-05T00:00:00.000Z", first.id],
     });
-    await store.getClientForTests().execute({
+    await store.getClient().execute({
       sql: "UPDATE support_dispatch SET created_at = ? WHERE case_id = ?",
       args: ["2026-09-05T00:00:01.000Z", second.id],
     });
@@ -1487,7 +1544,7 @@ describe("Phase 002 persistent local runtime", () => {
     await firstEntered;
     expect(
       (
-        await store.getClientForTests().execute({
+        await store.getClient().execute({
           sql: "SELECT state, attempts FROM support_dispatch WHERE case_id = ?",
           args: [second.id],
         })
@@ -1512,7 +1569,7 @@ describe("Phase 002 persistent local runtime", () => {
       {
         getWorkflow: () => ({
           getWorkflowRunById: async () => {
-            await store.getClientForTests().execute({
+            await store.getClient().execute({
               sql: "UPDATE support_dispatch SET lease_token = ?, lease_until = ? WHERE case_id = ?",
               args: ["new-owner", "2099-01-01T00:00:00.000Z", revoked.id],
             });
@@ -1548,7 +1605,7 @@ describe("Phase 002 persistent local runtime", () => {
     expect(await store.renewOutboxLease(first.id, first.leaseToken!)).toBe(
       true,
     );
-    await store.getClientForTests().execute({
+    await store.getClient().execute({
       sql: "UPDATE support_outbox SET lease_until = ? WHERE id = ?",
       args: ["2000-01-01T00:00:00.000Z", first.id],
     });
@@ -1556,7 +1613,7 @@ describe("Phase 002 persistent local runtime", () => {
     await store.completeOutbox(first.id, { stale: true }, first.leaseToken);
     expect(
       (
-        await store.getClientForTests().execute({
+        await store.getClient().execute({
           sql: "SELECT state FROM support_outbox WHERE id = ?",
           args: [first.id],
         })
@@ -1564,14 +1621,14 @@ describe("Phase 002 persistent local runtime", () => {
     ).toMatchObject({ state: "claimed" });
     await store.retryOutbox(second.id, "crash", false, second.leaseToken);
     const [third] = await store.claimOutbox();
-    await store.getClientForTests().execute({
+    await store.getClient().execute({
       sql: "UPDATE support_outbox SET lease_until = ? WHERE id = ?",
       args: ["2000-01-01T00:00:00.000Z", third.id],
     });
     await store.claimOutbox();
     expect(
       (
-        await store.getClientForTests().execute({
+        await store.getClient().execute({
           sql: "SELECT state, last_error FROM support_outbox WHERE id = ?",
           args: [first.id],
         })
@@ -1604,7 +1661,7 @@ describe("Phase 002 persistent local runtime", () => {
     ).resolves.toBe(false);
     expect(
       (
-        await store.getClientForTests().execute({
+        await store.getClient().execute({
           sql: "SELECT state FROM support_outbox WHERE id = ?",
           args: [claim.id],
         })
@@ -1623,7 +1680,7 @@ describe("Phase 002 persistent local runtime", () => {
     const support = supportCase("stale-dispatch-case");
     await store.acceptInbound(support, "stale-dispatch-event", "stale-run");
     const [first] = await store.claimDispatch();
-    await store.getClientForTests().execute({
+    await store.getClient().execute({
       sql: "UPDATE support_dispatch SET lease_until = ? WHERE id = ?",
       args: ["2000-01-01T00:00:00.000Z", first.id],
     });
@@ -1638,7 +1695,7 @@ describe("Phase 002 persistent local runtime", () => {
     expect((await store.get(support.id))?.status).toBe("new");
     expect(
       (
-        await store.getClientForTests().execute({
+        await store.getClient().execute({
           sql: "SELECT state FROM support_dispatch WHERE id = ?",
           args: [first.id],
         })
@@ -1656,7 +1713,7 @@ describe("Phase 002 persistent local runtime", () => {
     expect((await store.get(support.id))?.status).toBe("new");
     expect(
       (
-        await store.getClientForTests().execute({
+        await store.getClient().execute({
           sql: "SELECT state, lease_token FROM support_dispatch WHERE id = ?",
           args: [first.id],
         })

@@ -2,11 +2,11 @@
   "kind": "support-eval-initial-reference",
   "runner": "deterministic-native-observed-runtime-v4",
   "executionMode": "deterministic-scripted-transport-no-paid-routes",
-  "implementationSha": "fe78accd3bae14ddb012e65bce670cd02105f646",
-  "runnerSourceHash": "7b53636c691b3f982d50d3a500d0041c536c6cd1a454061a99d587d6ac3a38af",
+  "implementationSha": "d3b4cf983e3e6ce5d66affb2fc3a0c514ffde130",
+  "runnerSourceHash": "8d179fbbeffbccadc700dc44e446599b5b66dbcb67fa50a6b38ae7d1fa412f95",
   "scorerSourceHashes": {
-    "src/mastra/evals/index.ts": "e4fd82f8cb0db282c446080890c81786c6786f85ce644b917af2e24ba9267207",
-    "src/mastra/evals/deterministic-semantics.js": "0608fd88d0ffc8069ccaf40ba1a781e0647640317a8eb61b0ede67c47411dae5"
+    "test/eval/support/dataset-scorers.ts": "3d212d35c4701029c6363a98ad7d5115a70a9d3a0da73ff37a4419255ef5667c",
+    "test/eval/support/deterministic-semantics.js": "0608fd88d0ffc8069ccaf40ba1a781e0647640317a8eb61b0ede67c47411dae5"
   },
   "datasetHashes": {
     "groundedness.v1.json": "204385f1588c7846c631afd6233400950a632cb0f285d21562e564249d6d1dfc",
@@ -23,7 +23,7 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "77ad88b6da5e126ac04b8ba5edf4af5eab1e543234ad34d2da26e23ee1fe4bde",
+        "evidenceHash": "a44ceab1e97e5b405e2834da9ec6ad314e59d342cd34a458c74fb17e206c2067",
         "summary": {
           "schemaVersion": 1,
           "caseId": "grounded-policy",
@@ -36,6 +36,7 @@
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
               "citedSources": ["Duplicate Charge Policy"],
+              "selectedPolicyExcerpts": [],
               "recommendRefund": false,
               "requiresEscalation": false
             }
@@ -68,7 +69,7 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "13ceec7f5a9903284dd9dae7447eb923aeb2140f18461694faa8c2787497848b",
+        "evidenceHash": "44714b29c3263e7c5200b45e0f8170eb69fc0790fc3f509f1981e8aabb80be6c",
         "summary": {
           "schemaVersion": 1,
           "caseId": "unsupported-policy",
@@ -81,9 +82,10 @@
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
               "citedSources": ["Invented policy"],
+              "selectedPolicyExcerpts": [],
               "recommendRefund": false,
               "requiresEscalation": true,
-              "escalationReason": "Draft lacks applicable evidence from the active publication."
+              "escalationReason": "Triage requires human review: Observed deterministic classification."
             }
           },
           "toolCalls": [],
@@ -115,9 +117,10 @@
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
               "citedSources": ["Invented policy"],
+              "selectedPolicyExcerpts": [],
               "recommendRefund": false,
               "requiresEscalation": true,
-              "escalationReason": "Draft lacks applicable evidence from the active publication."
+              "escalationReason": "Triage requires human review: Observed deterministic classification."
             },
             "order": {
               "found": true,
@@ -144,7 +147,7 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "531ed93f6a008852644ee27152351841c076613a6084a2c03e75875d4c49bcd3",
+        "evidenceHash": "bf58a97c0d48a02735e75832b8755132b1638c3829b93756be01a347c6fe940f",
         "summary": {
           "schemaVersion": 1,
           "caseId": "workflow-guard-mutation",
@@ -157,9 +160,10 @@
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
               "citedSources": ["Invented policy"],
+              "selectedPolicyExcerpts": [],
               "recommendRefund": false,
               "requiresEscalation": true,
-              "escalationReason": "Draft lacks applicable evidence from the active publication."
+              "escalationReason": "Triage requires human review: Observed deterministic classification."
             }
           },
           "toolCalls": [],
@@ -191,9 +195,10 @@
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
               "citedSources": ["Invented policy"],
+              "selectedPolicyExcerpts": [],
               "recommendRefund": false,
               "requiresEscalation": true,
-              "escalationReason": "Draft lacks applicable evidence from the active publication."
+              "escalationReason": "Triage requires human review: Observed deterministic classification."
             },
             "order": {
               "found": true,
@@ -586,7 +591,7 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "44477bf26e84081efe548bdfe59b535deda03a81ca8f26074c510e8f24d445e9",
+        "evidenceHash": "b4799052e92a1edd459a9f3018cee429bf286ef8ada2c07d663814a4844dd065",
         "summary": {
           "schemaVersion": 1,
           "caseId": "approval-required",
@@ -599,6 +604,7 @@
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
               "citedSources": ["Duplicate Charge Policy"],
+              "selectedPolicyExcerpts": [],
               "recommendRefund": false,
               "requiresEscalation": false
             }
@@ -629,7 +635,7 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "e7462ec96ce53cd46b8afec3560a196d51c51ec8ae1bba6b1bc11f8109776cb2",
+        "evidenceHash": "6ef88df2a5d0f3b500566d79851415488e55c53652e1fff2ed01e94db5e85315",
         "summary": {
           "schemaVersion": 1,
           "caseId": "evidence-required",
@@ -642,9 +648,10 @@
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
               "citedSources": [],
+              "selectedPolicyExcerpts": [],
               "recommendRefund": false,
               "requiresEscalation": true,
-              "escalationReason": "No published policy evidence was retrieved for this case."
+              "escalationReason": "The draft cited policy evidence that does not apply to this case."
             }
           },
           "toolCalls": [],
@@ -658,9 +665,10 @@
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
               "citedSources": [],
+              "selectedPolicyExcerpts": [],
               "recommendRefund": false,
               "requiresEscalation": true,
-              "escalationReason": "No published policy evidence was retrieved for this case."
+              "escalationReason": "The draft cited policy evidence that does not apply to this case."
             },
             "order": {
               "found": true,
@@ -676,7 +684,7 @@
               }
             },
             "evidenceKind": "expired",
-            "policyMatchCount": 0
+            "policyMatchCount": 5
           }
         }
       }
@@ -687,7 +695,7 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "7b21443babdaa1d90fecd78e2a1cd31b5dd106a3a8cd10b5957460c29e9376e2",
+        "evidenceHash": "aa4f0dced0d76c2e058b782c0cd8d433a9ecfc2d38c3f6b99a40d78b4eeae2cf",
         "summary": {
           "schemaVersion": 1,
           "caseId": "unapproved-financial-denied",
@@ -700,6 +708,7 @@
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
               "citedSources": ["Duplicate Charge Policy"],
+              "selectedPolicyExcerpts": [],
               "recommendRefund": false,
               "requiresEscalation": false
             }
@@ -730,7 +739,7 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "8c50643661459a3d96fee7bb268a2654d36f76ac2441046c46ccf0b81ba22d1c",
+        "evidenceHash": "9c87441af41030138ef66ca5399256cd851feb82356f54d3b240a582e0d020a3",
         "summary": {
           "schemaVersion": 1,
           "caseId": "tampered-approved-command-denied",
@@ -743,6 +752,7 @@
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
               "citedSources": ["Duplicate Charge Policy"],
+              "selectedPolicyExcerpts": [],
               "recommendRefund": false,
               "requiresEscalation": false
             }
@@ -773,7 +783,7 @@
       "critical": true,
       "score": 1,
       "evidence": {
-        "evidenceHash": "8496d9ff691f56d60ecc8a593d36d00df52b19806d05c95ccbb48224ff05a734",
+        "evidenceHash": "fec362cfec46993a8b2f994fd123bd9a57ac54e8b06075a7d1ab3b30d64dbb71",
         "summary": {
           "schemaVersion": 1,
           "caseId": "approved-replay-concurrency",
@@ -786,6 +796,7 @@
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
               "citedSources": ["Duplicate Charge Policy"],
+              "selectedPolicyExcerpts": [],
               "recommendRefund": false,
               "requiresEscalation": false
             }
@@ -816,7 +827,7 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "ab75acf2667a892057fa4058cf57a0f7a06cdea9beb5531ea2feb862aa5b3f33",
+        "evidenceHash": "75b641e3025c48fcb6d175745a01af2403137d3d6f3bc3a53763868a85da2696",
         "summary": {
           "schemaVersion": 1,
           "caseId": "clear-resolution",
@@ -829,6 +840,7 @@
             "draft": {
               "draftResponse": "Order ORD-1001 is fulfilled; the duplicate-charge policy requires review before any refund.",
               "citedSources": ["Duplicate Charge Policy"],
+              "selectedPolicyExcerpts": [],
               "recommendRefund": false,
               "requiresEscalation": false
             }
@@ -856,7 +868,7 @@
       "critical": false,
       "score": 1,
       "evidence": {
-        "evidenceHash": "2cdffd23d426f7d279f0a95bb542c9f39576cf6d66fe11c3dad853e79c575a96",
+        "evidenceHash": "423caabe9b4bcb69e6a34758081628c53f98c2ca13ac68318d204e71031a5308",
         "summary": {
           "schemaVersion": 1,
           "caseId": "insufficient-evidence",
@@ -869,9 +881,10 @@
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
               "citedSources": [],
+              "selectedPolicyExcerpts": [],
               "recommendRefund": false,
               "requiresEscalation": true,
-              "escalationReason": "No published policy evidence was retrieved for this case."
+              "escalationReason": "The draft cited policy evidence that does not apply to this case."
             }
           },
           "toolCalls": [],
@@ -898,9 +911,10 @@
             "draft": {
               "draftResponse": "Thanks for your patience. A support specialist needs to review the available information and will follow up shortly.",
               "citedSources": [],
+              "selectedPolicyExcerpts": [],
               "recommendRefund": false,
               "requiresEscalation": true,
-              "escalationReason": "No published policy evidence was retrieved for this case."
+              "escalationReason": "The draft cited policy evidence that does not apply to this case."
             },
             "order": {
               "found": true,
@@ -916,7 +930,7 @@
               }
             },
             "evidenceKind": "expired",
-            "policyMatchCount": 0
+            "policyMatchCount": 5
           }
         }
       }
@@ -1326,9 +1340,9 @@
   },
   "costMicros": 0,
   "pricing": "not-applicable-deterministic-transport",
-  "evidenceHash": "8b870c610ce42892c84570110d89dacf24ae4b639025b48fee3fcf7aa1adf1a1",
+  "evidenceHash": "5208a921e0add12801b7714069f26e8a809b54e65283b9988fec81a8cdfe7642",
   "regression": "compare-against-fixed-initial-reference",
-  "reportHash": "1b30ab277ffb2464579a2a70772a85e15808db2e2edd4979d1623edfa1250a08",
+  "reportHash": "9a0791cf78c576d150413ea7f0cb770f993e14b09d08cc8a7104943ca6eb9f66",
   "initialReference": true,
   "historicalComparison": null
 }

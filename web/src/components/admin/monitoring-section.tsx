@@ -226,7 +226,7 @@ export function MonitoringSection({ session }: { session: SupportSession }) {
               title="Escalation rate"
               value={formatPercent(summary.funnel.escalationRate)}
               description={`${summary.funnel.escalated} of ${summary.funnel.resolved + summary.funnel.escalated} decided cases needed a human.`}
-              tooltip="Share of decided cases that were escalated - either a rejected refund, a refund over the auto-approval limit, or a policy the agent couldn't resolve."
+              tooltip="Share of decided cases that were escalated - either a rejected refund, a refund over the standard review limit, or a policy the agent couldn't resolve."
             />
             <RateCard
               icon={Wallet}

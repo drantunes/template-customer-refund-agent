@@ -6,7 +6,7 @@ import type {
   SupportChannelProvider,
   TransactionalActionProvider,
 } from "../contracts";
-import { localRuntime } from "../../runtime/local-runtime";
+import { localRuntime } from "../../runtime/local-provider";
 import type { IntercomDevelopmentConfig } from "./config";
 import { IntercomSupportProvider } from "./support";
 import { IntercomKnowledgeProvider } from "./knowledge";

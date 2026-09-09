@@ -1,4 +1,4 @@
-import type { PolicyDocument } from "../types";
+import type { PolicyDocument } from "../types.ts";
 
 export const damagedItemPolicy: PolicyDocument = {
   title: "Damaged or Defective Item Policy",

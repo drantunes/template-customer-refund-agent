@@ -1,4 +1,4 @@
-import type { PolicyDocument } from "../types";
+import type { PolicyDocument } from "../types.ts";
 
 export const refundPolicy: PolicyDocument = {
   title: "General Refund Policy",

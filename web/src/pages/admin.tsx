@@ -40,12 +40,14 @@ import { StatusBadge } from "@/components/status-badge";
 import {
   approveCase,
   clearSession,
-  currentSession,
+  hasAnyRole,
   listCases,
   rejectCase,
   reindexKnowledge,
+  SessionExpiredError,
   type SupportSession,
 } from "@/lib/api";
+import { useMountedSession } from "@/lib/mounted-session";
 import { SessionLogin } from "@/components/session-login";
 import type { SupportCase } from "@/lib/types";
 import { Ellipsis, RefreshCcw } from "lucide-react";
@@ -60,9 +62,7 @@ const FILTERS = [
 ] as const;
 
 export function Admin() {
-  const [session, setSession] = useState<SupportSession | undefined>(() =>
-    currentSession(),
-  );
+  const { session, setSession, invalidateSession } = useMountedSession();
   if (!session)
     return (
       <SessionLogin
@@ -71,22 +71,31 @@ export function Admin() {
         onSession={setSession}
       />
     );
-  if (
-    !session.principal.roles.includes("approver") &&
-    !session.principal.roles.includes("admin")
-  )
+  if (!hasAnyRole(session, ["approver", "admin"]))
     return (
-      <p className="text-muted-foreground">
-        This session cannot review refunds.
-      </p>
+      <div className="flex flex-col items-start gap-3">
+        <p className="text-muted-foreground">
+          This session cannot review refunds.
+        </p>
+        <Button
+          variant="outline"
+          onClick={() => {
+            clearSession(session);
+            setSession(undefined);
+          }}
+        >
+          Switch account
+        </Button>
+      </div>
     );
 
   return (
     <AdminSession
       key={session.token}
       session={session}
+      onSessionExpired={invalidateSession}
       onSignOut={() => {
-        clearSession();
+        clearSession(session);
         setSession(undefined);
       }}
     />
@@ -96,9 +105,11 @@ export function Admin() {
 function AdminSession({
   session,
   onSignOut,
+  onSessionExpired,
 }: {
   session: SupportSession;
   onSignOut: () => void;
+  onSessionExpired: (session: SupportSession) => void;
 }) {
   const mounted = useRef(true);
   const { caseId } = useParams<{ caseId?: string }>();
@@ -122,6 +133,10 @@ function AdminSession({
       if (!mounted.current) return;
       setCases(res.cases);
     } catch (error) {
+      if (error instanceof SessionExpiredError) {
+        onSessionExpired(session);
+        return;
+      }
       if (mounted.current)
         toast.error(
           error instanceof Error ? error.message : "Failed to load cases",
@@ -129,7 +144,7 @@ function AdminSession({
     } finally {
       if (mounted.current) setLoading(false);
     }
-  }, [session]);
+  }, [session, onSessionExpired]);
 
   useEffect(() => {
     refresh();
@@ -164,6 +179,10 @@ function AdminSession({
       if (!mounted.current) return;
       toast.success(`Indexed ${result.indexed} policy chunks`);
     } catch (error) {
+      if (error instanceof SessionExpiredError) {
+        onSessionExpired(session);
+        return;
+      }
       if (mounted.current)
         toast.error(error instanceof Error ? error.message : "Reindex failed");
     } finally {
@@ -187,6 +206,10 @@ function AdminSession({
         approved ? "Refund approved" : "Refund rejected and case escalated",
       );
     } catch (error) {
+      if (error instanceof SessionExpiredError) {
+        onSessionExpired(session);
+        return;
+      }
       if (mounted.current)
         toast.error(
           error instanceof Error ? error.message : "Failed to submit decision",

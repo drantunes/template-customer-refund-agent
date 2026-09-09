@@ -2,7 +2,7 @@ import { rm } from "node:fs/promises";
 import { RequestContext } from "@mastra/core/request-context";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { supportCaseSchema } from "../../src/mastra/domain/support-case";
+import { publicSupportCaseSchema } from "../../src/mastra/domain/support-case";
 import { caseStore } from "../../src/mastra/lib/case-store";
 import { inboundSupportResponseSchema } from "../../src/mastra/server/contracts";
 import {
@@ -38,13 +38,21 @@ const otherTenantHeaders = {
 async function bindApprovalFixture(store: typeof caseStore, caseId: string) {
   const fingerprint = `fingerprint-${caseId}`;
   const current = await store.get(caseId);
-  const turnId = (current!.metadata as Record<string, unknown>).activeTurnId;
+  const turnId = current!.metadata.activeTurnId;
   if (typeof turnId !== "string")
     throw new Error("Expected the durable dispatch turn for approval binding.");
   await store.update(caseId, {
     metadata: {
       ...current!.metadata,
-      refundCommand: { fingerprint },
+      refundCommand: {
+        approvalCaseId: caseId,
+        orderId: "ORD-1001",
+        amount: 25,
+        currency: "USD",
+        reason: "duplicate charge",
+        idempotencyKey: `refund-${caseId}`,
+        fingerprint,
+      },
       nativeApproval: {
         runId: `native-${caseId}`,
         toolCallId: `tool-${caseId}`,
@@ -57,6 +65,12 @@ async function bindApprovalFixture(store: typeof caseStore, caseId: string) {
     },
   });
   await store.saveAction(caseId, "refund-command", fingerprint, {
+    approvalCaseId: caseId,
+    orderId: "ORD-1001",
+    amount: 25,
+    currency: "USD",
+    reason: "duplicate charge",
+    idempotencyKey: `refund-${caseId}`,
     fingerprint,
   });
   return fingerprint;
@@ -97,7 +111,9 @@ async function loadDeterministicRuntime() {
   vi.doMock("../../src/mastra/evals", () => ({
     responseAgentScorers: {},
     triageAgentScorers: {},
-    supportEvalScorerRegistry: {},
+    liveSupportScorerRegistry: {},
+    liveResponseAgentScorers: {},
+    liveTriageAgentScorers: {},
   }));
   vi.doMock("@mastra/core/llm", async (importOriginal) => {
     const actual = await importOriginal<typeof import("@mastra/core/llm")>();
@@ -131,7 +147,7 @@ async function loadDeterministicRuntime() {
       intent: "duplicate_charge",
       urgency: "normal",
       sentiment: "negative",
-      requiresHumanReview: true,
+      requiresHumanReview: false,
       confidence: 1,
       rationale: "Deterministic HTTP context test.",
     },
@@ -142,6 +158,13 @@ async function loadDeterministicRuntime() {
     object: {
       draftResponse: "A deterministic refund response.",
       citedSources: ["duplicate-charge-policy"],
+      selectedPolicyExcerpts: [
+        {
+          source: "duplicate-charge-policy",
+          excerpt:
+            "If a customer's order or subscription shows more than one charge for the same billing period, the duplicate charge is eligible for a **full refund of the extra charge only**.",
+        },
+      ],
       recommendRefund: true,
       refundAmount: 49,
       refundCurrency: "USD",
@@ -162,7 +185,7 @@ async function loadDeterministicRuntime() {
     const action = await (
       await import("../../src/mastra/lib/case-store")
     ).caseStore
-      .getClientForTests()
+      .getClient()
       .execute(
         "SELECT data FROM support_actions WHERE kind = 'refund-command' ORDER BY created_at DESC LIMIT 1",
       );
@@ -355,7 +378,7 @@ describe("support workflow HTTP context propagation", () => {
         "waiting_approval",
       ),
     );
-    const client = runtimeCaseStore.getClientForTests();
+    const client = runtimeCaseStore.getClient();
     const accepted = await client.execute({
       sql: "SELECT accepted_at FROM support_cases WHERE id = ?",
       args: [caseId],
@@ -550,7 +573,7 @@ describe("support workflow HTTP context propagation", () => {
       status: "waiting_approval",
       workflowRunId: runId,
     });
-    await runtimeCaseStore.getClientForTests().execute({
+    await runtimeCaseStore.getClient().execute({
       sql: "UPDATE support_dispatch SET state = 'suspended', lease_until = NULL, lease_token = NULL WHERE case_id = ?",
       args: [caseId],
     });
@@ -573,7 +596,35 @@ describe("support workflow HTTP context propagation", () => {
       }),
     } as never);
     vi.spyOn(mastra, "getAgent").mockReturnValue({
-      approveToolCallGenerate: async () => undefined,
+      approveToolCallGenerate: async () => {
+        resumeStarted();
+        await slowResult;
+        const executedAt = new Date().toISOString();
+        await runtimeCaseStore.recordEffect(`refund-${caseId}`, fingerprint, {
+          refundId: `refund-${caseId}`,
+          orderId: "ORD-1001",
+          amount: { currency: "USD", minor: 2500 },
+          idempotencyKey: `refund-${caseId}`,
+          executedAt,
+          replayed: false,
+        });
+        await runtimeCaseStore.projectRefundToolExecution({
+          caseId,
+          turnId: (await runtimeCaseStore.get(caseId))!.metadata.nativeApproval!
+            .turnId,
+          fingerprint,
+          idempotencyKey: `refund-${caseId}`,
+          result: {
+            refundId: `refund-${caseId}`,
+            orderId: "ORD-1001",
+            amount: 25,
+            currency: "USD",
+            status: "executed",
+            idempotencyKey: `refund-${caseId}`,
+            executedAt,
+          },
+        });
+      },
       declineToolCallGenerate: async () => undefined,
     } as never);
 
@@ -591,7 +642,7 @@ describe("support workflow HTTP context propagation", () => {
       );
       await started;
       await vi.advanceTimersByTimeAsync(30_000);
-      const lease = await runtimeCaseStore.getClientForTests().execute({
+      const lease = await runtimeCaseStore.getClient().execute({
         sql: "SELECT state, lease_until FROM support_dispatch WHERE case_id = ?",
         args: [caseId],
       });
@@ -650,7 +701,7 @@ describe("support workflow HTTP context propagation", () => {
       status: "waiting_approval",
       workflowRunId: runId,
     });
-    await runtimeCaseStore.getClientForTests().execute({
+    await runtimeCaseStore.getClient().execute({
       sql: "UPDATE support_dispatch SET state = 'suspended', lease_until = NULL, lease_token = NULL WHERE case_id = ?",
       args: [caseId],
     });
@@ -673,7 +724,35 @@ describe("support workflow HTTP context propagation", () => {
       }),
     } as never);
     vi.spyOn(mastra, "getAgent").mockReturnValue({
-      approveToolCallGenerate: async () => undefined,
+      approveToolCallGenerate: async () => {
+        resumeStarted();
+        await slowResult;
+        const executedAt = new Date().toISOString();
+        await runtimeCaseStore.recordEffect(`refund-${caseId}`, fingerprint, {
+          refundId: `refund-${caseId}`,
+          orderId: "ORD-1001",
+          amount: { currency: "USD", minor: 2500 },
+          idempotencyKey: `refund-${caseId}`,
+          executedAt,
+          replayed: false,
+        });
+        await runtimeCaseStore.projectRefundToolExecution({
+          caseId,
+          turnId: (await runtimeCaseStore.get(caseId))!.metadata.nativeApproval!
+            .turnId,
+          fingerprint,
+          idempotencyKey: `refund-${caseId}`,
+          result: {
+            refundId: `refund-${caseId}`,
+            orderId: "ORD-1001",
+            amount: 25,
+            currency: "USD",
+            status: "executed",
+            idempotencyKey: `refund-${caseId}`,
+            executedAt,
+          },
+        });
+      },
       declineToolCallGenerate: async () => undefined,
     } as never);
 
@@ -688,7 +767,7 @@ describe("support workflow HTTP context propagation", () => {
         },
       );
       await started;
-      await runtimeCaseStore.getClientForTests().execute({
+      await runtimeCaseStore.getClient().execute({
         sql: "UPDATE support_dispatch SET lease_token = ? WHERE case_id = ?",
         args: ["current-owner", caseId],
       });
@@ -697,7 +776,7 @@ describe("support workflow HTTP context propagation", () => {
       expect((await request).status).toBe(409);
       expect(
         (
-          await runtimeCaseStore.getClientForTests().execute({
+          await runtimeCaseStore.getClient().execute({
             sql: "SELECT state, lease_token FROM support_dispatch WHERE case_id = ?",
             args: [caseId],
           })
@@ -786,7 +865,7 @@ describe("support workflow HTTP context propagation", () => {
       expect((await runtimeCaseStore.get(id))?.status).toBe("resolved"),
     );
     const recovered = (await runtimeCaseStore.get(id))!;
-    const outbox = await runtimeCaseStore.getClientForTests().execute({
+    const outbox = await runtimeCaseStore.getClient().execute({
       sql: "SELECT body, state FROM support_outbox WHERE case_id = ?",
       args: [id],
     });
@@ -902,9 +981,9 @@ describe("support workflow HTTP context propagation", () => {
       },
     );
     expect(approved.status).toBe(200);
-    expect(supportCaseSchema.safeParse(await approved.json()).success).toBe(
-      true,
-    );
+    expect(
+      publicSupportCaseSchema.safeParse(await approved.json()).success,
+    ).toBe(true);
     expect(vi.mocked(issueRefundTool.execute)).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -990,7 +1069,7 @@ describe("support workflow HTTP context propagation", () => {
         },
       } as never,
     });
-    const client = runtimeCaseStore.getClientForTests();
+    const client = runtimeCaseStore.getClient();
     const counts = async () =>
       client.execute(
         "SELECT (SELECT COUNT(*) FROM support_cases) cases, (SELECT COUNT(*) FROM support_actions) actions, (SELECT COUNT(*) FROM support_outbox) outbox, (SELECT COUNT(*) FROM local_orders) orders, (SELECT COUNT(*) FROM local_knowledge) knowledge, (SELECT COUNT(*) FROM support_knowledge_generations) generations",
@@ -1153,7 +1232,7 @@ describe("support workflow HTTP context propagation", () => {
     );
     const supportCase = await runtimeCaseStore.get(caseId);
     if (!supportCase) throw new Error("Expected escalated support case.");
-    const outbox = await runtimeCaseStore.getClientForTests().execute({
+    const outbox = await runtimeCaseStore.getClient().execute({
       sql: "SELECT body FROM support_outbox WHERE case_id = ?",
       args: [caseId],
     });
@@ -1184,6 +1263,13 @@ describe("support workflow HTTP context propagation", () => {
           // The registered retrieval fixture exposes this active, applicable
           // policy title. Both model flags deliberately avoid approval.
           citedSources: ["Duplicate Charge Policy"],
+          selectedPolicyExcerpts: [
+            {
+              source: "Duplicate Charge Policy",
+              excerpt:
+                "Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.",
+            },
+          ],
           recommendRefund: false,
           requiresEscalation: false,
         },
@@ -1208,16 +1294,16 @@ describe("support workflow HTTP context propagation", () => {
       );
       const supportCase = await runtimeCaseStore.get(caseId);
       if (!supportCase) throw new Error("Expected resolved support case.");
-      const outbox = await runtimeCaseStore.getClientForTests().execute({
+      const outbox = await runtimeCaseStore.getClient().execute({
         sql: "SELECT body, state FROM support_outbox WHERE case_id = ?",
         args: [caseId],
       });
-      const durable = await runtimeCaseStore.getClientForTests().execute({
+      const durable = await runtimeCaseStore.getClient().execute({
         sql: "SELECT (SELECT COUNT(*) FROM support_decisions WHERE case_id = ?) AS approvals, (SELECT COUNT(*) FROM support_idempotency) AS effects, (SELECT COUNT(*) FROM local_refunds) AS refunds",
         args: [caseId],
       });
       expect(supportCase.finalResponse).toBe(
-        "We reviewed your order ORD-1001. Its current status is fulfilled.",
+        "The published Duplicate Charge Policy says: “Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.” Your order ORD-1001 is currently recorded as fulfilled. Your Pro Plan - Monthly subscription is currently recorded as active.",
       );
       expect(supportCase.finalResponse).not.toContain(draftResponse);
       expect(String(outbox.rows[0]?.body)).toBe(supportCase.finalResponse);
@@ -1240,6 +1326,13 @@ describe("support workflow HTTP context propagation", () => {
       object: {
         draftResponse: "Your order is fulfilled and no refund is needed.",
         citedSources: ["Duplicate Charge Policy"],
+        selectedPolicyExcerpts: [
+          {
+            source: "Duplicate Charge Policy",
+            excerpt:
+              "Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.",
+          },
+        ],
         recommendRefund: false,
         requiresEscalation: false,
       },
@@ -1262,7 +1355,7 @@ describe("support workflow HTTP context propagation", () => {
     );
     const supportCase = (await runtimeCaseStore.get(caseId))!;
     expect(supportCase.finalResponse).toBe(
-      "We reviewed your order ORD-1001. Its current status is fulfilled.",
+      "The published Duplicate Charge Policy says: “Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.” Your order ORD-1001 is currently recorded as fulfilled. Your Pro Plan - Monthly subscription is currently recorded as active.",
     );
   });
 
@@ -1300,7 +1393,7 @@ describe("support workflow HTTP context propagation", () => {
       expect((await runtimeCaseStore.get(caseId))?.status).toBe("resolved"),
     );
     const supportCase = (await runtimeCaseStore.get(caseId))!;
-    const outbox = await runtimeCaseStore.getClientForTests().execute({
+    const outbox = await runtimeCaseStore.getClient().execute({
       sql: "SELECT body, state FROM support_outbox WHERE case_id = ?",
       args: [caseId],
     });
@@ -1349,11 +1442,11 @@ describe("support workflow HTTP context propagation", () => {
       expect((await runtimeCaseStore.get(caseId))?.status).toBe("escalated"),
     );
     const supportCase = (await runtimeCaseStore.get(caseId))!;
-    const outbox = await runtimeCaseStore.getClientForTests().execute({
+    const outbox = await runtimeCaseStore.getClient().execute({
       sql: "SELECT body, state FROM support_outbox WHERE case_id = ?",
       args: [caseId],
     });
-    const effects = await runtimeCaseStore.getClientForTests().execute({
+    const effects = await runtimeCaseStore.getClient().execute({
       sql: "SELECT COUNT(*) AS count FROM support_idempotency",
     });
     expect(effects.rows[0]?.count).toBe(0);
@@ -1399,7 +1492,7 @@ describe("support workflow HTTP context propagation", () => {
     );
     const supportCase = await runtimeCaseStore.get(caseId);
     if (!supportCase) throw new Error("Expected escalated support case.");
-    const outbox = await runtimeCaseStore.getClientForTests().execute({
+    const outbox = await runtimeCaseStore.getClient().execute({
       sql: "SELECT body FROM support_outbox WHERE case_id = ?",
       args: [caseId],
     });
@@ -1428,7 +1521,7 @@ describe("support workflow HTTP context propagation", () => {
     // The workflow publishes this source row before it seals the candidate
     // generation. Advancing the deterministic clock later makes the sealed
     // authority expired without mutating its immutable document row.
-    await runtimeCaseStore.getClientForTests().execute({
+    await runtimeCaseStore.getClient().execute({
       sql: "UPDATE local_knowledge SET expires_at = ? WHERE tenant_id = ? AND provider_account_id = ?",
       args: [expiresAt, "local-demo", "local-demo"],
     });
@@ -1464,7 +1557,7 @@ describe("support workflow HTTP context propagation", () => {
     );
     const supportCase = await runtimeCaseStore.get(caseId);
     if (!supportCase) throw new Error("Expected escalated support case.");
-    const outbox = await runtimeCaseStore.getClientForTests().execute({
+    const outbox = await runtimeCaseStore.getClient().execute({
       sql: "SELECT body FROM support_outbox WHERE case_id = ?",
       args: [caseId],
     });
@@ -1521,7 +1614,7 @@ describe("support workflow HTTP context propagation", () => {
       status: "resolved",
       metadata: { ...current!.metadata, activeTurnId: firstTurn.id },
     });
-    await runtimeCaseStore.getClientForTests().execute({
+    await runtimeCaseStore.getClient().execute({
       sql: "UPDATE support_turns SET state = 'resolved', outcome_data = ? WHERE id = ? AND case_id = ?",
       args: [
         JSON.stringify({
@@ -1546,7 +1639,7 @@ describe("support workflow HTTP context propagation", () => {
       },
     });
     const secondTurn = await runtimeCaseStore.turn(caseId, second.turnId!);
-    await runtimeCaseStore.getClientForTests().execute({
+    await runtimeCaseStore.getClient().execute({
       sql: "UPDATE support_turns SET state = 'resolved', outcome_data = ? WHERE id = ? AND case_id = ?",
       args: [
         JSON.stringify({
@@ -1667,7 +1760,7 @@ describe("support workflow HTTP context propagation", () => {
     // Leave the first finalized reply pending, then process a real follow-up.
     // The replayed worker attempt below must remain attached to this trace,
     // rather than the mutable trace on the second active turn.
-    await runtimeCaseStore.getClientForTests().execute({
+    await runtimeCaseStore.getClient().execute({
       sql: "UPDATE support_outbox SET state = 'pending', receipt = NULL, lease_until = NULL, lease_token = NULL WHERE id = ?",
       args: [firstOutboxId],
     });
@@ -1700,6 +1793,13 @@ describe("support workflow HTTP context propagation", () => {
       object: {
         draftResponse: "Your order is fulfilled and no refund is needed.",
         citedSources: ["duplicate-charge-policy"],
+        selectedPolicyExcerpts: [
+          {
+            source: "duplicate-charge-policy",
+            excerpt:
+              "Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.",
+          },
+        ],
         recommendRefund: false,
         requiresEscalation: false,
       },
@@ -1725,13 +1825,13 @@ describe("support workflow HTTP context propagation", () => {
       state: "resolved",
       outcome: {
         finalResponse:
-          "We reviewed your order ORD-1001. Its current status is fulfilled.",
+          "The published Duplicate Charge Policy says: “Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.” Your order ORD-1001 is currently recorded as fulfilled. Your Pro Plan - Monthly subscription is currently recorded as active.",
       },
     });
     const secondTraceId = (await runtimeCaseStore.get(caseId))?.traceId;
     expect(secondTraceId).toEqual(expect.any(String));
     expect(secondTraceId).not.toBe(firstTraceId);
-    const outbox = await runtimeCaseStore.getClientForTests().execute({
+    const outbox = await runtimeCaseStore.getClient().execute({
       sql: "SELECT originating_turn_id, originating_run_id, originating_trace_id, correlation_state FROM support_outbox WHERE id = ?",
       args: [firstOutboxId],
     });
@@ -1820,7 +1920,7 @@ describe("support workflow HTTP context propagation", () => {
     await vi.waitFor(async () =>
       expect(
         (
-          await runtimeCaseStore.getClientForTests().execute({
+          await runtimeCaseStore.getClient().execute({
             sql: "SELECT state FROM support_dispatch WHERE case_id = ?",
             args: [inboundCaseId],
           })
@@ -1836,6 +1936,13 @@ describe("support workflow HTTP context propagation", () => {
       object: {
         draftResponse: "Your order is fulfilled.",
         citedSources: ["duplicate-charge-policy"],
+        selectedPolicyExcerpts: [
+          {
+            source: "duplicate-charge-policy",
+            excerpt:
+              "Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.",
+          },
+        ],
         recommendRefund: false,
         requiresEscalation: false,
       },
@@ -1873,7 +1980,7 @@ describe("support workflow HTTP context propagation", () => {
       },
     );
     expect(failedFollowUp.status).toBe(500);
-    const dispatch = await runtimeCaseStore.getClientForTests().execute({
+    const dispatch = await runtimeCaseStore.getClient().execute({
       sql: "SELECT state FROM support_dispatch WHERE case_id = ? ORDER BY created_at DESC LIMIT 1",
       args: [caseId],
     });
@@ -1916,7 +2023,7 @@ describe("support workflow HTTP context propagation", () => {
       `${caseId}-event`,
       `${caseId}-run`,
     );
-    await runtimeCaseStore.getClientForTests().execute({
+    await runtimeCaseStore.getClient().execute({
       sql: "UPDATE support_dispatch SET state = 'claimed', attempts = 3, lease_until = ? WHERE case_id = ?",
       args: ["2000-01-01T00:00:00.000Z", caseId],
     });

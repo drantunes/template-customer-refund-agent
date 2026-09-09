@@ -20,7 +20,7 @@ describe("post-refund workflow recovery", () => {
     const env = {
       ...process.env,
       MASTRA_TELEMETRY_DISABLED: "1",
-      PHASE003_DISABLE_EVALS: "1",
+      DISABLE_RUNTIME_SCORERS: "1",
       LOCAL_AUTH_SIGNING_KEY:
         "phase003-test-signing-key-must-be-at-least-32-chars",
       TURSO_DATABASE_URL: `file:${databasePath}`,

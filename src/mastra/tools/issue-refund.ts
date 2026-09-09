@@ -7,7 +7,7 @@ import {
   moneyToLegacyAmount,
   refundFingerprint,
 } from "../lib/money";
-import { bindingsForPersistedCase } from "../runtime/local-runtime";
+import { bindingsForPersistedCase } from "../runtime/provider-bindings";
 import {
   ensureProviderFixtures,
   providerRegistry,
@@ -17,8 +17,8 @@ import { withNativeRefundExecutionAuthorization } from "../providers/native-exec
 import { activePrincipalHasRole } from "../server/auth";
 import { traceOperationalPort } from "../lib/operational-spans";
 import { isRefundPolicyEvidenceError } from "../lib/refund-policy-evidence";
+import { persistedRefundCommandSchema } from "../domain/refund-command";
 
-export const MAX_AUTO_APPROVABLE_REFUND = 1000;
 /**
  * An exception alone cannot prove a financial effect failed: a transport can
  * break after the provider commits. Only deterministic provider rejections
@@ -30,15 +30,6 @@ function isConfirmedRefundFailure(error: unknown) {
     String(error),
   );
 }
-const commandSchema = z.object({
-  approvalCaseId: z.string(),
-  orderId: z.string(),
-  amount: z.number().positive(),
-  currency: z.string(),
-  reason: z.string(),
-  idempotencyKey: z.string(),
-  fingerprint: z.string(),
-});
 export const refundExecutionInputSchema = z.object({
   caseId: z.string(),
   orderId: z.string(),
@@ -84,23 +75,9 @@ export const issueRefundTool = createTool({
       );
     const decision = await caseStore.approvalDecision(
       input.caseId,
-      (
-        (supportCase.metadata as Record<string, unknown>).nativeApproval as
-          | {
-              turnId?: string;
-            }
-          | undefined
-      )?.turnId,
+      supportCase.metadata.nativeApproval?.turnId,
     );
-    const native = (supportCase.metadata as Record<string, unknown>)
-      .nativeApproval as
-      | {
-          runId?: string;
-          toolCallId?: string;
-          fingerprint?: string;
-          turnId?: string;
-        }
-      | undefined;
+    const native = supportCase.metadata.nativeApproval;
     const decisionBinding = bindingsForPersistedCase(supportCase).transactions;
     if (
       !decision?.approved ||
@@ -117,8 +94,8 @@ export const issueRefundTool = createTool({
       throw new Error(
         "Refund execution requires a current authorized decision bound to the native tool call.",
       );
-    const stored = commandSchema.safeParse(
-      (supportCase.metadata as Record<string, unknown>).refundCommand,
+    const stored = persistedRefundCommandSchema.safeParse(
+      supportCase.metadata.refundCommand,
     );
     if (!stored.success)
       throw new Error("The persisted refund command is missing.");

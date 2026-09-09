@@ -204,7 +204,7 @@ describe("registered support supervisor read-only acceptance", () => {
       `${databasePath}-wal`,
     );
     process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
-    process.env.PHASE003_DISABLE_EVALS = "1";
+    process.env.DISABLE_RUNTIME_SCORERS = "1";
     vi.resetModules();
 
     const [
@@ -347,7 +347,7 @@ describe("registered support supervisor read-only acceptance", () => {
       "/support/cases/:caseId/supervisor",
       routes.supportCaseSupervisorRoute.handler,
     );
-    const client = caseStore.getClientForTests();
+    const client = caseStore.getClient();
     const counts = async () =>
       client.execute(
         "SELECT (SELECT COUNT(*) FROM support_cases) cases, (SELECT COUNT(*) FROM support_decisions) decisions, (SELECT COUNT(*) FROM support_actions) actions, (SELECT COUNT(*) FROM support_outbox) outbox, (SELECT COUNT(*) FROM support_audit) audit, (SELECT COUNT(*) FROM local_orders) orders, (SELECT COUNT(*) FROM local_subscriptions) subscriptions, (SELECT COUNT(*) FROM local_refunds) refunds, (SELECT COUNT(*) FROM local_knowledge) knowledge, (SELECT COUNT(*) FROM support_knowledge_generations) generations, (SELECT COUNT(*) FROM support_knowledge_documents) documents, (SELECT COUNT(*) FROM support_knowledge_publications) publications",

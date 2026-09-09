@@ -14,7 +14,7 @@ triageAgent.__updateModel({
     intent: "duplicate_charge",
     urgency: "normal",
     sentiment: "negative",
-    requiresHumanReview: true,
+    requiresHumanReview: false,
     confidence: 1,
     rationale: "two-process recovery fixture",
   }) as never,
@@ -23,6 +23,13 @@ responseAgent.__updateModel({
   model: deterministicJsonModel({
     draftResponse: "Two-process refund response",
     citedSources: ["duplicate-charge-policy"],
+    selectedPolicyExcerpts: [
+      {
+        source: "duplicate-charge-policy",
+        excerpt:
+          "If a customer's order or subscription shows more than one charge for the same billing period, the duplicate charge is eligible for a **full refund of the extra charge only**.",
+      },
+    ],
     recommendRefund: true,
     refundAmount: 10,
     refundCurrency: "USD",
@@ -59,7 +66,7 @@ if (mode === "init") {
     "post-refund-recovery-run",
   );
   const executionModel = async () => {
-    const action = await caseStore.getClientForTests().execute({
+    const action = await caseStore.getClient().execute({
       sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = 'refund-command'",
       args: ["post-refund-recovery-case"],
     });
@@ -154,7 +161,7 @@ if (mode === "init") {
   );
 } else if (mode === "recover") {
   await caseStore
-    .getClientForTests()
+    .getClient()
     .execute(
       "UPDATE support_dispatch SET lease_until = '2000-01-01' WHERE case_id = 'post-refund-recovery-case'",
     );
@@ -166,7 +173,7 @@ if (mode === "init") {
   await recoverLocalWorkflows(mastra);
   const supportCase = await caseStore.get("post-refund-recovery-case");
   const counts = await caseStore
-    .getClientForTests()
+    .getClient()
     .execute(
       "SELECT (SELECT COUNT(*) FROM local_refunds) refunds, (SELECT COUNT(*) FROM support_outbox) outbox, (SELECT COUNT(*) FROM local_deliveries) deliveries",
     );

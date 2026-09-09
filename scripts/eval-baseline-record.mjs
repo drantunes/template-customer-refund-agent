@@ -5,7 +5,7 @@ import {
   scorerInputFromObservation,
   scoreAxis,
   truthForDatasetCase,
-} from "../src/mastra/evals/deterministic-semantics.js";
+} from "../test/eval/support/deterministic-semantics.js";
 
 export const REQUIRED_AXES = [
   "groundedness",

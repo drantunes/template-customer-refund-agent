@@ -39,6 +39,45 @@ const contentKeys = new Set([
   "stack",
   "text",
 ]);
+const operationalEventCodes = new Map([
+  ["Mastra storage initialization failed.", "storage.initialization.failed"],
+  ["Local runtime shutdown failed.", "runtime.shutdown.failed"],
+  ["Native approval recovery failed.", "approval.recovery.failed"],
+  ["Stripe refund reconciliation failed.", "refund.reconciliation.failed"],
+  [
+    "Stripe cancellation reconciliation failed.",
+    "cancellation.reconciliation.failed",
+  ],
+  ["Completed bounded DEC-015 retention sweep.", "retention.sweep.completed"],
+  ["Local runtime recovery sweep failed.", "runtime.recovery.sweep.failed"],
+  [
+    "Failed to forward case feedback to observability storage",
+    "feedback.forward.failed",
+  ],
+  [
+    "Local outbox delivery failed; recovery will retry it.",
+    "outbox.delivery.failed",
+  ],
+  ["resolve-support-case run failed", "workflow.resolve.failed"],
+  ["Failed to persist workflow recovery.", "workflow.recovery.persist.failed"],
+]);
+const safeErrorCategories = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "AggregateError",
+  "AbortError",
+  "LibsqlError",
+]);
+const safeErrorCodes = new Set([
+  "SQLITE_BUSY",
+  "SQLITE_LOCKED",
+  "SQLITE_CANTOPEN",
+  "SQLITE_CONSTRAINT",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+]);
 
 function normalizedKey(key: string) {
   return key.replaceAll(/[^a-z0-9]/gi, "").toLowerCase();
@@ -84,6 +123,14 @@ export function redactObservabilityValue(
   seen = new WeakSet<object>(),
 ): unknown {
   if (key && isSensitiveKey(key)) return REDACTED;
+  if (key === "error" && value instanceof Error) {
+    const code = (value as Error & { code?: unknown }).code;
+    return {
+      category: safeErrorCategories.has(value.name) ? value.name : "Error",
+      ...(typeof code === "string" && safeErrorCodes.has(code) ? { code } : {}),
+      message: REDACTED_CONTENT,
+    };
+  }
   if (key && isContentKey(key)) return REDACTED_CONTENT;
   if (typeof value === "string")
     return containsSensitiveText(value) ? REDACTED : value;
@@ -106,10 +153,7 @@ export function redactObservabilityValue(
 }
 
 export function redactObservabilityMessage(message: string) {
-  // Logger messages are uncontrolled freeform strings. Diagnostics belong in
-  // structured fields (IDs, status, and timing), so do not export prose.
-  void message;
-  return REDACTED_CONTENT;
+  return operationalEventCodes.get(message) ?? REDACTED_CONTENT;
 }
 
 /** This runs after Mastra creates a span but before every configured exporter. */
