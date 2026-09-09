@@ -179,6 +179,7 @@ async function runStudioJourney(port) {
       isInitialMissingThreadInspection(path, method)
     ) {
       expectedAncillaryDenials.push(failure);
+      initialThreadInspectionAvailable = false;
       return;
     }
     if (isSupervisorExecution(path, method) || isScopedMemory(path)) {
