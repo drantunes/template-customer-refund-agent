@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import type { SupportCase } from "../../src/mastra/domain/support-case";
 import {
   errorResponseSchema,
   mockEmailPayloadSchema,
@@ -217,7 +218,7 @@ describe("support API contract", () => {
       runId: "run-feedback",
       traceId: "trace-feedback",
     };
-    const supportCase = {
+    const supportCase: SupportCase = {
       id: "feedback-case",
       externalId: "feedback-external",
       source: "mock-email" as const,
@@ -239,19 +240,20 @@ describe("support API contract", () => {
         },
       },
     };
-    vi.spyOn(caseStore, "list").mockResolvedValue([supportCase] as never);
-    vi.spyOn(caseStore, "get").mockResolvedValue(supportCase as never);
+    vi.spyOn(caseStore, "list").mockResolvedValue([supportCase]);
+    vi.spyOn(caseStore, "get").mockResolvedValue(supportCase);
     vi.spyOn(caseStore, "turns").mockResolvedValue([
       {
         id: "turn-feedback",
+        eventId: "event-feedback",
         sequence: 1,
         state: "resolved",
         runId: "run-feedback",
         outcome: { telemetry: { traceId: "trace-feedback" } },
       },
-    ] as never);
+    ]);
     vi.spyOn(caseStore, "recordFeedback").mockResolvedValue(feedback);
-    vi.spyOn(caseStore, "update").mockResolvedValue(supportCase as never);
+    vi.spyOn(caseStore, "update").mockResolvedValue(supportCase);
 
     const app = new Hono();
     app.use("/support/*", async (c, next) => {
