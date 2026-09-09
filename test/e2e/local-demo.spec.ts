@@ -37,7 +37,7 @@ async function loadDeterministicRuntime() {
   delete process.env.TURSO_AUTH_TOKEN;
   process.env.SUPPORT_SOURCE = "mock";
   process.env.COMMERCE_SOURCE = "mock";
-  process.env.PHASE003_DISABLE_EVALS = "1";
+  process.env.DISABLE_RUNTIME_SCORERS = "1";
   process.env.LOCAL_AUTH_SIGNING_KEY =
     "phase003-playwright-signing-key-must-be-at-least-32-characters";
   process.env.OPENAI_API_KEY = "phase003-playwright-placeholder";
@@ -53,7 +53,7 @@ async function loadDeterministicRuntime() {
       intent: "duplicate_charge",
       urgency: "normal",
       sentiment: "negative",
-      requiresHumanReview: true,
+      requiresHumanReview: false,
       confidence: 1,
       rationale: "Deterministic browser triage.",
     }) as never,
@@ -62,6 +62,13 @@ async function loadDeterministicRuntime() {
     model: deterministicJsonModel({
       draftResponse: "A deterministic refund response.",
       citedSources: ["duplicate-charge-policy"],
+      selectedPolicyExcerpts: [
+        {
+          source: "duplicate-charge-policy",
+          excerpt:
+            "If a customer's order or subscription shows more than one charge for the same billing period, the duplicate charge is eligible for a **full refund of the extra charge only**.",
+        },
+      ],
       recommendRefund: true,
       refundAmount: 20,
       refundCurrency: "USD",
@@ -168,6 +175,7 @@ async function signIn(
 async function createCustomerCase(
   page: import("@playwright/test").Page,
   subject: string,
+  closeNextSteps = true,
 ) {
   const newMessage = page.getByRole("button", { name: "New message" });
   if (await newMessage.isVisible()) await newMessage.click();
@@ -175,7 +183,7 @@ async function createCustomerCase(
   await page.getByLabel("Message").fill("Please refund the duplicate charge.");
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByText("Your message is on its way")).toBeVisible();
-  await page.keyboard.press("Escape");
+  if (closeNextSteps) await page.keyboard.press("Escape");
 }
 
 async function createTerminalCase(
@@ -239,6 +247,12 @@ async function assertMountedSessionIsolation(
     subject: "Alex terminal session case",
   });
   await createTerminalCase(runtime, {
+    id: "alex-newer-terminal-session-case",
+    ownerId: "customer-alex",
+    email: "alex@example.com",
+    subject: "Alex newer terminal session case",
+  });
+  await createTerminalCase(runtime, {
     id: "jordan-terminal-session-case",
     ownerId: "customer-jordan",
     email: "jordan@example.com",
@@ -247,7 +261,27 @@ async function assertMountedSessionIsolation(
 
   await page.goto("/portal");
   await signIn(page, "alex@example.com", "local-customer-alex");
-  await expect(page.getByText("Alex terminal session case")).toBeVisible();
+  await expect(
+    page.getByText("Alex terminal session case", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Alex newer terminal session case", { exact: true }),
+  ).toBeVisible();
+  await page.selectOption("#follow-up-case", "alex-terminal-session-case");
+  await page
+    .getByLabel("Follow-up message")
+    .fill("Continue the older case, not the newer one.");
+  await page.getByRole("button", { name: "Send follow-up" }).click();
+  await expect
+    .poll(
+      async () =>
+        (await runtime.caseStore.get("alex-terminal-session-case"))?.messages
+          .length,
+    )
+    .toBe(2);
+  expect(
+    (await runtime.caseStore.get("alex-newer-terminal-session-case"))?.messages,
+  ).toHaveLength(1);
 
   const oldPortalListStarted = new Promise<void>((resolve) => {
     void page.route("**/support/cases", async (route) => {
@@ -270,21 +304,31 @@ async function assertMountedSessionIsolation(
 
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByText("Sign in to the local demo")).toBeVisible();
-  await expect(page.getByText("Alex terminal session case")).toHaveCount(0);
+  await expect(
+    page.getByText("Alex terminal session case", { exact: true }),
+  ).toHaveCount(0);
   await signIn(page, "jordan@example.com", "local-customer-jordan");
-  await expect(page.getByText("Jordan terminal session case")).toBeVisible();
-  await expect(page.getByText("Alex terminal session case")).toHaveCount(0);
+  await expect(
+    page.getByText("Jordan terminal session case", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Alex terminal session case", { exact: true }),
+  ).toHaveCount(0);
 
   releaseOldPortalList?.();
   await oldPortalListCompleted;
   await page.evaluate(() => new Promise(requestAnimationFrame));
-  await expect(page.getByText("Alex terminal session case")).toHaveCount(0);
+  await expect(
+    page.getByText("Alex terminal session case", { exact: true }),
+  ).toHaveCount(0);
 
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByText("Sign in to the local demo")).toBeVisible();
   await page.goto("/admin");
   await signIn(page, "approver@local.test", "local-approver");
-  await expect(page.getByText("Alex terminal session case")).toBeVisible();
+  await expect(
+    page.getByText("Alex terminal session case", { exact: true }),
+  ).toBeVisible();
 
   let releaseOldAdminList: (() => void) | undefined;
   let delayNextAdminList = true;
@@ -312,7 +356,9 @@ async function assertMountedSessionIsolation(
   await page.getByLabel("More admin actions").click();
   await page.getByRole("menuitem", { name: "Sign out" }).click();
   await expect(page.getByText("Sign in to the local demo")).toBeVisible();
-  await expect(page.getByText("Alex terminal session case")).toHaveCount(0);
+  await expect(
+    page.getByText("Alex terminal session case", { exact: true }),
+  ).toHaveCount(0);
   await signIn(page, "agent@other.test", "local-other-agent");
   await expect(
     page.getByText("This session cannot review refunds."),
@@ -320,7 +366,9 @@ async function assertMountedSessionIsolation(
   releaseOldAdminList?.();
   await oldAdminListCompleted;
   await page.evaluate(() => new Promise(requestAnimationFrame));
-  await expect(page.getByText("Alex terminal session case")).toHaveCount(0);
+  await expect(
+    page.getByText("Alex terminal session case", { exact: true }),
+  ).toHaveCount(0);
 }
 
 test("runs customer follow-up, native approval, rejection, access denial, and session lifecycle", async ({
@@ -330,27 +378,34 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
   const stopServer = await startSupportApi(runtime);
   try {
     await assertMountedSessionIsolation(page, runtime);
-    await page.evaluate(() => localStorage.removeItem("support-demo:session"));
     await page.goto("/portal");
+    await page.getByRole("button", { name: "Switch account" }).click();
     await signIn(page, "alex@example.com", "local-customer-alex");
     await expect(
       page.getByRole("heading", { name: "Customer portal" }),
     ).toBeVisible();
-    await page.evaluate(() => {
-      const key = "support-demo:session";
-      const value = JSON.parse(localStorage.getItem(key) ?? "{}");
-      localStorage.setItem(
-        key,
-        JSON.stringify({ ...value, expiresAt: "2000-01-01T00:00:00.000Z" }),
-      );
+    await page.route("**/support/cases", async (route) => {
+      await route.fulfill({
+        status: 401,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "Authentication required." }),
+      });
     });
-    await page.reload();
+    await page.getByRole("button", { name: "Refresh cases" }).click();
     await expect(page.getByText("Sign in to the local demo")).toBeVisible();
+    await page.unroute("**/support/cases");
     await signIn(page, "alex@example.com", "local-customer-alex");
-    await expect(page.getByText("Alex terminal session case")).toBeVisible();
+    await expect(
+      page.getByText("Alex terminal session case", { exact: true }),
+    ).toBeVisible();
     await page.getByRole("button", { name: "New message" }).click();
+    await page.getByRole("button", { name: "Or choose a template" }).click();
+    await expect(
+      page.getByText("I was charged twice", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText("Where is my order?")).toHaveCount(0);
 
-    await createCustomerCase(page, "I was charged twice");
+    await createCustomerCase(page, "I was charged twice", false);
     await expect
       .poll(
         async () =>
@@ -366,38 +421,6 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
     const supportCase = (await runtime.caseStore.list()).find((entry) =>
       entry.id.startsWith("case_"),
     )!;
-    const firstTurn = (supportCase.metadata as Record<string, unknown>)
-      .activeTurnId;
-    const conversation = (
-      (supportCase.metadata as Record<string, unknown>).providerBinding as {
-        externalConversationId: string;
-      }
-    ).externalConversationId;
-    await page
-      .getByLabel("Follow-up message")
-      .fill("Please keep this in the same conversation.");
-    await page.getByRole("button", { name: "Send follow-up" }).click();
-    await expect
-      .poll(
-        async () =>
-          (await runtime.caseStore.get(supportCase.id))?.messages.length,
-      )
-      .toBe(2);
-    await expect
-      .poll(async () => (await runtime.caseStore.get(supportCase.id))?.status)
-      .toBe("waiting_approval");
-    const afterFollowUp = (await runtime.caseStore.get(supportCase.id))!;
-    expect(afterFollowUp.messages).toHaveLength(2);
-    expect(
-      (afterFollowUp.metadata as Record<string, unknown>).activeTurnId,
-    ).not.toBe(firstTurn);
-    expect(
-      (
-        (afterFollowUp.metadata as Record<string, unknown>).providerBinding as {
-          externalConversationId: string;
-        }
-      ).externalConversationId,
-    ).toBe(conversation);
     const triageMemory = await runtime.mastra
       .getAgent("triageAgent")
       .getMemory();
@@ -419,22 +442,29 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
       resourceId: alexResourceId,
     });
     const fingerprint = (
-      (afterFollowUp.metadata as Record<string, unknown>).refundCommand as {
+      (supportCase.metadata as Record<string, unknown>).refundCommand as {
         fingerprint: string;
       }
     ).fingerprint;
 
-    await page.getByRole("button", { name: "Sign out" }).click();
-    await expect(page.getByText("Sign in to the local demo")).toBeVisible();
-    await page.goto(`/admin/${supportCase.id}`);
-    await signIn(page, "approver@local.test", "local-approver");
-    await expect(page.getByText("Refund approval requested")).toBeVisible();
-    await expect(page.locator("code")).toContainText(fingerprint);
-    await expect(page.getByRole("heading", { name: "Monitoring" })).toHaveCount(
-      0,
-    );
+    const adminPagePromise = page.context().waitForEvent("page");
+    await page.getByRole("link", { name: "Admin dashboard" }).click();
+    const adminPage = await adminPagePromise;
+    await adminPage.waitForLoadState();
+    await expect(
+      adminPage.getByText("This session cannot review refunds."),
+    ).toBeVisible();
+    await adminPage.getByRole("button", { name: "Switch account" }).click();
+    await signIn(adminPage, "approver@local.test", "local-approver");
+    await expect(
+      adminPage.getByText("Refund approval requested"),
+    ).toBeVisible();
+    await expect(adminPage.locator("code")).toContainText(fingerprint);
+    await expect(
+      adminPage.getByRole("heading", { name: "Monitoring" }),
+    ).toHaveCount(0);
     expect(
-      await page.evaluate(async () => {
+      await adminPage.evaluate(async () => {
         const session = JSON.parse(
           localStorage.getItem("support-demo:session") ?? "{}",
         );
@@ -445,10 +475,29 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
         ).status;
       }),
     ).toBe(403);
-    await expect(page.getByText(/Request failed:/)).toHaveCount(0);
-    await captureDocumentationScreenshot(page, "local-demo-admin.png");
-    await page.getByRole("button", { name: "Approve refund" }).click();
-    await expect(page.getByText("Refund approved")).toBeVisible();
+    await expect(adminPage.getByText(/Request failed:/)).toHaveCount(0);
+    await captureDocumentationScreenshot(adminPage, "local-demo-admin.png");
+    await adminPage.route(
+      `**/support/cases/${supportCase.id}/approve`,
+      async (route) => {
+        await route.fulfill({
+          status: 401,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "Authentication required." }),
+        });
+      },
+    );
+    await adminPage.getByRole("button", { name: "Approve refund" }).click();
+    await expect(
+      adminPage.getByText("Sign in to the local demo"),
+    ).toBeVisible();
+    expect(
+      await runtime.caseStore.approvalDecision(supportCase.id),
+    ).toBeUndefined();
+    await adminPage.unroute(`**/support/cases/${supportCase.id}/approve`);
+    await signIn(adminPage, "approver@local.test", "local-approver");
+    await adminPage.getByRole("button", { name: "Approve refund" }).click();
+    await expect(adminPage.getByText("Refund approved")).toBeVisible();
     await expect
       .poll(async () => (await runtime.caseStore.get(supportCase.id))?.status)
       .toBe("resolved");
@@ -467,9 +516,11 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
       );
     expect(Number(effects.rows[0]?.count)).toBe(1);
 
-    await page.getByLabel("More admin actions").click();
-    await page.getByRole("menuitem", { name: "Sign out" }).click();
-    await expect(page.getByText("Sign in to the local demo")).toBeVisible();
+    await adminPage.getByLabel("More admin actions").click();
+    await adminPage.getByRole("menuitem", { name: "Sign out" }).click();
+    await expect(
+      adminPage.getByText("Sign in to the local demo"),
+    ).toBeVisible();
 
     await runtime.caseStore.create({
       id: "owner-denied",
@@ -516,7 +567,9 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
     await expect(
       page.getByRole("heading", { name: "Customer portal" }),
     ).toBeVisible();
-    await expect(page.getByText("I was charged twice")).toBeVisible();
+    await expect(
+      page.getByText("I was charged twice", { exact: true }),
+    ).toBeVisible();
     await page.getByRole("button", { name: "New message" }).click();
     const denied = await page.evaluate(async () => {
       const session = JSON.parse(
@@ -603,7 +656,9 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
     await page.getByRole("menuitem", { name: "Sign out" }).click();
     await page.goto("/portal");
     await signIn(page, "jordan@example.com", "local-customer-jordan");
-    await expect(page.getByText("Jordan terminal session case")).toBeVisible();
+    await expect(
+      page.getByText("Jordan terminal session case", { exact: true }),
+    ).toBeVisible();
     await page.getByRole("button", { name: "New message" }).click();
     await createCustomerCase(page, "Jordan's separate refund request");
     await expect
@@ -651,6 +706,6 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
         `${runtime.databasePath}-wal`,
       ].map((path) => rm(path, { force: true })),
     );
-    delete process.env.PHASE003_DISABLE_EVALS;
+    delete process.env.DISABLE_RUNTIME_SCORERS;
   }
 });

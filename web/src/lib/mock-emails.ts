@@ -37,3 +37,11 @@ export const MOCK_INBOUND_EMAILS: MockEmailPayload[] = [
     body: "I have emailed three times about a refund for an order I never even received and nobody has responded. I want my money back immediately or I am disputing the charge with my bank and posting about this everywhere.",
   },
 ];
+
+/** Samples are only valid for the account whose order or subscription they name. */
+export function samplesForPrincipal(email: string): MockEmailPayload[] {
+  const normalizedEmail = email.trim().toLowerCase();
+  return MOCK_INBOUND_EMAILS.filter(
+    (sample) => sample.from.toLowerCase() === normalizedEmail,
+  );
+}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -42,26 +42,34 @@ import { StatusBadge } from "@/components/status-badge";
 import { CaseFeedback } from "@/components/portal/case-feedback";
 import {
   clearSession,
-  currentSession,
+  hasAnyRole,
   isCaseActive,
   listCases,
+  SessionExpiredError,
   submitCase,
   submitFollowUp,
   type SupportSession,
 } from "@/lib/api";
+import { useMountedSession } from "@/lib/mounted-session";
 import { SessionLogin } from "@/components/session-login";
-import { MOCK_INBOUND_EMAILS } from "@/lib/mock-emails";
+import { samplesForPrincipal } from "@/lib/mock-emails";
 import type { MockEmailPayload, SupportCase } from "@/lib/types";
 import { ArrowUpRight, Plus, RefreshCcw, Send } from "lucide-react";
 import { Spinner } from "@/components/ui/spinner";
 
+export function caseForFollowUp(cases: SupportCase[], selectedCaseId: string) {
+  return cases.find((supportCase) => supportCase.id === selectedCaseId);
+}
+
 function CaseCard({
   supportCase,
   onCaseUpdated,
+  onSessionExpired,
   session,
 }: {
   supportCase: SupportCase;
   onCaseUpdated: (updated: SupportCase) => void;
+  onSessionExpired: (session: SupportSession) => void;
   session: SupportSession;
 }) {
   const lastAgentMessage = [...supportCase.messages]
@@ -120,6 +128,7 @@ function CaseCard({
           <CaseFeedback
             supportCase={supportCase}
             onSubmitted={onCaseUpdated}
+            onSessionExpired={onSessionExpired}
             session={session}
           />
         )}
@@ -129,9 +138,7 @@ function CaseCard({
 }
 
 export function Portal() {
-  const [session, setSession] = useState<SupportSession | undefined>(() =>
-    currentSession(),
-  );
+  const { session, setSession, invalidateSession } = useMountedSession();
   if (!session)
     return (
       <SessionLogin
@@ -140,19 +147,31 @@ export function Portal() {
         onSession={setSession}
       />
     );
-  if (!session.principal.roles.includes("customer"))
+  if (!hasAnyRole(session, ["customer"]))
     return (
-      <p className="text-muted-foreground">
-        This session cannot access the customer portal.
-      </p>
+      <div className="flex flex-col items-start gap-3">
+        <p className="text-muted-foreground">
+          This session cannot access the customer portal.
+        </p>
+        <Button
+          variant="outline"
+          onClick={() => {
+            clearSession(session);
+            setSession(undefined);
+          }}
+        >
+          Switch account
+        </Button>
+      </div>
     );
 
   return (
     <PortalSession
       key={session.token}
       session={session}
+      onSessionExpired={invalidateSession}
       onSignOut={() => {
-        clearSession();
+        clearSession(session);
         setSession(undefined);
       }}
     />
@@ -162,22 +181,25 @@ export function Portal() {
 function PortalSession({
   session,
   onSignOut,
+  onSessionExpired,
 }: {
   session: SupportSession;
   onSignOut: () => void;
+  onSessionExpired: (session: SupportSession) => void;
 }) {
   const mounted = useRef(true);
   const [name, setName] = useState("");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const mockEmails = MOCK_INBOUND_EMAILS;
+  const mockEmails = samplesForPrincipal(session.principal.email);
   const [cases, setCases] = useState<SupportCase[]>([]);
   const [loadingCases, setLoadingCases] = useState(true);
   const [view, setView] = useState<"form" | "cases">("form");
   const [nextStepsOpen, setNextStepsOpen] = useState(false);
   const [lastCaseId, setLastCaseId] = useState<string | null>(null);
   const [followUp, setFollowUp] = useState("");
+  const [selectedFollowUpCaseId, setSelectedFollowUpCaseId] = useState("");
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -192,13 +214,17 @@ function PortalSession({
       if (!mounted.current) return null;
       setCases(res.cases);
       return res.cases;
-    } catch {
+    } catch (error) {
+      if (error instanceof SessionExpiredError) {
+        onSessionExpired(session);
+        return null;
+      }
       // Keep showing the last known list on transient errors.
       return null;
     } finally {
       if (mounted.current) setLoadingCases(false);
     }
-  }, [session]);
+  }, [session, onSessionExpired]);
 
   useEffect(() => {
     (async () => {
@@ -213,6 +239,14 @@ function PortalSession({
     const interval = setInterval(refreshCases, 4000);
     return () => clearInterval(interval);
   }, [cases, refreshCases]);
+
+  useEffect(() => {
+    if (
+      selectedFollowUpCaseId &&
+      !cases.some((c) => c.id === selectedFollowUpCaseId)
+    )
+      setSelectedFollowUpCaseId("");
+  }, [cases, selectedFollowUpCaseId]);
 
   function applySample(mock: MockEmailPayload) {
     setName(mock.fromName ?? "");
@@ -242,6 +276,10 @@ function PortalSession({
       setNextStepsOpen(true);
       await refreshCases();
     } catch (error) {
+      if (error instanceof SessionExpiredError) {
+        onSessionExpired(session);
+        return;
+      }
       if (mounted.current)
         toast.error(
           error instanceof Error ? error.message : "Failed to submit case",
@@ -419,6 +457,7 @@ function PortalSession({
                       ),
                     )
                   }
+                  onSessionExpired={onSessionExpired}
                   session={session}
                 />
               ))}
@@ -428,7 +467,7 @@ function PortalSession({
                 className="flex gap-2"
                 onSubmit={async (event) => {
                   event.preventDefault();
-                  const target = cases[0];
+                  const target = caseForFollowUp(cases, selectedFollowUpCaseId);
                   if (!target || !followUp.trim()) return;
                   try {
                     const updated = await submitFollowUp(
@@ -444,6 +483,10 @@ function PortalSession({
                     );
                     setFollowUp("");
                   } catch (error) {
+                    if (error instanceof SessionExpiredError) {
+                      onSessionExpired(session);
+                      return;
+                    }
                     if (mounted.current)
                       toast.error(
                         error instanceof Error
@@ -453,13 +496,39 @@ function PortalSession({
                   }
                 }}
               >
-                <Textarea
-                  aria-label="Follow-up message"
-                  value={followUp}
-                  onChange={(event) => setFollowUp(event.target.value)}
-                  placeholder="Add a follow-up to your most recent case"
-                  rows={2}
-                />
+                <div className="flex flex-1 flex-col gap-2">
+                  <label
+                    className="text-sm font-medium"
+                    htmlFor="follow-up-case"
+                  >
+                    Add a follow-up to
+                  </label>
+                  <select
+                    id="follow-up-case"
+                    aria-label="Follow-up case"
+                    className="h-9 rounded-md border bg-background px-3 text-sm"
+                    value={selectedFollowUpCaseId}
+                    onChange={(event) =>
+                      setSelectedFollowUpCaseId(event.target.value)
+                    }
+                  >
+                    <option value="" disabled>
+                      Choose a case
+                    </option>
+                    {cases.map((supportCase) => (
+                      <option key={supportCase.id} value={supportCase.id}>
+                        {supportCase.subject} ({supportCase.id})
+                      </option>
+                    ))}
+                  </select>
+                  <Textarea
+                    aria-label="Follow-up message"
+                    value={followUp}
+                    onChange={(event) => setFollowUp(event.target.value)}
+                    placeholder="Add context to the selected case"
+                    rows={2}
+                  />
+                </div>
                 <Button type="submit" variant="outline">
                   Send follow-up
                 </Button>
@@ -487,34 +556,24 @@ function PortalSession({
             the local portal and admin dashboard.
           </p>
           <DialogFooter>
-            <Button
-              render={
-                <a
-                  href="http://localhost:4111"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Mastra Studio
-                  <ArrowUpRight data-icon="inline-end" />
-                </a>
-              }
-              nativeButton={false}
-              variant="outline"
-            ></Button>
-            <Button
-              render={
-                <a
-                  href={lastCaseId ? `/admin/${lastCaseId}` : "/admin"}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Admin dashboard
-                  <ArrowUpRight data-icon="inline-end" />
-                </a>
-              }
-              nativeButton={false}
-              onClick={() => setNextStepsOpen(false)}
-            ></Button>
+            <a
+              className={buttonVariants({ variant: "outline" })}
+              href="http://localhost:4111"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Mastra Studio
+              <ArrowUpRight data-icon="inline-end" />
+            </a>
+            <a
+              className={buttonVariants()}
+              href={lastCaseId ? `/admin/${lastCaseId}` : "/admin"}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Admin dashboard
+              <ArrowUpRight data-icon="inline-end" />
+            </a>
           </DialogFooter>
         </DialogContent>
       </Dialog>

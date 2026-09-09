@@ -18,12 +18,31 @@ export type SupportSession = {
 
 const SESSION_STORAGE_KEY = "support-demo:session";
 
+export class SessionExpiredError extends Error {
+  constructor() {
+    super("Your session has expired. Please sign in again.");
+    this.name = "SessionExpiredError";
+  }
+}
+
+export function hasAnyRole(
+  session: SupportSession,
+  roles: readonly SupportSession["principal"]["roles"][number][],
+) {
+  return roles.some((role) => session.principal.roles.includes(role));
+}
+
 export function currentSession(): SupportSession | undefined {
   try {
     const value = localStorage.getItem(SESSION_STORAGE_KEY);
     if (!value) return undefined;
     const session = JSON.parse(value) as SupportSession;
-    if (!session.token || Date.parse(session.expiresAt) <= Date.now()) {
+    const expiresAt = Date.parse(session.expiresAt);
+    if (
+      !session.token ||
+      !Number.isFinite(expiresAt) ||
+      expiresAt <= Date.now()
+    ) {
       localStorage.removeItem(SESSION_STORAGE_KEY);
       return undefined;
     }
@@ -33,8 +52,24 @@ export function currentSession(): SupportSession | undefined {
   }
 }
 
-export function clearSession() {
-  localStorage.removeItem(SESSION_STORAGE_KEY);
+export function clearSession(session?: SupportSession) {
+  if (!session) {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+    return;
+  }
+
+  // Another tab may have signed in as a different principal after this UI
+  // mounted. Never erase that newer session while invalidating the captured one.
+  try {
+    const stored = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (
+      stored &&
+      (JSON.parse(stored) as SupportSession).token === session.token
+    )
+      localStorage.removeItem(SESSION_STORAGE_KEY);
+  } catch {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+  }
 }
 
 export async function login(email: string, password: string) {
@@ -64,6 +99,10 @@ async function request<T>(
     },
   });
   const body = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    clearSession(session);
+    throw new SessionExpiredError();
+  }
   if (!res.ok) {
     throw new Error(
       body?.error ?? `Request failed: ${res.status} ${res.statusText}`,

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { submitCaseFeedback } from "@/lib/api";
+import { SessionExpiredError, submitCaseFeedback } from "@/lib/api";
 import type { SupportSession } from "@/lib/api";
 import type { SupportCase } from "@/lib/types";
 import { Send, ThumbsDown, ThumbsUp } from "lucide-react";
@@ -16,10 +16,12 @@ import { Spinner } from "@/components/ui/spinner";
 export function CaseFeedback({
   supportCase,
   onSubmitted,
+  onSessionExpired,
   session,
 }: {
   supportCase: SupportCase;
   onSubmitted: (updated: SupportCase) => void;
+  onSessionExpired: (session: SupportSession) => void;
   session: SupportSession;
 }) {
   const mounted = useRef(true);
@@ -60,6 +62,10 @@ export function CaseFeedback({
       onSubmitted(updated);
       toast.success("Thanks for the feedback!");
     } catch (error) {
+      if (error instanceof SessionExpiredError) {
+        onSessionExpired(session);
+        return;
+      }
       if (mounted.current)
         toast.error(
           error instanceof Error ? error.message : "Failed to submit feedback",
