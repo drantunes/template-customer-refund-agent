@@ -193,7 +193,7 @@ async function runStudioJourney(port) {
     await waitForCompletedRun(page, followUpAnswer);
 
     await page.getByRole("button", { name: "A", exact: true }).click();
-    await page.getByRole("menuitem", { name: "Sign out", exact: true }).click();
+    await page.getByRole("button", { name: "Sign out", exact: true }).click();
     await page
       .getByRole("button", { name: "Sign in", exact: true })
       .waitFor({ timeout: 10_000 });
