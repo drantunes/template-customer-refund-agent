@@ -262,6 +262,32 @@ export const supportOpenApiDocument = {
         },
       },
     },
+    "/support/webhooks/stripe": {
+      post: {
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object" } } },
+        },
+        responses: {
+          "200": {
+            description: "Verified Stripe event accepted or ignored",
+            content: { "application/json": { schema: { type: "object" } } },
+          },
+          "401": {
+            description: "Invalid Stripe webhook signature or payload",
+            content: {
+              "application/json": { schema: jsonSchema(errorResponseSchema) },
+            },
+          },
+          "503": {
+            description: "Verified Stripe event could not be reconciled",
+            content: {
+              "application/json": { schema: jsonSchema(errorResponseSchema) },
+            },
+          },
+        },
+      },
+    },
     "/support/cases": {
       get: {
         responses: {

@@ -1,5 +1,6 @@
 import { createClient, type Client } from "@libsql/client";
 import { createHash } from "node:crypto";
+import { moneyToLegacyAmount, structurallyEqual } from "./money";
 import type {
   CaseFeedback,
   CaseMessage,
@@ -9,7 +10,10 @@ import {
   bindingsForCase,
   sameBinding,
   type ProviderBinding,
+  type RefundCommand,
+  type SubscriptionCancellationCommand,
 } from "../providers/contracts";
+import { ownerIdForCustomer } from "../server/auth";
 import { waitForMastraStorage } from "../runtime/storage-lifecycle";
 import {
   getSharedLocalSqliteClient,
@@ -223,6 +227,33 @@ export function isRetentionTombstone(supportCase: SupportCase) {
   );
 }
 
+/**
+ * A terminal financial operation must remain a replay barrier after its
+ * provider identifiers age out.  The key and fingerprint live in the table
+ * columns; this deliberately contains no provider, customer, order, payment,
+ * refund, or subscription data.
+ */
+export const financialRetentionTombstone = Object.freeze({
+  retention: "terminal-financial-effect",
+});
+
+export function isFinancialRetentionTombstone(effect: unknown) {
+  return (
+    !!effect &&
+    typeof effect === "object" &&
+    !Array.isArray(effect) &&
+    Object.keys(effect).length === 1 &&
+    (effect as { retention?: unknown }).retention ===
+      financialRetentionTombstone.retention
+  );
+}
+
+function financialRetentionTombstoneError() {
+  return new Error(
+    "A retained terminal financial tombstone blocks replay or a new provider effect.",
+  );
+}
+
 /** App-owned migrations never enumerate, rename, or drop Mastra-owned tables. */
 export class CaseStore {
   private readonly client: Client;
@@ -244,7 +275,7 @@ export class CaseStore {
   async close() {
     if (this.ownsClient) this.client.close();
   }
-  async migrate(target = 13): Promise<void> {
+  async migrate(target = 22): Promise<void> {
     await this.client.execute(
       "CREATE TABLE IF NOT EXISTS support_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
     );
@@ -252,7 +283,7 @@ export class CaseStore {
       "SELECT version FROM support_schema_migrations ORDER BY version",
     );
     let version = Number(applied.rows.at(-1)?.version ?? 0);
-    if (!Number.isInteger(target) || target < 0 || target > 13)
+    if (!Number.isInteger(target) || target < 0 || target > 22)
       throw new Error("Unsupported support schema target version.");
     // Versions 6 through 8 introduced append-only turn, decision, and audit
     // records. Their inverse would discard or weaken durable financial/replay
@@ -336,6 +367,42 @@ export class CaseStore {
     }
     if (version === 13) {
       await this.up13();
+      return;
+    }
+    if (version === 16) {
+      await this.up16();
+      return;
+    }
+    if (version === 17) {
+      await this.up17();
+      return;
+    }
+    if (version === 18) {
+      await this.up18();
+      return;
+    }
+    if (version === 19) {
+      await this.up19();
+      return;
+    }
+    if (version === 20) {
+      await this.up20();
+      return;
+    }
+    if (version === 21) {
+      await this.up21();
+      return;
+    }
+    if (version === 22) {
+      await this.up22();
+      return;
+    }
+    if (version === 14) {
+      await this.up14();
+      return;
+    }
+    if (version === 15) {
+      await this.up15();
       return;
     }
     await this.client.execute({
@@ -904,6 +971,211 @@ export class CaseStore {
       throw error;
     }
   }
+  /** Stripe accepts an idempotency key only for a bounded provider window.
+   * Store intent before POST so a restart can retrieve/reconcile the original
+   * refund instead of issuing a fresh request after that window expires. */
+  private async up14() {
+    await this.client.executeMultiple(`
+      CREATE TABLE IF NOT EXISTS support_stripe_refund_attempts (
+        id TEXT PRIMARY KEY,
+        case_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        provider_account_id TEXT NOT NULL,
+        command_fingerprint TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        dispatch_id TEXT NOT NULL,
+        lease_token TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('prepared','pending','succeeded','failed','unknown','quarantined')),
+        refund_id TEXT,
+        provider_status TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        next_attempt_at TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS support_stripe_refund_attempt_command
+        ON support_stripe_refund_attempts(case_id, command_fingerprint);
+      CREATE INDEX IF NOT EXISTS support_stripe_refund_attempt_reconcile
+        ON support_stripe_refund_attempts(status, next_attempt_at, updated_at);
+    `);
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (14, ?)",
+      args: [now()],
+    });
+  }
+  /** Version 15 seals the command/turn that owns an external attempt. A
+   * follow-up projection must never redirect an in-flight refund recovery. */
+  private async up15() {
+    for (const sql of [
+      "ALTER TABLE support_stripe_refund_attempts ADD COLUMN turn_id TEXT",
+      "ALTER TABLE support_stripe_refund_attempts ADD COLUMN command_data TEXT",
+    ])
+      try {
+        await this.client.execute(sql);
+      } catch (error) {
+        if (!String(error).includes("duplicate column")) throw error;
+      }
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (15, ?)",
+      args: [now()],
+    });
+  }
+  /** Reconciliation is a separately fenced job.  A provider result can arrive
+   * after the workflow lease ends, so workers claim a short CAS lease rather
+   * than racing on every pending row. */
+  private async up16() {
+    for (const sql of [
+      "ALTER TABLE support_stripe_refund_attempts ADD COLUMN reconcile_lease_token TEXT",
+      "ALTER TABLE support_stripe_refund_attempts ADD COLUMN reconcile_lease_until TEXT",
+    ])
+      try {
+        await this.client.execute(sql);
+      } catch (error) {
+        if (!String(error).includes("duplicate column")) throw error;
+      }
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (16, ?)",
+      args: [now()],
+    });
+  }
+  /** The exact target/body for an uncertain Stripe POST is immutable before
+   * the effect boundary. Recovery must not re-quote a changed balance. */
+  private async up17() {
+    try {
+      await this.client.execute(
+        "ALTER TABLE support_stripe_refund_attempts ADD COLUMN stripe_request_data TEXT",
+      );
+    } catch (error) {
+      if (!String(error).includes("duplicate column")) throw error;
+    }
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (17, ?)",
+      args: [now()],
+    });
+  }
+  /** Poll observations must not extend the 365-day financial audit period. */
+  private async up18() {
+    for (const sql of [
+      "ALTER TABLE support_stripe_refund_attempts ADD COLUMN terminal_at TEXT",
+      "ALTER TABLE support_stripe_refund_attempts ADD COLUMN reconcile_attempts INTEGER NOT NULL DEFAULT 0",
+    ])
+      try {
+        await this.client.execute(sql);
+      } catch (error) {
+        if (!String(error).includes("duplicate column")) throw error;
+      }
+    await this.client.execute({
+      sql: "UPDATE support_stripe_refund_attempts SET terminal_at = updated_at WHERE terminal_at IS NULL AND status IN ('succeeded', 'failed', 'quarantined')",
+    });
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (18, ?)",
+      args: [now()],
+    });
+  }
+  private async up19() {
+    await this.client.executeMultiple(`
+      CREATE TABLE IF NOT EXISTS support_subscription_cancellation_attempts (
+        idempotency_key TEXT PRIMARY KEY, case_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, subscription_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL, command_data TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('prepared','scheduled','unknown','failed')),
+        cancels_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS support_subscription_cancellation_command
+        ON support_subscription_cancellation_attempts(case_id, fingerprint);
+    `);
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (19, ?)",
+      args: [now()],
+    });
+  }
+  private async up20() {
+    await this.client.executeMultiple(`
+      CREATE TABLE support_subscription_cancellation_attempts_v20 (
+        idempotency_key TEXT PRIMARY KEY, case_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, subscription_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL, command_data TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('prepared','scheduled','unknown','failed','quarantined')),
+        cancels_at TEXT, terminal_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      INSERT INTO support_subscription_cancellation_attempts_v20(
+        idempotency_key, case_id, turn_id, tenant_id, provider_account_id,
+        subscription_id, fingerprint, command_data, status, cancels_at,
+        terminal_at, created_at, updated_at
+      ) SELECT
+        idempotency_key, case_id, turn_id, tenant_id, provider_account_id,
+        subscription_id, fingerprint, command_data, status, cancels_at,
+        CASE WHEN status IN ('scheduled', 'failed') THEN updated_at ELSE NULL END,
+        created_at, updated_at
+      FROM support_subscription_cancellation_attempts;
+      DROP TABLE support_subscription_cancellation_attempts;
+      ALTER TABLE support_subscription_cancellation_attempts_v20
+        RENAME TO support_subscription_cancellation_attempts;
+      CREATE UNIQUE INDEX support_subscription_cancellation_command
+        ON support_subscription_cancellation_attempts(case_id, fingerprint);
+    `);
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (20, ?)",
+      args: [now()],
+    });
+  }
+  private async up21() {
+    await this.client.executeMultiple(`
+      CREATE TABLE support_subscription_cancellation_attempts_v21 (
+        idempotency_key TEXT PRIMARY KEY, case_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, subscription_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL, command_data TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('prepared','claimed','scheduled','unknown','failed','quarantined')),
+        cancels_at TEXT, terminal_at TEXT, next_reconcile_at TEXT,
+        reconcile_lease_token TEXT, reconcile_lease_until TEXT,
+        reconcile_attempts INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      INSERT INTO support_subscription_cancellation_attempts_v21(
+        idempotency_key, case_id, turn_id, tenant_id, provider_account_id,
+        subscription_id, fingerprint, command_data, status, cancels_at,
+        terminal_at, next_reconcile_at, reconcile_lease_token,
+        reconcile_lease_until, reconcile_attempts, created_at, updated_at
+      ) SELECT
+        idempotency_key, case_id, turn_id, tenant_id, provider_account_id,
+        subscription_id, fingerprint, command_data, status, cancels_at,
+        terminal_at, CASE WHEN status = 'unknown' THEN updated_at ELSE NULL END,
+        NULL, NULL, 0, created_at, updated_at
+      FROM support_subscription_cancellation_attempts;
+      DROP TABLE support_subscription_cancellation_attempts;
+      ALTER TABLE support_subscription_cancellation_attempts_v21
+        RENAME TO support_subscription_cancellation_attempts;
+      CREATE UNIQUE INDEX support_subscription_cancellation_command
+        ON support_subscription_cancellation_attempts(case_id, fingerprint);
+      CREATE INDEX support_subscription_cancellation_recovery_due
+        ON support_subscription_cancellation_attempts(status, next_reconcile_at);
+    `);
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (21, ?)",
+      args: [now()],
+    });
+  }
+  /** A signed Stripe event is acknowledged only after its durable local work
+   * is complete.  The receipt contains no raw webhook body or provider
+   * payload; its short lease fences concurrent delivery attempts. */
+  private async up22() {
+    await this.client.executeMultiple(`
+      CREATE TABLE IF NOT EXISTS support_stripe_webhook_receipts (
+        event_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL CHECK(state IN ('processing','completed','failed')),
+        lease_token TEXT,
+        lease_until TEXT,
+        created_at TEXT NOT NULL,
+        completed_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS support_stripe_webhook_receipts_retention
+        ON support_stripe_webhook_receipts(state, completed_at, created_at);
+    `);
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (22, ?)",
+      args: [now()],
+    });
+  }
   private async down(version: number) {
     if (version === 3) {
       const count = await this.client.execute(
@@ -1136,6 +1408,17 @@ export class CaseStore {
       } catch {}
       throw error;
     }
+  }
+  /** Version is a fence for projections which must not overwrite a provider
+   * finalizer that races after an external-effect receipt. */
+  async version(id: string) {
+    await this.ensured();
+    const row = await this.client.execute({
+      sql: "SELECT version FROM support_cases WHERE id = ?",
+      args: [id],
+    });
+    if (!row.rows[0]) throw new Error(`Support case not found: ${id}`);
+    return Number(row.rows[0].version ?? 1);
   }
   async appendMessage(id: string, message: CaseMessage) {
     await this.ensured();
@@ -1996,6 +2279,232 @@ export class CaseStore {
       ],
     });
     return Boolean(result.rows[0]);
+  }
+  /**
+   * This is the last durable authorization boundary before a Stripe refund
+   * can create an effect.  It intentionally runs after remote preflight and
+   * keeps the dispatch/reconciliation lease, immutable command/target,
+   * originating turn, owner, and binding in one write transaction.
+   *
+   * A successful return is immediately followed by the provider POST.  Do
+   * not add network work after this method in a caller.
+   */
+  async authorizeStripeRefundFirstEffect(input: {
+    command: RefundCommand;
+    request: { paymentIntentId: string; providerRefs: unknown[] };
+    ownerId: string;
+    dispatch?: DispatchLeaseScope;
+    reconciliationLeaseToken?: string;
+    validatePolicy: (
+      tx: Awaited<ReturnType<Client["transaction"]>>,
+    ) => Promise<void>;
+  }) {
+    await this.ensured();
+    if (
+      (input.dispatch === undefined) ===
+      (input.reconciliationLeaseToken === undefined)
+    )
+      throw new Error(
+        "Refund first-effect authorization requires exactly one current lease.",
+      );
+    const tx = await this.client.transaction("write");
+    try {
+      const command = input.command;
+      const attemptResult = await tx.execute({
+        sql: "SELECT * FROM support_stripe_refund_attempts WHERE idempotency_key = ? AND command_fingerprint = ?",
+        args: [command.idempotencyKey, command.fingerprint],
+      });
+      const attempt = attemptResult.rows[0] as
+        Record<string, unknown> | undefined;
+      const caseResult = await tx.execute({
+        sql: "SELECT data FROM support_cases WHERE id = ?",
+        args: [command.approvalCaseId],
+      });
+      const supportCase = caseResult.rows[0]
+        ? parse({ data: caseResult.rows[0].data })
+        : undefined;
+      const actionResult = await tx.execute({
+        sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = 'refund-command' AND fingerprint = ?",
+        args: [command.approvalCaseId, command.fingerprint],
+      });
+      const immutable = actionResult.rows[0]
+        ? JSON.parse(String(actionResult.rows[0].data))
+        : undefined;
+      const turnResult = await tx.execute({
+        sql: "SELECT command_fingerprint FROM support_turns WHERE id = ? AND case_id = ?",
+        args: [String(attempt?.turn_id ?? ""), command.approvalCaseId],
+      });
+      const request = attempt?.stripe_request_data
+        ? JSON.parse(String(attempt.stripe_request_data))
+        : undefined;
+      const ownerCurrent =
+        supportCase &&
+        (supportCase.metadata as Record<string, unknown>).ownerId ===
+          input.ownerId &&
+        ownerIdForCustomer(
+          command.binding.tenantId,
+          supportCase.customer.email,
+        ) === input.ownerId;
+      const commandCurrent =
+        attempt &&
+        ["prepared", "unknown"].includes(String(attempt.status)) &&
+        String(attempt.case_id) === command.approvalCaseId &&
+        String(attempt.tenant_id) === command.binding.tenantId &&
+        String(attempt.provider_account_id) ===
+          command.binding.providerAccountId &&
+        String(attempt.command_fingerprint) === command.fingerprint &&
+        structurallyEqual(
+          attempt.command_data
+            ? JSON.parse(String(attempt.command_data))
+            : undefined,
+          command,
+        ) &&
+        structurallyEqual(request, input.request) &&
+        structurallyEqual(immutable, command) &&
+        String(turnResult.rows[0]?.command_fingerprint ?? "") ===
+          command.fingerprint &&
+        supportCase !== undefined &&
+        structurallyEqual(
+          bindingsForCase(supportCase).transactions,
+          command.binding,
+        ) &&
+        ownerCurrent;
+      let leaseCurrent = false;
+      if (input.dispatch) {
+        const dispatch = await tx.execute({
+          sql: "SELECT id FROM support_dispatch WHERE id = ? AND case_id = ? AND turn_id = ? AND lease_token = ? AND state IN ('claimed', 'started') AND lease_until > ?",
+          args: [
+            input.dispatch.dispatchId,
+            input.dispatch.caseId,
+            input.dispatch.turnId,
+            input.dispatch.leaseToken,
+            now(),
+          ],
+        });
+        leaseCurrent =
+          Boolean(dispatch.rows[0]) &&
+          String(attempt?.dispatch_id ?? "") === input.dispatch.dispatchId &&
+          String(attempt?.lease_token ?? "") === input.dispatch.leaseToken &&
+          String(attempt?.turn_id ?? "") === input.dispatch.turnId &&
+          (supportCase?.metadata as Record<string, unknown> | undefined)
+            ?.activeTurnId === input.dispatch.turnId;
+      } else if (input.reconciliationLeaseToken) {
+        leaseCurrent =
+          String(attempt?.reconcile_lease_token ?? "") ===
+            input.reconciliationLeaseToken &&
+          Date.parse(String(attempt?.reconcile_lease_until ?? "")) > Date.now();
+      }
+      if (!commandCurrent || !leaseCurrent) {
+        await tx.rollback();
+        return false;
+      }
+      // The published policy evidence is immutable, but the deterministic
+      // case policy can become more restrictive while a provider preflight is
+      // in flight. A stale worker must observe that current prohibition at
+      // the same transaction boundary as its lease and command checks.
+      if (supportCase.draft?.requiresEscalation) {
+        await tx.rollback();
+        return false;
+      }
+      await input.validatePolicy(tx);
+      await tx.commit();
+      return true;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
+  /** The cancellation's durable claimed marker records a recovery obligation,
+   * but is never permission to POST after preflight.  Re-check its current
+   * workflow lease, command, turn, owner, and binding at the effect edge. */
+  async authorizeSubscriptionCancellationFirstEffect(input: {
+    command: SubscriptionCancellationCommand;
+    dispatch: DispatchLeaseScope;
+  }) {
+    await this.ensured();
+    const tx = await this.client.transaction("write");
+    try {
+      const command = input.command;
+      const attemptResult = await tx.execute({
+        sql: "SELECT * FROM support_subscription_cancellation_attempts WHERE idempotency_key = ? AND fingerprint = ?",
+        args: [command.idempotencyKey, command.fingerprint],
+      });
+      const attempt = attemptResult.rows[0] as
+        Record<string, unknown> | undefined;
+      const caseResult = await tx.execute({
+        sql: "SELECT data FROM support_cases WHERE id = ?",
+        args: [command.caseId],
+      });
+      const supportCase = caseResult.rows[0]
+        ? parse({ data: caseResult.rows[0].data })
+        : undefined;
+      const actionResult = await tx.execute({
+        sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = 'subscription-cancellation-command' AND fingerprint = ?",
+        args: [command.caseId, command.fingerprint],
+      });
+      const immutable = actionResult.rows[0]
+        ? JSON.parse(String(actionResult.rows[0].data))
+        : undefined;
+      const turnResult = await tx.execute({
+        sql: "SELECT command_fingerprint FROM support_turns WHERE id = ? AND case_id = ?",
+        args: [command.turnId, command.caseId],
+      });
+      const dispatch = await tx.execute({
+        sql: "SELECT id FROM support_dispatch WHERE id = ? AND case_id = ? AND turn_id = ? AND lease_token = ? AND state IN ('claimed', 'started') AND lease_until > ?",
+        args: [
+          input.dispatch.dispatchId,
+          input.dispatch.caseId,
+          input.dispatch.turnId,
+          input.dispatch.leaseToken,
+          now(),
+        ],
+      });
+      const current =
+        Boolean(dispatch.rows[0]) &&
+        attempt &&
+        String(attempt.status) === "claimed" &&
+        String(attempt.case_id) === command.caseId &&
+        String(attempt.turn_id) === command.turnId &&
+        String(attempt.tenant_id) === command.binding.tenantId &&
+        String(attempt.provider_account_id) ===
+          command.binding.providerAccountId &&
+        String(attempt.subscription_id) === command.subscriptionId &&
+        structurallyEqual(
+          attempt.command_data
+            ? JSON.parse(String(attempt.command_data))
+            : undefined,
+          command,
+        ) &&
+        structurallyEqual(immutable, command) &&
+        String(turnResult.rows[0]?.command_fingerprint ?? "") ===
+          command.fingerprint &&
+        supportCase !== undefined &&
+        (supportCase.metadata as Record<string, unknown>).activeTurnId ===
+          command.turnId &&
+        (supportCase.metadata as Record<string, unknown>).ownerId ===
+          command.ownerId &&
+        ownerIdForCustomer(
+          command.binding.tenantId,
+          supportCase.customer.email,
+        ) === command.ownerId &&
+        structurallyEqual(
+          bindingsForCase(supportCase).transactions,
+          command.binding,
+        );
+      if (!current) {
+        await tx.rollback();
+        return false;
+      }
+      await tx.commit();
+      return true;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
   }
   async completeDispatch(
     id: string,
@@ -3071,6 +3580,84 @@ export class CaseStore {
       ],
     });
   }
+  /** Atomically claim one verified Stripe event. A completed receipt is an
+   * acknowledgement-only replay; an unexpired lease asks the provider to retry
+   * later without starting a second reconciliation. */
+  async claimStripeWebhookEvent(
+    eventId: string,
+  ): Promise<
+    | { state: "claimed"; leaseToken: string }
+    | { state: "completed" }
+    | { state: "in-progress" }
+  > {
+    await this.ensured();
+    const tx = await this.client.transaction("write");
+    const claimedAt = now();
+    const leaseUntil = new Date(Date.now() + 30_000).toISOString();
+    const leaseToken = crypto.randomUUID();
+    try {
+      const existing = await tx.execute({
+        sql: "SELECT state, lease_until FROM support_stripe_webhook_receipts WHERE event_id = ?",
+        args: [eventId],
+      });
+      const row = existing.rows[0] as Record<string, unknown> | undefined;
+      if (!row) {
+        await tx.execute({
+          sql: "INSERT INTO support_stripe_webhook_receipts(event_id, state, lease_token, lease_until, created_at, updated_at) VALUES (?, 'processing', ?, ?, ?, ?)",
+          args: [eventId, leaseToken, leaseUntil, claimedAt, claimedAt],
+        });
+        await tx.commit();
+        return { state: "claimed", leaseToken };
+      }
+      if (String(row.state) === "completed") {
+        await tx.rollback();
+        return { state: "completed" };
+      }
+      if (
+        String(row.state) === "processing" &&
+        typeof row.lease_until === "string" &&
+        row.lease_until > claimedAt
+      ) {
+        await tx.rollback();
+        return { state: "in-progress" };
+      }
+      const recovered = await tx.execute({
+        sql: "UPDATE support_stripe_webhook_receipts SET state = 'processing', lease_token = ?, lease_until = ?, updated_at = ? WHERE event_id = ? AND state <> 'completed'",
+        args: [leaseToken, leaseUntil, claimedAt, eventId],
+      });
+      if (Number(recovered.rowsAffected) !== 1)
+        throw new Error("Stripe webhook receipt claim was lost.");
+      await tx.commit();
+      return { state: "claimed", leaseToken };
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
+  /** Completion is deliberately separate from receipt creation: a process can
+   * die after claiming, and a later signed delivery can recover the expired
+   * lease instead of treating unprocessed work as a duplicate. */
+  async completeStripeWebhookEvent(eventId: string, leaseToken: string) {
+    await this.ensured();
+    const completedAt = now();
+    const result = await this.client.execute({
+      sql: "UPDATE support_stripe_webhook_receipts SET state = 'completed', lease_token = NULL, lease_until = NULL, completed_at = ?, updated_at = ? WHERE event_id = ? AND state = 'processing' AND lease_token = ?",
+      args: [completedAt, completedAt, eventId, leaseToken],
+    });
+    return Number(result.rowsAffected) === 1;
+  }
+  /** Do not persist provider error details here. A failed receipt is immediately
+   * recoverable by the next signed delivery and carries no raw webhook data. */
+  async failStripeWebhookEvent(eventId: string, leaseToken: string) {
+    await this.ensured();
+    const result = await this.client.execute({
+      sql: "UPDATE support_stripe_webhook_receipts SET state = 'failed', lease_token = NULL, lease_until = NULL, updated_at = ? WHERE event_id = ? AND state = 'processing' AND lease_token = ?",
+      args: [now(), eventId, leaseToken],
+    });
+    return Number(result.rowsAffected) === 1;
+  }
   /** Atomically records the sole authorized decision for a command. The
    * caller must invoke this before native approval/resume; a losing concurrent
    * request cannot mutate the case projection or execute the effect. */
@@ -3297,16 +3884,886 @@ export class CaseStore {
   }
   async idempotency(key: string) {
     await this.ensured();
+    // Stripe's immutable attempt ledger is the authority for a financial
+    // replay. A success effect can be written before a later provider failure
+    // arrives, so never expose that stale row after the ledger terminalizes
+    // failed/quarantined. Local effects have no Stripe attempt and retain the
+    // original direct idempotency behavior.
+    const ledger = await this.client.execute({
+      sql: "SELECT status FROM support_stripe_refund_attempts WHERE idempotency_key = ?",
+      args: [key],
+    });
+    if (ledger.rows[0] && String(ledger.rows[0].status) !== "succeeded")
+      return undefined;
     const result = await this.client.execute({
       sql: "SELECT fingerprint, effect FROM support_idempotency WHERE idempotency_key = ?",
       args: [key],
     });
-    return result.rows[0]
-      ? {
-          fingerprint: String(result.rows[0].fingerprint),
-          effect: JSON.parse(String(result.rows[0].effect)),
+    if (!result.rows[0]) return undefined;
+    const effect = JSON.parse(String(result.rows[0].effect));
+    if (isFinancialRetentionTombstone(effect))
+      throw financialRetentionTombstoneError();
+    return {
+      fingerprint: String(result.rows[0].fingerprint),
+      effect,
+    };
+  }
+  /** Project one native tool receipt with its replay effect only while the
+   * current immutable Stripe attempt still permits it. This reads the attempt
+   * and case in the same write transaction, so a webhook finalizer cannot win
+   * between a separate version read and a stale projection/effect write. */
+  async projectRefundToolExecution(input: {
+    caseId: string;
+    turnId: string;
+    fingerprint: string;
+    idempotencyKey: string;
+    result: NonNullable<SupportCase["refundResult"]>;
+    effect?: unknown;
+  }): Promise<NonNullable<SupportCase["refundResult"]>> {
+    await this.ensured();
+    const tx = await this.client.transaction("write");
+    try {
+      const caseResult = await tx.execute({
+        sql: "SELECT data, version FROM support_cases WHERE id = ?",
+        args: [input.caseId],
+      });
+      const row = caseResult.rows[0] as Record<string, unknown> | undefined;
+      if (!row) throw new Error(`Support case not found: ${input.caseId}`);
+      const current = parse({ data: row.data });
+      const metadata = current.metadata as Record<string, unknown>;
+      const command = metadata.refundCommand as
+        { fingerprint?: unknown; idempotencyKey?: unknown } | undefined;
+      const native = metadata.nativeApproval as
+        { fingerprint?: unknown; turnId?: unknown } | undefined;
+      // Migrations give pre-turn records a durable legacy turn identity, but
+      // those records have no activeTurnId projection marker. Accept only the
+      // exact per-case legacy identity when the marker is absent; any actual
+      // active turn, including a newer one, must still match this execution.
+      const currentTurn =
+        metadata.activeTurnId === input.turnId ||
+        (metadata.activeTurnId === undefined &&
+          input.turnId === `legacy:${input.caseId}`);
+      if (
+        !currentTurn ||
+        command?.fingerprint !== input.fingerprint ||
+        command.idempotencyKey !== input.idempotencyKey ||
+        native?.fingerprint !== input.fingerprint ||
+        native.turnId !== input.turnId
+      )
+        throw new Error(
+          "Refund projection does not match the current immutable command and turn.",
+        );
+      const lease = activeDispatchLeaseScope();
+      if (lease) {
+        const owned = await tx.execute({
+          sql: "SELECT id FROM support_dispatch WHERE id = ? AND case_id = ? AND turn_id = ? AND lease_token = ? AND state IN ('claimed', 'started') AND lease_until > ?",
+          args: [
+            lease.dispatchId,
+            input.caseId,
+            input.turnId,
+            lease.leaseToken,
+            now(),
+          ],
+        });
+        if (!owned.rows[0])
+          throw new StaleCaseWriteError(
+            `Dispatch lease is no longer current for ${input.caseId}.`,
+          );
+      }
+      const ledgerResult = await tx.execute({
+        sql: "SELECT case_id, turn_id, command_fingerprint, status FROM support_stripe_refund_attempts WHERE idempotency_key = ?",
+        args: [input.idempotencyKey],
+      });
+      const ledger = ledgerResult.rows[0] as
+        Record<string, unknown> | undefined;
+      if (ledger) {
+        if (
+          String(ledger.case_id) !== input.caseId ||
+          String(ledger.turn_id) !== input.turnId ||
+          String(ledger.command_fingerprint) !== input.fingerprint
+        )
+          throw new Error(
+            "Refund projection ledger does not match the immutable command and turn.",
+          );
+        if (["failed", "quarantined"].includes(String(ledger.status))) {
+          const authoritative = current.refundResult;
+          if (!authoritative || authoritative.status !== "failed")
+            throw new Error(
+              "Failed refund ledger is missing its authoritative case projection.",
+            );
+          await tx.commit();
+          return authoritative;
         }
+      }
+      const updated = this.withBindings({
+        ...current,
+        refundResult: input.result,
+        metadata: {
+          ...metadata,
+          refundEffects: {
+            ...(metadata.refundEffects as Record<string, unknown> | undefined),
+            [input.fingerprint]: input.result,
+          },
+        },
+        updatedAt: now(),
+      } as SupportCase);
+      const write = await tx.execute({
+        sql: "UPDATE support_cases SET data = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+        args: [
+          JSON.stringify(updated),
+          updated.updatedAt,
+          input.caseId,
+          Number(row.version),
+        ],
+      });
+      if (Number(write.rowsAffected ?? 0) !== 1)
+        throw new StaleCaseWriteError(input.caseId);
+      if (input.effect)
+        await tx.execute({
+          sql: "INSERT OR IGNORE INTO support_idempotency(idempotency_key, fingerprint, effect, created_at) VALUES (?, ?, ?, ?)",
+          args: [
+            input.idempotencyKey,
+            input.fingerprint,
+            JSON.stringify(input.effect),
+            now(),
+          ],
+        });
+      await tx.commit();
+      return input.result;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
+  async prepareStripeRefundAttempt(input: {
+    caseId: string;
+    binding: ProviderBinding;
+    fingerprint: string;
+    idempotencyKey: string;
+    dispatchId: string;
+    leaseToken: string;
+    turnId: string;
+    command: unknown;
+  }) {
+    await this.ensured();
+    const retained = await this.client.execute({
+      sql: "SELECT effect FROM support_idempotency WHERE idempotency_key = ?",
+      args: [input.idempotencyKey],
+    });
+    if (
+      retained.rows[0] &&
+      isFinancialRetentionTombstone(JSON.parse(String(retained.rows[0].effect)))
+    )
+      throw financialRetentionTombstoneError();
+    const createdAt = now();
+    await this.client.execute({
+      sql: "INSERT OR IGNORE INTO support_stripe_refund_attempts(id, case_id, tenant_id, provider_account_id, command_fingerprint, idempotency_key, dispatch_id, lease_token, turn_id, command_data, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)",
+      args: [
+        `stripe_attempt_${crypto.randomUUID()}`,
+        input.caseId,
+        input.binding.tenantId,
+        input.binding.providerAccountId,
+        input.fingerprint,
+        input.idempotencyKey,
+        input.dispatchId,
+        input.leaseToken,
+        input.turnId,
+        JSON.stringify(input.command),
+        createdAt,
+        createdAt,
+      ],
+    });
+    const row = await this.client.execute({
+      sql: "SELECT * FROM support_stripe_refund_attempts WHERE idempotency_key = ?",
+      args: [input.idempotencyKey],
+    });
+    const found = row.rows[0] as Record<string, unknown> | undefined;
+    if (
+      !found ||
+      String(found.case_id) !== input.caseId ||
+      String(found.tenant_id) !== input.binding.tenantId ||
+      String(found.provider_account_id) !== input.binding.providerAccountId ||
+      String(found.command_fingerprint) !== input.fingerprint ||
+      String(found.turn_id) !== input.turnId ||
+      !structurallyEqual(
+        found.command_data ? JSON.parse(String(found.command_data)) : undefined,
+        input.command,
+      )
+    )
+      throw new Error(
+        "Stripe idempotency key was reused with a conflicting command.",
+      );
+    return this.stripeAttempt(found);
+  }
+  async updateStripeRefundAttempt(
+    idempotencyKey: string,
+    update: {
+      status: "pending" | "succeeded" | "failed" | "unknown" | "quarantined";
+      refundId?: string;
+      providerStatus?: string;
+      nextAttemptAt?: string;
+    },
+  ) {
+    await this.ensured();
+    const terminal = ["succeeded", "failed", "quarantined"].includes(
+      update.status,
+    );
+    const write = await this.client.execute({
+      sql: "UPDATE support_stripe_refund_attempts SET status = ?, refund_id = COALESCE(?, refund_id), provider_status = COALESCE(?, provider_status), next_attempt_at = ?, reconcile_lease_token = NULL, reconcile_lease_until = NULL, terminal_at = CASE WHEN ? THEN COALESCE(terminal_at, ?) ELSE terminal_at END, updated_at = ? WHERE idempotency_key = ? AND (status NOT IN ('succeeded', 'failed', 'quarantined') OR status = ?)",
+      args: [
+        update.status,
+        update.refundId ?? null,
+        update.providerStatus ?? null,
+        update.nextAttemptAt ?? null,
+        terminal ? 1 : 0,
+        now(),
+        now(),
+        idempotencyKey,
+        update.status,
+      ],
+    });
+    return Number(write.rowsAffected ?? 0) === 1;
+  }
+  async persistStripeRefundRequest(
+    idempotencyKey: string,
+    request: { paymentIntentId: string; providerRefs: unknown[] },
+  ) {
+    await this.ensured();
+    const write = await this.client.execute({
+      sql: "UPDATE support_stripe_refund_attempts SET stripe_request_data = ?, updated_at = ? WHERE idempotency_key = ? AND status = 'prepared' AND stripe_request_data IS NULL",
+      args: [JSON.stringify(request), now(), idempotencyKey],
+    });
+    if (Number(write.rowsAffected ?? 0) !== 1) {
+      const found = await this.stripeRefundAttempt(idempotencyKey);
+      if (
+        !found?.stripeRequest ||
+        !structurallyEqual(found.stripeRequest, request)
+      )
+        throw new Error("Stripe refund request target was already changed.");
+    }
+    return this.stripeRefundAttempt(idempotencyKey);
+  }
+  /** Release only the lease owned by this reconciliation worker while
+   * scheduling its retry. A stale worker cannot clobber a newer claim. */
+  async rescheduleStripeRefundAttempt(input: {
+    idempotencyKey: string;
+    reconcileLeaseToken: string;
+    status: "pending" | "succeeded" | "unknown" | "quarantined";
+    refundId?: string;
+    providerStatus?: string;
+    nextAttemptAt?: string;
+  }) {
+    await this.ensured();
+    const write = await this.client.execute({
+      sql: "UPDATE support_stripe_refund_attempts SET status = ?, refund_id = COALESCE(?, refund_id), provider_status = COALESCE(?, provider_status), next_attempt_at = ?, reconcile_lease_token = NULL, reconcile_lease_until = NULL, terminal_at = CASE WHEN ? THEN COALESCE(terminal_at, ?) ELSE terminal_at END, reconcile_attempts = reconcile_attempts + 1, updated_at = ? WHERE idempotency_key = ? AND reconcile_lease_token = ? AND reconcile_lease_until > ? AND status NOT IN ('succeeded', 'failed', 'quarantined')",
+      args: [
+        input.status,
+        input.refundId ?? null,
+        input.providerStatus ?? null,
+        input.nextAttemptAt ?? null,
+        input.status === "quarantined" ? 1 : 0,
+        now(),
+        now(),
+        input.idempotencyKey,
+        input.reconcileLeaseToken,
+        now(),
+      ],
+    });
+    return Number(write.rowsAffected ?? 0) === 1;
+  }
+  /** Commit terminal provider state, the case projection, and its one customer
+   * notification together. A crash cannot leave a succeeded attempt with no
+   * final outbox item, and a later follow-up cannot be overwritten because the
+   * attempt's immutable originating turn owns the projection. */
+  async finalizeStripeRefundReconciliation(input: {
+    idempotencyKey: string;
+    status: "succeeded" | "failed" | "pending" | "quarantined";
+    refundId: string;
+    providerStatus: string;
+    effect?: unknown;
+    reconcileLeaseToken?: string;
+  }) {
+    await this.ensured();
+    const tx = await this.client.transaction("write");
+    try {
+      const attemptResult = await tx.execute({
+        sql: "SELECT * FROM support_stripe_refund_attempts WHERE idempotency_key = ?",
+        args: [input.idempotencyKey],
+      });
+      const attempt = attemptResult.rows[0] as
+        Record<string, unknown> | undefined;
+      if (!attempt) {
+        await tx.rollback();
+        return false;
+      }
+      const previousStatus = String(attempt.status);
+      const leaseOwned =
+        !input.reconcileLeaseToken ||
+        (String(attempt.reconcile_lease_token ?? "") ===
+          input.reconcileLeaseToken &&
+          Date.parse(String(attempt.reconcile_lease_until ?? "")) > Date.now());
+      const transitionAllowed =
+        leaseOwned &&
+        !(
+          input.status === "succeeded" &&
+          ["failed", "quarantined"].includes(previousStatus)
+        ) &&
+        !(
+          input.status === "pending" &&
+          ["succeeded", "failed", "quarantined"].includes(previousStatus)
+        ) &&
+        !(
+          input.status === "quarantined" &&
+          ["succeeded", "failed", "quarantined"].includes(previousStatus)
+        );
+      if (!transitionAllowed) {
+        await tx.rollback();
+        return false;
+      }
+      const terminal = ["succeeded", "failed", "quarantined"].includes(
+        input.status,
+      );
+      const updateArgs: (string | number | null)[] = [
+        input.status,
+        input.refundId,
+        input.providerStatus,
+        input.status === "pending"
+          ? new Date(Date.now() + 30_000).toISOString()
+          : input.status === "succeeded"
+            ? new Date(Date.now() + 5 * 60_000).toISOString()
+            : null,
+        terminal ? 1 : 0,
+        now(),
+        now(),
+        input.idempotencyKey,
+      ];
+      let updateSql =
+        "UPDATE support_stripe_refund_attempts SET status = ?, refund_id = ?, provider_status = ?, next_attempt_at = ?, reconcile_lease_token = NULL, reconcile_lease_until = NULL, terminal_at = CASE WHEN ? THEN COALESCE(terminal_at, ?) ELSE terminal_at END, reconcile_attempts = reconcile_attempts + 1, updated_at = ? WHERE idempotency_key = ? AND (status NOT IN ('succeeded', 'failed', 'quarantined') OR (status = 'succeeded' AND ? = 'failed') OR (status = 'failed' AND ? = 'failed'))";
+      updateArgs.push(input.status);
+      updateArgs.push(input.status);
+      if (input.reconcileLeaseToken) {
+        updateSql +=
+          " AND reconcile_lease_token = ? AND reconcile_lease_until > ?";
+        updateArgs.push(input.reconcileLeaseToken, now());
+      }
+      const attemptWrite = await tx.execute({
+        sql: updateSql,
+        args: updateArgs,
+      });
+      if (Number(attemptWrite.rowsAffected ?? 0) !== 1) {
+        await tx.rollback();
+        return false;
+      }
+      if (input.status === "pending") {
+        await tx.commit();
+        return false;
+      }
+      // A later authoritative failure supersedes a previously persisted
+      // success effect in this same ledger/case transaction. Readers also
+      // consult the attempt ledger, but deleting the stale effect prevents a
+      // process restart from treating historical success bytes as executable.
+      if (input.status === "failed")
+        await tx.execute({
+          sql: "DELETE FROM support_idempotency WHERE idempotency_key = ? AND fingerprint = ?",
+          args: [input.idempotencyKey, String(attempt.command_fingerprint)],
+        });
+      const caseResult = await tx.execute({
+        sql: "SELECT data, version FROM support_cases WHERE id = ?",
+        args: [String(attempt.case_id)],
+      });
+      const row = caseResult.rows[0] as Record<string, unknown> | undefined;
+      if (!row) {
+        await tx.commit();
+        return false;
+      }
+      const current = parse({ data: row.data });
+      const turnId = attempt.turn_id ? String(attempt.turn_id) : undefined;
+      const activeTurnId = (current.metadata as Record<string, unknown>)
+        .activeTurnId;
+      // Keep the provider audit authoritative, but never change a current case
+      // projection that belongs to a newer customer turn.
+      if (!turnId) {
+        await tx.commit();
+        return false;
+      }
+      // A follow-up owns the current case projection, but it cannot erase the
+      // financial outcome of this attempt's immutable originating turn.
+      if (activeTurnId !== turnId) {
+        const response =
+          input.status === "succeeded"
+            ? "Your refund has been issued."
+            : "The refund requires additional review. A support specialist will follow up shortly.";
+        const terminal =
+          input.status === "succeeded" ? "resolved" : "escalated";
+        await tx.execute({
+          sql: "UPDATE support_turns SET state = ?, outcome_data = json_patch(COALESCE(outcome_data, '{}'), ?), updated_at = ? WHERE id = ? AND case_id = ?",
+          args: [
+            terminal,
+            JSON.stringify({
+              status: terminal,
+              finalResponse: response,
+              refundId: input.refundId,
+            }),
+            now(),
+            turnId,
+            current.id,
+          ],
+        });
+        if (input.status === "succeeded")
+          await tx.execute({
+            sql: "INSERT OR IGNORE INTO support_idempotency(idempotency_key, fingerprint, effect, created_at) VALUES (?, ?, ?, ?)",
+            args: [
+              input.idempotencyKey,
+              String(attempt.command_fingerprint),
+              JSON.stringify(input.effect ?? {}),
+              now(),
+            ],
+          });
+        else
+          await tx.execute({
+            sql: "INSERT OR IGNORE INTO support_actions(id, case_id, kind, fingerprint, data, created_at) VALUES (?, ?, 'refund-failure', ?, ?, ?)",
+            args: [
+              `action_${current.id}_${turnId}_refund-failure`,
+              current.id,
+              String(attempt.command_fingerprint),
+              JSON.stringify({
+                category: "provider",
+                classification: "confirmed-failed",
+                refundId: input.refundId,
+              }),
+              now(),
+            ],
+          });
+        await tx.execute({
+          sql: "INSERT OR IGNORE INTO support_outbox(id, case_id, binding, body, status, operation, payload_fingerprint, state, originating_turn_id, correlation_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'reply', ?, 'pending', ?, 'unknown', ?, ?)",
+          args: [
+            `outbox_${current.id}_${turnId}_${input.status === "succeeded" ? "refund-final" : "refund-failed"}`,
+            current.id,
+            JSON.stringify(bindingsForCase(current).support),
+            response,
+            terminal,
+            this.outboxFingerprint(
+              bindingsForCase(current).support,
+              "reply",
+              response,
+              terminal,
+            ),
+            turnId,
+            now(),
+            now(),
+          ],
+        });
+        await tx.commit();
+        return true;
+      }
+      if (input.status === "succeeded") {
+        const currentRefund = current.refundResult;
+        if (currentRefund?.status === "failed") {
+          await tx.commit();
+          return false;
+        }
+        const command = attempt.command_data
+          ? (JSON.parse(String(attempt.command_data)) as {
+              amount?: { currency?: string; minor?: number };
+              orderId?: string;
+            })
+          : undefined;
+        const derivedRefund =
+          currentRefund ??
+          (typeof command?.amount?.currency === "string" &&
+          typeof command.amount.minor === "number"
+            ? {
+                refundId: input.refundId,
+                orderId: command.orderId ?? "unknown",
+                amount: moneyToLegacyAmount({
+                  currency: command.amount.currency,
+                  minor: command.amount.minor,
+                }),
+                currency: command.amount.currency,
+                status: "pending" as const,
+                idempotencyKey: input.idempotencyKey,
+                executedAt: now(),
+              }
+            : undefined);
+        if (!derivedRefund) {
+          await tx.commit();
+          return false;
+        }
+        const result = { ...derivedRefund, status: "executed" as const };
+        const response = `Your refund of ${result.amount} ${result.currency} has been issued.`;
+        const updated = {
+          ...current,
+          status: "resolved" as const,
+          refundResult: result,
+          finalResponse: response,
+          updatedAt: now(),
+        };
+        const write = await tx.execute({
+          sql: "UPDATE support_cases SET data = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+          args: [
+            JSON.stringify(updated),
+            updated.updatedAt,
+            current.id,
+            Number(row.version),
+          ],
+        });
+        await tx.execute({
+          sql: "UPDATE support_turns SET state = 'resolved', outcome_data = json_patch(COALESCE(outcome_data, '{}'), ?), updated_at = ? WHERE id = ? AND case_id = ?",
+          args: [
+            JSON.stringify({
+              status: "resolved",
+              finalResponse: response,
+              refundId: input.refundId,
+            }),
+            now(),
+            turnId,
+            current.id,
+          ],
+        });
+        if (Number(write.rowsAffected ?? 0) !== 1)
+          throw new StaleCaseWriteError(current.id);
+        await tx.execute({
+          sql: "INSERT OR IGNORE INTO support_idempotency(idempotency_key, fingerprint, effect, created_at) VALUES (?, ?, ?, ?)",
+          args: [
+            input.idempotencyKey,
+            String(attempt.command_fingerprint),
+            JSON.stringify(input.effect ?? {}),
+            now(),
+          ],
+        });
+        await tx.execute({
+          sql: "INSERT OR IGNORE INTO support_outbox(id, case_id, binding, body, status, operation, payload_fingerprint, state, originating_turn_id, correlation_state, created_at, updated_at) VALUES (?, ?, ?, ?, 'resolved', 'reply', ?, 'pending', ?, 'unknown', ?, ?)",
+          args: [
+            `outbox_${current.id}_${turnId}_refund-final`,
+            current.id,
+            JSON.stringify(bindingsForCase(current).support),
+            response,
+            this.outboxFingerprint(
+              bindingsForCase(current).support,
+              "reply",
+              response,
+              "resolved",
+            ),
+            turnId,
+            now(),
+            now(),
+          ],
+        });
+      } else {
+        const correction =
+          "The refund requires additional review. A support specialist will follow up shortly.";
+        const command = attempt.command_data
+          ? (JSON.parse(String(attempt.command_data)) as {
+              amount?: { currency?: string; minor?: number };
+              orderId?: string;
+            })
+          : undefined;
+        const derivedRefund =
+          current.refundResult ??
+          (typeof command?.amount?.currency === "string" &&
+          typeof command.amount.minor === "number"
+            ? {
+                refundId: input.refundId,
+                orderId: command.orderId ?? "unknown",
+                amount: moneyToLegacyAmount({
+                  currency: command.amount.currency,
+                  minor: command.amount.minor,
+                }),
+                currency: command.amount.currency,
+                status: "pending" as const,
+                idempotencyKey: input.idempotencyKey,
+                executedAt: now(),
+              }
+            : undefined);
+        const updated = {
+          ...current,
+          status: "escalated" as const,
+          escalationReason:
+            "Stripe reported that the approved refund failed and requires staff review.",
+          refundResult: derivedRefund
+            ? { ...derivedRefund, status: "failed" as const }
+            : undefined,
+          finalResponse: correction,
+          updatedAt: now(),
+        };
+        const write = await tx.execute({
+          sql: "UPDATE support_cases SET data = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+          args: [
+            JSON.stringify(updated),
+            updated.updatedAt,
+            current.id,
+            Number(row.version),
+          ],
+        });
+        await tx.execute({
+          sql: "UPDATE support_turns SET state = 'escalated', outcome_data = json_patch(COALESCE(outcome_data, '{}'), ?), updated_at = ? WHERE id = ? AND case_id = ?",
+          args: [
+            JSON.stringify({
+              status: "escalated",
+              finalResponse: correction,
+              refundId: input.refundId,
+            }),
+            now(),
+            turnId,
+            current.id,
+          ],
+        });
+        if (Number(write.rowsAffected ?? 0) !== 1)
+          throw new StaleCaseWriteError(current.id);
+        await tx.execute({
+          sql: "INSERT OR IGNORE INTO support_actions(id, case_id, kind, fingerprint, data, created_at) VALUES (?, ?, 'refund-failure', ?, ?, ?)",
+          args: [
+            `action_${current.id}_${turnId}_refund-failure`,
+            current.id,
+            String(attempt.command_fingerprint),
+            JSON.stringify({
+              category: "provider",
+              classification: "confirmed-failed",
+              refundId: input.refundId,
+              observedAt: now(),
+            }),
+            now(),
+          ],
+        });
+        await tx.execute({
+          sql: "INSERT OR IGNORE INTO support_outbox(id, case_id, binding, body, status, operation, payload_fingerprint, state, originating_turn_id, correlation_state, created_at, updated_at) VALUES (?, ?, ?, ?, 'escalated', 'reply', ?, 'pending', ?, 'unknown', ?, ?)",
+          args: [
+            `outbox_${current.id}_${turnId}_refund-failed`,
+            current.id,
+            JSON.stringify(bindingsForCase(current).support),
+            correction,
+            this.outboxFingerprint(
+              bindingsForCase(current).support,
+              "reply",
+              correction,
+              "escalated",
+            ),
+            turnId,
+            now(),
+            now(),
+          ],
+        });
+      }
+      await tx.commit();
+      return true;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
+  /** A preflight denial or a non-ambiguous Stripe POST rejection proves no
+   * financial effect. Close its durable attempt, originating turn, audit and
+   * one staff-review outbox item together; it must never enter GET recovery. */
+  async finalizeStripeRefundNoEffectFailure(input: {
+    idempotencyKey: string;
+    fingerprint: string;
+  }) {
+    await this.ensured();
+    const tx = await this.client.transaction("write");
+    try {
+      const found = await tx.execute({
+        sql: "SELECT * FROM support_stripe_refund_attempts WHERE idempotency_key = ? AND command_fingerprint = ?",
+        args: [input.idempotencyKey, input.fingerprint],
+      });
+      const attempt = found.rows[0] as Record<string, unknown> | undefined;
+      if (
+        !attempt ||
+        !["prepared", "unknown"].includes(String(attempt.status))
+      ) {
+        await tx.rollback();
+        return false;
+      }
+      const closed = await tx.execute({
+        sql: "UPDATE support_stripe_refund_attempts SET status = 'failed', provider_status = 'confirmed-no-effect', next_attempt_at = NULL, reconcile_lease_token = NULL, reconcile_lease_until = NULL, terminal_at = COALESCE(terminal_at, ?), updated_at = ? WHERE idempotency_key = ? AND command_fingerprint = ? AND status IN ('prepared', 'unknown')",
+        args: [now(), now(), input.idempotencyKey, input.fingerprint],
+      });
+      if (Number(closed.rowsAffected ?? 0) !== 1) {
+        await tx.rollback();
+        return false;
+      }
+      await tx.execute({
+        sql: "DELETE FROM support_idempotency WHERE idempotency_key = ? AND fingerprint = ?",
+        args: [input.idempotencyKey, input.fingerprint],
+      });
+      const caseResult = await tx.execute({
+        sql: "SELECT data, version FROM support_cases WHERE id = ?",
+        args: [String(attempt.case_id)],
+      });
+      const row = caseResult.rows[0] as Record<string, unknown> | undefined;
+      if (!row) {
+        await tx.commit();
+        return false;
+      }
+      const current = parse({ data: row.data });
+      const turnId = String(attempt.turn_id);
+      const response =
+        "The refund requires additional review. A support specialist will follow up shortly.";
+      await tx.execute({
+        sql: "UPDATE support_turns SET state = 'escalated', outcome_data = json_patch(COALESCE(outcome_data, '{}'), ?), updated_at = ? WHERE id = ? AND case_id = ?",
+        args: [
+          JSON.stringify({ status: "escalated", finalResponse: response }),
+          now(),
+          turnId,
+          current.id,
+        ],
+      });
+      await tx.execute({
+        sql: "INSERT OR IGNORE INTO support_actions(id, case_id, kind, fingerprint, data, created_at) VALUES (?, ?, 'refund-failure', ?, ?, ?)",
+        args: [
+          `action_${current.id}_${turnId}_refund-no-effect`,
+          current.id,
+          input.fingerprint,
+          JSON.stringify({
+            category: "provider",
+            classification: "confirmed-no-effect",
+          }),
+          now(),
+        ],
+      });
+      await tx.execute({
+        sql: "INSERT OR IGNORE INTO support_outbox(id, case_id, binding, body, status, operation, payload_fingerprint, state, originating_turn_id, correlation_state, created_at, updated_at) VALUES (?, ?, ?, ?, 'escalated', 'reply', ?, 'pending', ?, 'unknown', ?, ?)",
+        args: [
+          `outbox_${current.id}_${turnId}_refund-no-effect`,
+          current.id,
+          JSON.stringify(bindingsForCase(current).support),
+          response,
+          this.outboxFingerprint(
+            bindingsForCase(current).support,
+            "reply",
+            response,
+            "escalated",
+          ),
+          turnId,
+          now(),
+          now(),
+        ],
+      });
+      if (
+        (current.metadata as Record<string, unknown>).activeTurnId === turnId
+      ) {
+        const updated = {
+          ...current,
+          status: "escalated" as const,
+          escalationReason:
+            "The refund could not be completed and requires staff review.",
+          finalResponse: response,
+          updatedAt: now(),
+        };
+        const write = await tx.execute({
+          sql: "UPDATE support_cases SET data = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+          args: [
+            JSON.stringify(updated),
+            updated.updatedAt,
+            current.id,
+            Number(row.version),
+          ],
+        });
+        if (Number(write.rowsAffected ?? 0) !== 1)
+          throw new StaleCaseWriteError(current.id);
+      }
+      await tx.commit();
+      return true;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
+  async stripeRefundAttempt(idempotencyKey: string) {
+    await this.ensured();
+    const row = await this.client.execute({
+      sql: "SELECT * FROM support_stripe_refund_attempts WHERE idempotency_key = ?",
+      args: [idempotencyKey],
+    });
+    return row.rows[0]
+      ? this.stripeAttempt(row.rows[0] as Record<string, unknown>)
       : undefined;
+  }
+  async stripeRefundAttemptByRefundId(refundId: string) {
+    await this.ensured();
+    const row = await this.client.execute({
+      sql: "SELECT * FROM support_stripe_refund_attempts WHERE refund_id = ?",
+      args: [refundId],
+    });
+    return row.rows[0]
+      ? this.stripeAttempt(row.rows[0] as Record<string, unknown>)
+      : undefined;
+  }
+  async claimableStripeRefundAttempts(limit = 10) {
+    await this.ensured();
+    const claimedAt = now();
+    const leaseUntil = new Date(Date.now() + 30_000).toISOString();
+    const rows = await this.client.execute({
+      sql: "SELECT * FROM support_stripe_refund_attempts WHERE status IN ('pending', 'unknown', 'prepared', 'succeeded') AND (next_attempt_at IS NULL OR next_attempt_at <= ?) AND (reconcile_lease_until IS NULL OR reconcile_lease_until < ?) ORDER BY updated_at LIMIT ?",
+      args: [claimedAt, claimedAt, limit],
+    });
+    const claimed = [];
+    for (const row of rows.rows) {
+      const token = crypto.randomUUID();
+      const write = await this.client.execute({
+        sql: "UPDATE support_stripe_refund_attempts SET reconcile_lease_token = ?, reconcile_lease_until = ? WHERE id = ? AND status IN ('pending', 'unknown', 'prepared', 'succeeded') AND (reconcile_lease_until IS NULL OR reconcile_lease_until < ?) AND (next_attempt_at IS NULL OR next_attempt_at <= ?)",
+        args: [token, leaseUntil, String(row.id), claimedAt, claimedAt],
+      });
+      if (Number(write.rowsAffected ?? 0) === 1) {
+        const claimedRow = await this.client.execute({
+          sql: "SELECT * FROM support_stripe_refund_attempts WHERE id = ? AND reconcile_lease_token = ?",
+          args: [String(row.id), token],
+        });
+        if (claimedRow.rows[0])
+          claimed.push({
+            ...this.stripeAttempt(
+              claimedRow.rows[0] as Record<string, unknown>,
+            ),
+            reconcileLeaseToken: token,
+          });
+      }
+    }
+    return claimed;
+  }
+  private stripeAttempt(row: Record<string, unknown>) {
+    return {
+      id: String(row.id),
+      caseId: String(row.case_id),
+      tenantId: String(row.tenant_id),
+      providerAccountId: String(row.provider_account_id),
+      fingerprint: String(row.command_fingerprint),
+      idempotencyKey: String(row.idempotency_key),
+      dispatchId: String(row.dispatch_id),
+      leaseToken: String(row.lease_token),
+      status: String(row.status) as
+        | "prepared"
+        | "pending"
+        | "succeeded"
+        | "failed"
+        | "unknown"
+        | "quarantined",
+      refundId: row.refund_id ? String(row.refund_id) : undefined,
+      providerStatus: row.provider_status
+        ? String(row.provider_status)
+        : undefined,
+      turnId: row.turn_id ? String(row.turn_id) : undefined,
+      command: row.command_data
+        ? JSON.parse(String(row.command_data))
+        : undefined,
+      stripeRequest: row.stripe_request_data
+        ? JSON.parse(String(row.stripe_request_data))
+        : undefined,
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+      nextAttemptAt: row.next_attempt_at
+        ? String(row.next_attempt_at)
+        : undefined,
+      reconcileLeaseToken: row.reconcile_lease_token
+        ? String(row.reconcile_lease_token)
+        : undefined,
+      terminalAt: row.terminal_at ? String(row.terminal_at) : undefined,
+      reconcileAttempts: Number(row.reconcile_attempts ?? 0),
+    };
   }
   /** Enforce DEC-015 without deleting the durable replay keys or the financial
    * audit window.  Expired case rows become minimal tombstones so pending
@@ -3568,6 +5025,38 @@ export class CaseStore {
     } catch (error) {
       if (!String(error).includes("no such table")) throw error;
     }
+    // Stripe attempts retain an immutable command for reconciliation, but its
+    // free-form reason is customer content and follows the normal case window.
+    try {
+      const stripeReasons = await this.client.execute({
+        sql: "UPDATE support_stripe_refund_attempts SET command_data = json_set(command_data, '$.reason', '[redacted]') WHERE created_at < ? AND command_data IS NOT NULL AND json_extract(command_data, '$.reason') <> '[redacted]'",
+        args: [caseCutoff],
+      });
+      financialReasonsRedacted += Number(stripeReasons.rowsAffected ?? 0);
+      // At the financial-audit boundary provider IDs and immutable command
+      // metadata are no longer retained. Before removing a terminal attempt,
+      // irreversibly replace any effect with a non-executable tombstone. The
+      // original created_at is preserved, so this does not extend retention.
+      // Pending/unknown attempts remain untouched because their external
+      // outcome is unresolved and must never be reissued.
+      await this.minimizeExpiredTerminalFinancialAttempts(auditCutoff);
+      // Unrelated webhook receipt records are replay protection only. They do
+      // not need a financial-audit lifetime and must not retain provider IDs.
+      await this.client.execute({
+        sql: "DELETE FROM support_actions WHERE case_id = 'stripe-webhook' AND kind = 'event' AND created_at < ?",
+        args: [rawCutoff],
+      });
+      // A completed/failed receipt holds only an event ID and no raw payload,
+      // but it still follows the seven-day webhook boundary. Never delete an
+      // active lease: its owner may be completing a durable reconciliation, or
+      // a later signed delivery may need to recover it after expiry.
+      await this.client.execute({
+        sql: "DELETE FROM support_stripe_webhook_receipts WHERE created_at < ? AND state IN ('completed', 'failed')",
+        args: [rawCutoff],
+      });
+    } catch (error) {
+      if (!String(error).includes("no such table")) throw error;
+    }
     return {
       rawPayloadsRedacted,
       casesRedacted,
@@ -3592,12 +5081,456 @@ export class CaseStore {
       expiredWorkflowRunIds: [...expiredWorkflowRunIds],
     };
   }
+  /** Atomically remove identifying terminal attempts only after installing a
+   * minimal idempotency tombstone. This covers failed/quarantined attempts
+   * whose success effect was already removed by a late provider failure. */
+  private async minimizeExpiredTerminalFinancialAttempts(auditCutoff: string) {
+    const tx = await this.client.transaction("write");
+    try {
+      const candidates = await Promise.all([
+        tx.execute({
+          sql: "SELECT idempotency_key, command_fingerprint AS fingerprint, created_at FROM support_stripe_refund_attempts WHERE status IN ('succeeded', 'failed', 'quarantined') AND COALESCE(terminal_at, created_at) < ?",
+          args: [auditCutoff],
+        }),
+        tx.execute({
+          sql: "SELECT idempotency_key, fingerprint, created_at FROM support_subscription_cancellation_attempts WHERE status IN ('scheduled', 'failed', 'quarantined') AND COALESCE(terminal_at, created_at) < ?",
+          args: [auditCutoff],
+        }),
+      ]);
+      for (const result of candidates)
+        for (const row of result.rows) {
+          const key = String(row.idempotency_key);
+          const fingerprint = String(row.fingerprint);
+          const existing = await tx.execute({
+            sql: "SELECT fingerprint FROM support_idempotency WHERE idempotency_key = ?",
+            args: [key],
+          });
+          if (
+            existing.rows[0] &&
+            String(existing.rows[0].fingerprint) !== fingerprint
+          )
+            throw new Error(
+              "Terminal financial attempt conflicts with its idempotency fingerprint.",
+            );
+          if (existing.rows[0])
+            await tx.execute({
+              sql: "UPDATE support_idempotency SET effect = ? WHERE idempotency_key = ? AND fingerprint = ?",
+              args: [
+                JSON.stringify(financialRetentionTombstone),
+                key,
+                fingerprint,
+              ],
+            });
+          else
+            await tx.execute({
+              sql: "INSERT INTO support_idempotency(idempotency_key, fingerprint, effect, created_at) VALUES (?, ?, ?, ?)",
+              args: [
+                key,
+                fingerprint,
+                JSON.stringify(financialRetentionTombstone),
+                String(row.created_at),
+              ],
+            });
+        }
+      await tx.execute({
+        sql: "DELETE FROM support_stripe_refund_attempts WHERE status IN ('succeeded', 'failed', 'quarantined') AND COALESCE(terminal_at, created_at) < ?",
+        args: [auditCutoff],
+      });
+      await tx.execute({
+        sql: "DELETE FROM support_subscription_cancellation_attempts WHERE status IN ('scheduled', 'failed', 'quarantined') AND COALESCE(terminal_at, created_at) < ?",
+        args: [auditCutoff],
+      });
+      await tx.commit();
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
   async recordEffect(key: string, fingerprint: string, effect: unknown) {
     await this.ensured();
     await this.client.execute({
       sql: "INSERT INTO support_idempotency(idempotency_key, fingerprint, effect, created_at) VALUES (?, ?, ?, ?)",
       args: [key, fingerprint, JSON.stringify(effect), now()],
     });
+  }
+  async prepareSubscriptionCancellationAttempt(input: {
+    caseId: string;
+    turnId: string;
+    binding: ProviderBinding;
+    subscriptionId: string;
+    idempotencyKey: string;
+    fingerprint: string;
+    command: unknown;
+  }) {
+    await this.ensured();
+    const retained = await this.client.execute({
+      sql: "SELECT effect FROM support_idempotency WHERE idempotency_key = ?",
+      args: [input.idempotencyKey],
+    });
+    if (
+      retained.rows[0] &&
+      isFinancialRetentionTombstone(JSON.parse(String(retained.rows[0].effect)))
+    )
+      throw financialRetentionTombstoneError();
+    const command = input.command as Partial<{
+      caseId: string;
+      turnId: string;
+      binding: ProviderBinding;
+      subscriptionId: string;
+      idempotencyKey: string;
+      fingerprint: string;
+    }>;
+    if (
+      command.caseId !== input.caseId ||
+      command.turnId !== input.turnId ||
+      command.subscriptionId !== input.subscriptionId ||
+      command.idempotencyKey !== input.idempotencyKey ||
+      command.fingerprint !== input.fingerprint ||
+      !structurallyEqual(command.binding, input.binding)
+    )
+      throw new Error(
+        "Cancellation attempt does not match its immutable command.",
+      );
+    const timestamp = now();
+    await this.client.execute({
+      sql: "INSERT OR IGNORE INTO support_subscription_cancellation_attempts(idempotency_key, case_id, turn_id, tenant_id, provider_account_id, subscription_id, fingerprint, command_data, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)",
+      args: [
+        input.idempotencyKey,
+        input.caseId,
+        input.turnId,
+        input.binding.tenantId,
+        input.binding.providerAccountId,
+        input.subscriptionId,
+        input.fingerprint,
+        JSON.stringify(input.command),
+        timestamp,
+        timestamp,
+      ],
+    });
+    const result = await this.client.execute({
+      sql: "SELECT * FROM support_subscription_cancellation_attempts WHERE idempotency_key = ?",
+      args: [input.idempotencyKey],
+    });
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    if (
+      !row ||
+      String(row.case_id) !== input.caseId ||
+      String(row.turn_id) !== input.turnId ||
+      String(row.fingerprint) !== input.fingerprint ||
+      !structurallyEqual(JSON.parse(String(row.command_data)), input.command)
+    )
+      throw new Error(
+        "Cancellation idempotency key was reused with another command.",
+      );
+    return {
+      status: String(row.status),
+      cancelsAt: row.cancels_at ? String(row.cancels_at) : undefined,
+    };
+  }
+  /** Marks the hand-off immediately before a provider POST. A process crash
+   * after this point is always recovered by GET; it can never issue a second
+   * mutation from a durable prepared command. */
+  async claimSubscriptionCancellationMutation(input: {
+    idempotencyKey: string;
+    fingerprint: string;
+  }) {
+    await this.ensured();
+    const claimed = await this.client.execute({
+      sql: "UPDATE support_subscription_cancellation_attempts SET status = 'claimed', updated_at = ? WHERE idempotency_key = ? AND fingerprint = ? AND status = 'prepared'",
+      args: [now(), input.idempotencyKey, input.fingerprint],
+    });
+    return Number(claimed.rowsAffected ?? 0) === 1;
+  }
+  async finalizeSubscriptionCancellationAttempt(input: {
+    idempotencyKey: string;
+    fingerprint: string;
+    status: "scheduled" | "unknown" | "failed";
+    cancelsAt?: string;
+    effect?: unknown;
+  }) {
+    await this.ensured();
+    const terminal = input.status === "scheduled" || input.status === "failed";
+    const tx = await this.client.transaction("write");
+    try {
+      const write = await tx.execute({
+        sql: "UPDATE support_subscription_cancellation_attempts SET status = ?, cancels_at = COALESCE(?, cancels_at), terminal_at = CASE WHEN ? THEN COALESCE(terminal_at, ?) ELSE terminal_at END, next_reconcile_at = CASE WHEN ? = 'unknown' THEN ? ELSE NULL END, reconcile_lease_token = NULL, reconcile_lease_until = NULL, updated_at = ? WHERE idempotency_key = ? AND fingerprint = ? AND (status = 'claimed' OR status = ?)",
+        args: [
+          input.status,
+          input.cancelsAt ?? null,
+          terminal ? 1 : 0,
+          terminal ? now() : null,
+          input.status,
+          input.status === "unknown" ? now() : null,
+          now(),
+          input.idempotencyKey,
+          input.fingerprint,
+          input.status,
+        ],
+      });
+      if (Number(write.rowsAffected ?? 0) !== 1) {
+        await tx.rollback();
+        return false;
+      }
+      if (terminal && input.effect)
+        await tx.execute({
+          sql: "INSERT OR IGNORE INTO support_idempotency(idempotency_key, fingerprint, effect, created_at) VALUES (?, ?, ?, ?)",
+          args: [
+            input.idempotencyKey,
+            input.fingerprint,
+            JSON.stringify(input.effect),
+            now(),
+          ],
+        });
+      await tx.commit();
+      return true;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
+  async claimUnknownSubscriptionCancellationAttempts(limit = 10) {
+    await this.ensured();
+    const timestamp = now();
+    const leaseUntil = new Date(Date.now() + 30_000).toISOString();
+    const rows = await this.client.execute({
+      sql: "SELECT * FROM support_subscription_cancellation_attempts WHERE status IN ('unknown', 'claimed') AND (next_reconcile_at IS NULL OR next_reconcile_at <= ?) AND (reconcile_lease_until IS NULL OR reconcile_lease_until < ?) ORDER BY COALESCE(next_reconcile_at, created_at), created_at LIMIT ?",
+      args: [timestamp, timestamp, limit],
+    });
+    const claimed = [] as Array<{
+      caseId: string;
+      turnId: string;
+      idempotencyKey: string;
+      fingerprint: string;
+      command: unknown;
+      createdAt: string;
+      recoveryClaim: string;
+    }>;
+    for (const row of rows.rows) {
+      const value = row as Record<string, unknown>;
+      const recoveryClaim = crypto.randomUUID();
+      const write = await this.client.execute({
+        sql: "UPDATE support_subscription_cancellation_attempts SET reconcile_lease_token = ?, reconcile_lease_until = ?, updated_at = ? WHERE idempotency_key = ? AND fingerprint = ? AND status IN ('unknown', 'claimed') AND (next_reconcile_at IS NULL OR next_reconcile_at <= ?) AND (reconcile_lease_until IS NULL OR reconcile_lease_until < ?)",
+        args: [
+          recoveryClaim,
+          leaseUntil,
+          timestamp,
+          String(value.idempotency_key),
+          String(value.fingerprint),
+          timestamp,
+          timestamp,
+        ],
+      });
+      if (Number(write.rowsAffected ?? 0) !== 1) continue;
+      claimed.push({
+        caseId: String(value.case_id),
+        turnId: String(value.turn_id),
+        idempotencyKey: String(value.idempotency_key),
+        fingerprint: String(value.fingerprint),
+        command: JSON.parse(String(value.command_data)),
+        createdAt: String(value.created_at),
+        recoveryClaim,
+      });
+    }
+    return claimed;
+  }
+  async rescheduleSubscriptionCancellationRecovery(input: {
+    idempotencyKey: string;
+    fingerprint: string;
+    recoveryClaim: string;
+  }) {
+    await this.ensured();
+    const current = await this.client.execute({
+      sql: "SELECT reconcile_attempts FROM support_subscription_cancellation_attempts WHERE idempotency_key = ? AND fingerprint = ? AND reconcile_lease_token = ? AND status IN ('unknown', 'claimed')",
+      args: [input.idempotencyKey, input.fingerprint, input.recoveryClaim],
+    });
+    const attempts = Number(current.rows[0]?.reconcile_attempts ?? 0) + 1;
+    const delay = Math.min(
+      60 * 60_000,
+      30_000 * 2 ** Math.min(attempts - 1, 7),
+    );
+    const next = new Date(Date.now() + delay).toISOString();
+    const write = await this.client.execute({
+      sql: "UPDATE support_subscription_cancellation_attempts SET status = 'unknown', reconcile_attempts = ?, next_reconcile_at = ?, reconcile_lease_token = NULL, reconcile_lease_until = NULL, updated_at = ? WHERE idempotency_key = ? AND fingerprint = ? AND reconcile_lease_token = ? AND status IN ('unknown', 'claimed')",
+      args: [
+        attempts,
+        next,
+        now(),
+        input.idempotencyKey,
+        input.fingerprint,
+        input.recoveryClaim,
+      ],
+    });
+    return Number(write.rowsAffected ?? 0) === 1;
+  }
+  /** Atomically closes an uncertain cancellation and records the immutable
+   * originating turn's customer notification. A later follow-up keeps the
+   * mutable case projection, but cannot lose this terminal result. */
+  async finalizeUnknownSubscriptionCancellation(input: {
+    idempotencyKey: string;
+    fingerprint: string;
+    status: "scheduled" | "quarantined" | "failed";
+    recoveryClaim?: string;
+    effect?: {
+      subscriptionId: string;
+      cancelAtPeriodEnd: true;
+      cancelsAt: string;
+      idempotencyKey: string;
+      replayed: boolean;
+    };
+  }) {
+    await this.ensured();
+    const tx = await this.client.transaction("write");
+    try {
+      const found = await tx.execute({
+        sql: "SELECT * FROM support_subscription_cancellation_attempts WHERE idempotency_key = ? AND fingerprint = ?",
+        args: [input.idempotencyKey, input.fingerprint],
+      });
+      const attempt = found.rows[0] as Record<string, unknown> | undefined;
+      if (
+        !attempt ||
+        !["unknown", "claimed"].includes(String(attempt.status)) ||
+        (input.recoveryClaim !== undefined &&
+          String(attempt.reconcile_lease_token) !== input.recoveryClaim)
+      ) {
+        await tx.rollback();
+        return false;
+      }
+      const terminal = await tx.execute({
+        sql: "UPDATE support_subscription_cancellation_attempts SET status = ?, cancels_at = COALESCE(?, cancels_at), terminal_at = COALESCE(terminal_at, ?), next_reconcile_at = NULL, reconcile_lease_token = NULL, reconcile_lease_until = NULL, updated_at = ? WHERE idempotency_key = ? AND fingerprint = ? AND status IN ('unknown', 'claimed') AND (? IS NULL OR reconcile_lease_token = ?)",
+        args: [
+          input.status,
+          input.effect?.cancelsAt ?? null,
+          now(),
+          now(),
+          input.idempotencyKey,
+          input.fingerprint,
+          input.recoveryClaim ?? null,
+          input.recoveryClaim ?? null,
+        ],
+      });
+      if (Number(terminal.rowsAffected ?? 0) !== 1) {
+        await tx.rollback();
+        return false;
+      }
+      const caseResult = await tx.execute({
+        sql: "SELECT data, version FROM support_cases WHERE id = ?",
+        args: [String(attempt.case_id)],
+      });
+      const row = caseResult.rows[0] as Record<string, unknown> | undefined;
+      if (!row) {
+        await tx.commit();
+        return false;
+      }
+      const current = parse({ data: row.data });
+      const turnId = String(attempt.turn_id);
+      const scheduled = input.status === "scheduled";
+      const confirmedNoEffect = input.status === "failed";
+      const status = scheduled ? "resolved" : "escalated";
+      const response = scheduled
+        ? `Your subscription is scheduled to cancel at the end of the current billing period on ${input.effect!.cancelsAt}.`
+        : "The subscription cancellation requires additional review. A support specialist will follow up shortly.";
+      await tx.execute({
+        sql: "UPDATE support_turns SET state = ?, outcome_data = json_patch(COALESCE(outcome_data, '{}'), ?), updated_at = ? WHERE id = ? AND case_id = ?",
+        args: [
+          status,
+          JSON.stringify({ status, finalResponse: response }),
+          now(),
+          turnId,
+          current.id,
+        ],
+      });
+      if (scheduled)
+        await tx.execute({
+          sql: "INSERT OR IGNORE INTO support_idempotency(idempotency_key, fingerprint, effect, created_at) VALUES (?, ?, ?, ?)",
+          args: [
+            input.idempotencyKey,
+            input.fingerprint,
+            JSON.stringify(input.effect),
+            now(),
+          ],
+        });
+      else
+        await tx.execute({
+          sql: "INSERT INTO support_actions(id, case_id, kind, fingerprint, data, created_at) VALUES (?, ?, 'subscription-cancellation-failure', ?, ?, ?) ON CONFLICT(kind, fingerprint) DO UPDATE SET data = excluded.data",
+          args: [
+            `action_${current.id}_${turnId}_cancellation-failed`,
+            current.id,
+            input.fingerprint,
+            JSON.stringify({
+              classification: confirmedNoEffect
+                ? "confirmed-no-effect"
+                : "unconfirmed-expired",
+            }),
+            now(),
+          ],
+        });
+      await tx.execute({
+        sql: "INSERT OR IGNORE INTO support_outbox(id, case_id, binding, body, status, operation, payload_fingerprint, state, originating_turn_id, correlation_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'reply', ?, 'pending', ?, 'unknown', ?, ?)",
+        args: [
+          `outbox_${current.id}_${turnId}_cancellation-${scheduled ? "final" : "failed"}`,
+          current.id,
+          JSON.stringify(bindingsForCase(current).support),
+          response,
+          status,
+          this.outboxFingerprint(
+            bindingsForCase(current).support,
+            "reply",
+            response,
+            status,
+          ),
+          turnId,
+          now(),
+          now(),
+        ],
+      });
+      if (
+        (current.metadata as Record<string, unknown>).activeTurnId === turnId
+      ) {
+        const updated = {
+          ...current,
+          status,
+          finalResponse: response,
+          escalationReason: scheduled
+            ? undefined
+            : confirmedNoEffect
+              ? "The subscription cancellation could not be completed and requires staff review."
+              : "Subscription cancellation could not be confirmed and requires staff review.",
+          metadata: scheduled
+            ? {
+                ...current.metadata,
+                cancellationEffect: {
+                  subscriptionId: input.effect!.subscriptionId,
+                  cancelsAt: input.effect!.cancelsAt,
+                  status: "scheduled",
+                },
+              }
+            : current.metadata,
+          updatedAt: now(),
+        };
+        const write = await tx.execute({
+          sql: "UPDATE support_cases SET data = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+          args: [
+            JSON.stringify(updated),
+            updated.updatedAt,
+            current.id,
+            Number(row.version),
+          ],
+        });
+        if (Number(write.rowsAffected ?? 0) !== 1)
+          throw new StaleCaseWriteError(current.id);
+      }
+      await tx.commit();
+      return true;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
   }
   getClientForTests() {
     return this.client;

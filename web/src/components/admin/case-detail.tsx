@@ -107,8 +107,14 @@ export function CaseDetail({
           <BadgeCheck />
           <AlertTitle>
             Refund{" "}
-            {c.refundResult.status === "skipped" ? "already issued" : "issued"}:{" "}
-            {c.refundResult.amount} {c.refundResult.currency}
+            {c.refundResult.status === "skipped"
+              ? "already issued"
+              : c.refundResult.status === "pending"
+                ? "pending reconciliation"
+                : c.refundResult.status === "failed"
+                  ? "failed; staff review required"
+                  : "issued"}
+            : {c.refundResult.amount} {c.refundResult.currency}
           </AlertTitle>
           <AlertDescription>
             {c.refundResult.refundId} · order {c.refundResult.orderId} ·{" "}

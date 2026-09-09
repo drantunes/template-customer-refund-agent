@@ -62,7 +62,7 @@ export const issueRefundTool = createTool({
     orderId: z.string(),
     amount: z.number(),
     currency: z.string(),
-    status: z.enum(["executed", "skipped"]),
+    status: z.enum(["executed", "skipped", "pending", "failed"]),
     idempotencyKey: z.string(),
     executedAt: z.string(),
   }),
@@ -181,7 +181,10 @@ export const issueRefundTool = createTool({
       // local idempotency record is the durable fact used by recovery; do not
       // permanently report a financial failure when it already exists.
       const durable = await caseStore.idempotency(command.idempotencyKey);
-      if (!durable) {
+      const attempt = await caseStore.stripeRefundAttempt(
+        command.idempotencyKey,
+      );
+      if (!durable && attempt?.status !== "failed") {
         const policyEvidenceRejected = isRefundPolicyEvidenceError(error);
         const confirmed = isConfirmedRefundFailure(error);
         await caseStore.saveAction(
@@ -210,21 +213,54 @@ export const issueRefundTool = createTool({
       orderId: effect.orderId,
       amount: moneyToLegacyAmount(effect.amount),
       currency: effect.amount.currency,
-      status: effect.replayed ? ("skipped" as const) : ("executed" as const),
+      status:
+        effect.status === "failed"
+          ? ("failed" as const)
+          : effect.status === "pending" || effect.status === "unknown"
+            ? ("pending" as const)
+            : effect.replayed
+              ? ("skipped" as const)
+              : ("executed" as const),
       idempotencyKey: effect.idempotencyKey,
       executedAt: effect.executedAt,
     };
-    await caseStore.update(input.caseId, {
-      refundResult: result,
-      metadata: {
-        ...supportCase.metadata,
-        refundEffects: {
-          ...((supportCase.metadata as Record<string, unknown>)
-            .refundEffects as Record<string, unknown> | undefined),
-          [input.fingerprint]: result,
-        },
-      },
+    // A direct terminal failure returned by Stripe has the same authoritative
+    // ledger/case/outbox boundary as a signed late failure. Finalize it before
+    // the native receipt is projected, then let the transaction below return
+    // that durable failed projection without recreating an effect.
+    if (effect.status === "failed")
+      await caseStore.finalizeStripeRefundReconciliation({
+        idempotencyKey: command.idempotencyKey,
+        status: "failed",
+        refundId: effect.refundId,
+        providerStatus: effect.providerStatus ?? effect.status,
+        effect,
+      });
+    // A webhook can terminalize the immutable Stripe attempt after the
+    // provider returns but before this native tool writes its projection.
+    // Read that ledger and the current case in one transaction with any new
+    // success effect, so a stale receipt cannot recreate an issued/pending
+    // projection or an executable replay record after late failure.
+    const projected = await caseStore.projectRefundToolExecution({
+      caseId: input.caseId,
+      turnId: native.turnId!,
+      fingerprint: command.fingerprint,
+      idempotencyKey: command.idempotencyKey,
+      result,
+      ...(effect.status === "succeeded" ? { effect } : {}),
     });
-    return result;
+    if (effect.status === "failed")
+      await caseStore.saveAction(
+        input.caseId,
+        "refund-failure",
+        command.fingerprint,
+        {
+          category: "provider",
+          classification: "confirmed-failed",
+          refundId: effect.refundId,
+          observedAt: effect.executedAt,
+        },
+      );
+    return projected;
   },
 });

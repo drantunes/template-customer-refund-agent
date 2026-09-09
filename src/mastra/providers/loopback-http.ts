@@ -11,6 +11,8 @@ import type {
   RefundCommand,
   RefundEffect,
   RefundQuote,
+  SubscriptionCancellationCommand,
+  SubscriptionCancellationEffect,
   SupportChannelProvider,
   TransactionalActionProvider,
 } from "./contracts";
@@ -21,7 +23,7 @@ import { z } from "zod";
 const bindingSchema = z
   .object({
     tenantId: z.string().min(1),
-    providerKind: z.enum(["local", "intercom"]),
+    providerKind: z.enum(["local", "intercom", "stripe"]),
     providerAccountId: z.string().min(1),
     externalConversationId: z.string().min(1),
   })
@@ -81,6 +83,8 @@ const subscriptionSchema = z
     amount: moneySchema,
     status: z.enum(["active", "cancelled", "past_due"]),
     renewsAt: z.iso.datetime(),
+    cancelAtPeriodEnd: z.literal(true).optional(),
+    cancelsAt: z.iso.datetime().optional(),
   })
   .strict();
 const refundSchema = z
@@ -141,6 +145,20 @@ const commandSchema = z
     orderId: z.string().min(1),
     amount: moneySchema,
     reason: z.string().min(1),
+    idempotencyKey: z.string().min(1),
+    fingerprint: z.string().min(1),
+  })
+  .strict();
+const cancellationCommandSchema = z
+  .object({
+    caseId: z.string().min(1),
+    turnId: z.string().min(1),
+    ownerId: z.string().min(1),
+    binding: bindingSchema,
+    subscriptionId: z.string().min(1),
+    cancellationMode: z.literal("period_end"),
+    sourceMessageId: z.string().min(1),
+    sourceMessageHash: z.string().min(1),
     idempotencyKey: z.string().min(1),
     fingerprint: z.string().min(1),
   })
@@ -345,6 +363,74 @@ export function createLocalLoopbackFacade(
         if (injected === "drop-after-commit")
           return new Promise(() => undefined);
         return Response.json(effectSchema.parse(effect));
+      }
+      if (
+        request.url.endsWith("/transactions/schedule-subscription-cancellation")
+      ) {
+        const checked = cancellationCommandSchema.safeParse(body.command);
+        if (!checked.success)
+          return Response.json(
+            { error: "invalid subscription cancellation command" },
+            { status: 400 },
+          );
+        const command = checked.data;
+        if (!sameBinding(body.binding, command.binding))
+          return Response.json(
+            {
+              error:
+                "transaction command binding does not match request binding",
+            },
+            { status: 400 },
+          );
+        return Response.json(
+          z
+            .object({
+              subscriptionId: z.string(),
+              cancelAtPeriodEnd: z.literal(true),
+              cancelsAt: z.iso.datetime(),
+              idempotencyKey: z.string(),
+              replayed: z.boolean(),
+            })
+            .parse(
+              await provider
+                .transactions(body.binding)
+                .scheduleSubscriptionCancellation(command),
+            ),
+        );
+      }
+      if (
+        request.url.endsWith("/transactions/retrieve-subscription-cancellation")
+      ) {
+        const checked = cancellationCommandSchema.safeParse(body.command);
+        if (!checked.success)
+          return Response.json(
+            { error: "invalid subscription cancellation command" },
+            { status: 400 },
+          );
+        const command = checked.data;
+        if (!sameBinding(body.binding, command.binding))
+          return Response.json(
+            {
+              error:
+                "transaction command binding does not match request binding",
+            },
+            { status: 400 },
+          );
+        const effect = await provider
+          .transactions(body.binding)
+          .retrieveSubscriptionCancellation(command);
+        return Response.json(
+          z
+            .object({
+              subscriptionId: z.string(),
+              cancelAtPeriodEnd: z.literal(true),
+              cancelsAt: z.iso.datetime(),
+              idempotencyKey: z.string(),
+              replayed: z.boolean(),
+            })
+            .nullable()
+            .parse(effect ?? null),
+        );
       }
       if (request.url.endsWith("/knowledge/search")) {
         const input = z
@@ -594,6 +680,35 @@ class LoopbackHttpTransactionalProvider implements TransactionalActionProvider {
         authorization,
       },
       effectSchema,
+    );
+  }
+  scheduleSubscriptionCancellation(command: SubscriptionCancellationCommand) {
+    return this.http.call<SubscriptionCancellationEffect>(
+      "/transactions/schedule-subscription-cancellation",
+      { binding: command.binding, command },
+      z.object({
+        subscriptionId: z.string(),
+        cancelAtPeriodEnd: z.literal(true),
+        cancelsAt: z.string(),
+        idempotencyKey: z.string(),
+        replayed: z.boolean(),
+      }),
+    );
+  }
+  retrieveSubscriptionCancellation(command: SubscriptionCancellationCommand) {
+    return this.http.call<SubscriptionCancellationEffect | undefined>(
+      "/transactions/retrieve-subscription-cancellation",
+      { binding: command.binding, command },
+      z
+        .object({
+          subscriptionId: z.string(),
+          cancelAtPeriodEnd: z.literal(true),
+          cancelsAt: z.string(),
+          idempotencyKey: z.string(),
+          replayed: z.boolean(),
+        })
+        .nullable()
+        .transform((value) => value ?? undefined),
     );
   }
 }

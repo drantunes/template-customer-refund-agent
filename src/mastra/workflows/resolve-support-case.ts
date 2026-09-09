@@ -1,4 +1,5 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { caseStore } from "../lib/case-store";
 import { withTrustedCommerceScope } from "../lib/trusted-run-scope";
@@ -33,6 +34,8 @@ import { withTrustedCaseReadScope } from "../lib/trusted-run-scope";
 import { publishKnowledge } from "../lib/publish-knowledge";
 import { traceOperationalPort } from "../lib/operational-spans";
 import { intercomDevelopmentConfig } from "../providers/intercom/config";
+import { withTrustedCancellationScope } from "../providers/cancellation-execution";
+import { cancellationFingerprint } from "../tools/schedule-subscription-cancellation";
 
 const caseIdSchema = z.object({ caseId: z.string(), turnId: z.string() });
 
@@ -89,7 +92,7 @@ const financialResponseCommandSchema = z.object({
 const immutableRefundCommandSchema = z.object({
   binding: z.object({
     tenantId: z.string(),
-    providerKind: z.literal("local"),
+    providerKind: z.enum(["local", "stripe"]),
     providerAccountId: z.string(),
     externalConversationId: z.string(),
   }),
@@ -140,7 +143,13 @@ async function completedRefundResponse(
   );
   const result = supportCase.refundResult;
   const turn = await persistentCaseStore.turn(supportCase.id, turnId);
-  if (!command.success || !result || !turn) return undefined;
+  if (
+    !command.success ||
+    !result ||
+    !turn ||
+    !["executed", "skipped"].includes(result.status)
+  )
+    return undefined;
 
   const binding = resolveConfiguredBinding(
     bindingsForPersistedCase(supportCase).transactions,
@@ -491,7 +500,22 @@ const inspectOrderStep = createStep({
           }),
         );
 
-        const refundHistory = orderLookup.found
+        if (
+          bindings.commerce.providerKind === "stripe" &&
+          orderLookup.found &&
+          subscriptionLookup.found &&
+          supportCase.triage?.intent !== "cancellation"
+        )
+          throw new Error(
+            "Stripe refund target is ambiguous between Checkout and a subscription invoice.",
+          );
+
+        // A renewal's paid Invoice/InvoicePayment is a distinct immutable
+        // refund target. Never silently fall back to an initial Checkout.
+        const refundTargetId =
+          orderLookup.order?.orderId ??
+          subscriptionLookup.subscription?.refundOrderId;
+        const refundHistory = refundTargetId
           ? refundHistorySchema.parse(
               await traceOperationalPort({
                 mastra,
@@ -501,7 +525,7 @@ const inspectOrderStep = createStep({
                 run: () =>
                   executeRefundHistory(
                     {
-                      orderId: orderLookup.order?.orderId ?? "",
+                      orderId: refundTargetId,
                       binding: resolveConfiguredBinding(bindings.commerce),
                     },
                     { mastra, requestContext, tracingContext },
@@ -582,13 +606,22 @@ const draftResponseStep = createStep({
     const responseUsage = result.usage;
     const existingUsage = supportCase.agentUsage;
     const parsedDraft = draftResolutionSchema.parse(result.object);
+    // A cancellation effect has a deliberately small non-model authority
+    // surface.  The current, verified customer turn must match this complete
+    // command form; mentioning cancellation or a refund elsewhere is never
+    // enough to create an external effect.
+    const hasNoRefundCancellationAuthority =
+      supportCase.triage?.intent === "cancellation" &&
+      explicitNoRefundCancellation(latestMessage.body);
     const policyMatches = supportCase.policyMatches ?? [];
     const validCitations = new Set(
       policyMatches.flatMap((entry) => [entry.title, entry.source]),
     );
     const missingEvidence = policyMatches.length === 0;
     const requiresSupportingCitation =
-      parsedDraft.recommendRefund || !parsedDraft.requiresEscalation;
+      hasNoRefundCancellationAuthority ||
+      parsedDraft.recommendRefund ||
+      !parsedDraft.requiresEscalation;
     const invalidCitation =
       (requiresSupportingCitation && parsedDraft.citedSources.length === 0) ||
       parsedDraft.citedSources.some(
@@ -655,11 +688,11 @@ const draftResponseStep = createStep({
     // metadata: even a non-refund draft can falsely assert that a refund was
     // issued or rely on evidence that expired while it was being generated.
     const mustUseSafeEscalation =
-      parsedDraft.requiresEscalation ||
+      (!hasNoRefundCancellationAuthority && parsedDraft.requiresEscalation) ||
       missingEvidence ||
       invalidCitation ||
       staleOrUnauthoritativeEvidence;
-    const safeDraft = mustUseSafeEscalation
+    const evidenceSafeDraft = mustUseSafeEscalation
       ? {
           ...parsedDraft,
           draftResponse: safeEscalationResponse,
@@ -673,6 +706,20 @@ const draftResponseStep = createStep({
             : "Draft lacks applicable evidence from the active publication.",
         }
       : parsedDraft;
+    // A qualifying no-refund cancellation is authorized by the immutable
+    // customer turn, never by a draft recommendation.  Remove every refund
+    // field before the later cancellation and native-approval steps run, so a
+    // conflicting model response cannot persist a refund command or suspend
+    // the agent lifecycle.
+    const safeDraft = hasNoRefundCancellationAuthority
+      ? {
+          ...evidenceSafeDraft,
+          recommendRefund: false,
+          refundAmount: undefined,
+          refundCurrency: undefined,
+          refundReason: undefined,
+        }
+      : evidenceSafeDraft;
     await caseStore.update(supportCase.id, {
       draft: safeDraft,
       metadata: mustUseSafeEscalation
@@ -777,6 +824,105 @@ async function recoveredApprovalDecision(
   };
 }
 
+export function explicitNoRefundCancellation(body: string) {
+  const normalized = body.trim().replace(/\s+/g, " ").toLowerCase();
+  return /^(?:please )?cancel(?: my)? subscription(?: at the end of (?:the )?(?:current )?(?:billing )?period)?[.!]? (?:i )?(?:do not|don't) want (?:a )?refund[.!]?$/.test(
+    normalized,
+  );
+}
+
+const scheduleCancellationStep = createStep({
+  id: "schedule-subscription-cancellation",
+  description:
+    "Schedules only an explicit verified-owner no-refund cancellation at period end.",
+  inputSchema: caseIdSchema,
+  outputSchema: caseIdSchema,
+  execute: async ({ inputData, mastra, requestContext, tracingContext }) => {
+    const { supportCase, turn, ownerId } = await getCaseOrThrow(
+      inputData.caseId,
+      inputData.turnId,
+    );
+    if (supportCase.triage?.intent !== "cancellation") return inputData;
+    const subscription = supportCase.subscriptionLookup?.subscription;
+    if (
+      !subscription ||
+      subscription.status !== "active" ||
+      !explicitNoRefundCancellation(turn.message!.body) ||
+      supportCase.draft?.recommendRefund
+    ) {
+      await caseStore.update(supportCase.id, {
+        status: "escalated",
+        escalationReason:
+          "Cancellation requires an explicit no-refund request for one active owned subscription.",
+      });
+      return inputData;
+    }
+    if (!mastra)
+      throw new Error(
+        "The resolve workflow must run through a registered Mastra instance.",
+      );
+    const binding = resolveConfiguredBinding(
+      bindingsForPersistedCase(supportCase).transactions,
+    );
+    const raw = {
+      caseId: supportCase.id,
+      turnId: inputData.turnId,
+      ownerId,
+      binding,
+      subscriptionId: subscription.subscriptionId,
+      cancellationMode: "period_end" as const,
+      sourceMessageId: turn.message!.id,
+      sourceMessageHash: createHash("sha256")
+        .update(turn.message!.body)
+        .digest("hex"),
+      idempotencyKey: `cancel:${supportCase.id}:${inputData.turnId}`,
+    };
+    const fingerprint = cancellationFingerprint(raw);
+    const command = { ...raw, fingerprint };
+    await caseStore.saveAction(
+      supportCase.id,
+      "subscription-cancellation-command",
+      fingerprint,
+      command,
+    );
+    await caseStore.bindTurnCommand(
+      supportCase.id,
+      inputData.turnId,
+      fingerprint,
+    );
+    const tool = mastra.getTool("scheduleSubscriptionCancellationTool");
+    if (!tool.execute)
+      throw new Error("Registered cancellation tool has no execute function.");
+    try {
+      const effect = await withTrustedCancellationScope(
+        {
+          caseId: supportCase.id,
+          turnId: inputData.turnId,
+          commandFingerprint: fingerprint,
+        },
+        () =>
+          tool.execute!(command, { mastra, requestContext, tracingContext }),
+      );
+      await caseStore.update(supportCase.id, {
+        metadata: { ...supportCase.metadata, cancellationEffect: effect },
+      });
+    } catch (error) {
+      await caseStore.saveAction(
+        supportCase.id,
+        "subscription-cancellation-failure",
+        fingerprint,
+        { message: String(error) },
+      );
+      await caseStore.update(supportCase.id, {
+        status: "escalated",
+        escalationReason:
+          "Subscription cancellation requires additional review.",
+      });
+    }
+    return inputData;
+  },
+});
+
 const requestApprovalStep = createStep({
   id: "request-approval",
   description:
@@ -852,7 +998,10 @@ const requestApprovalStep = createStep({
       const turnId = inputData.turnId;
       const command = {
         approvalCaseId: supportCase.id,
-        orderId: supportCase.orderLookup?.order?.orderId ?? "",
+        orderId:
+          supportCase.orderLookup?.order?.orderId ??
+          supportCase.subscriptionLookup?.subscription?.refundOrderId ??
+          "",
         amount,
         currency,
         reason: draft.refundReason ?? "Approved support refund",
@@ -1001,7 +1150,10 @@ const requestApprovalStep = createStep({
         refundAmount: draft.refundAmount ?? 0,
         refundCurrency: draft.refundCurrency ?? "USD",
         refundReason: draft.refundReason ?? "",
-        orderId: supportCase.orderLookup?.order?.orderId ?? "",
+        orderId:
+          supportCase.orderLookup?.order?.orderId ??
+          supportCase.subscriptionLookup?.subscription?.refundOrderId ??
+          "",
         draftResponse: draft.draftResponse,
       });
     }
@@ -1058,13 +1210,32 @@ const resolveCaseStep = createStep({
       : "resolved";
     let escalationReason = draft.escalationReason;
 
+    const cancellation = (supportCase.metadata as Record<string, unknown>)
+      .cancellationEffect as
+      { status?: string; cancelsAt?: string } | undefined;
+    if (
+      supportCase.triage?.intent === "cancellation" &&
+      cancellation?.status === "scheduled" &&
+      cancellation.cancelsAt
+    ) {
+      status = "resolved";
+      finalResponse = `Your subscription is scheduled to cancel at the end of the current billing period on ${cancellation.cancelsAt}.`;
+    } else if (supportCase.triage?.intent === "cancellation" && !cancellation) {
+      status = "escalated";
+      finalResponse = safeEscalationResponse;
+      escalationReason ??=
+        "Subscription cancellation was not durably scheduled.";
+    }
+
     if (draft.recommendRefund) {
       if (!inputData.approved) {
         status = "escalated";
         escalationReason = `Refund declined by ${inputData.approverId ?? "reviewer"}${inputData.note ? `: ${inputData.note}` : "."}`;
         finalResponse = `Thanks for your patience - a specialist is going to take a closer look at your case and follow up shortly.`;
       } else {
-        const orderId = supportCase.orderLookup?.order?.orderId;
+        const orderId =
+          supportCase.orderLookup?.order?.orderId ??
+          supportCase.subscriptionLookup?.subscription?.refundOrderId;
         if (!orderId) {
           status = "escalated";
           escalationReason =
@@ -1087,6 +1258,12 @@ const resolveCaseStep = createStep({
           if (completed) {
             status = "resolved";
             finalResponse = completed;
+          } else if (supportCase.refundResult?.status === "failed") {
+            status = "escalated";
+            escalationReason =
+              "Stripe reported that the approved refund failed and requires staff review.";
+            finalResponse =
+              "The refund requires additional review. A support specialist will follow up shortly.";
           } else
             throw new Error(
               "Native approval resumed without a matching durable refund effect; recovery must reconcile the immutable command.",
@@ -1095,6 +1272,14 @@ const resolveCaseStep = createStep({
       }
     }
 
+    // A financial terminalization may be committed by an authoritative Stripe
+    // webhook between the approved tool receipt and this native continuation.
+    // Both paths must use the immutable refund-command/turn identity, so the
+    // transaction's INSERT OR IGNORE converges on one customer notification.
+    const terminalOutboxKind =
+      draft.recommendRefund && supportCase.refundResult?.status === "skipped"
+        ? "refund-final"
+        : "final";
     const message = {
       // Deterministic identities make an active-step replay converge on the
       // already finalized message/outbox pair.
@@ -1112,7 +1297,7 @@ const resolveCaseStep = createStep({
       escalationReason,
       message,
       outbox: {
-        id: `outbox_${supportCase.id}_${inputData.turnId}_final`,
+        id: `outbox_${supportCase.id}_${inputData.turnId}_${terminalOutboxKind}`,
         caseId: supportCase.id,
         binding: resolveConfiguredBinding(
           bindingsForPersistedCase(supportCase).support,
@@ -1196,6 +1381,7 @@ export const resolveSupportCaseWorkflow = createWorkflow({
   .then(retrievePolicyStep)
   .then(inspectOrderStep)
   .then(draftResponseStep)
+  .then(scheduleCancellationStep)
   .then(requestApprovalStep)
   .then(resolveCaseStep)
   .commit();

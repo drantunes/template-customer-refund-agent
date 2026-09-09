@@ -12,7 +12,7 @@ import {
 const bindingSchema = z
   .object({
     tenantId: z.string(),
-    providerKind: z.literal("local"),
+    providerKind: z.enum(["local", "stripe"]),
     providerAccountId: z.string(),
     externalConversationId: z.string(),
   })
@@ -128,6 +128,7 @@ export const lookupSubscriptionTool = createTool({
         currency: z.string(),
         status: z.enum(["active", "cancelled", "past_due"]),
         renewsAt: z.string(),
+        refundOrderId: z.string().optional(),
       })
       .optional(),
   }),
@@ -151,6 +152,9 @@ export const lookupSubscriptionTool = createTool({
             ...subscription,
             amount: moneyToLegacyAmount(subscription.amount),
             currency: subscription.amount.currency,
+            refundOrderId: subscription.providerRefs?.find(
+              (reference) => reference.type === "invoice",
+            )?.id,
           },
         }
       : { found: false };

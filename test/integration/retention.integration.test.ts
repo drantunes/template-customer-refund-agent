@@ -408,6 +408,214 @@ describe("DEC-015 retention", () => {
     await store.close();
   });
 
+  it("minimizes 366-day terminal Stripe effects into non-executable tombstones without reopening provider mutations", async () => {
+    const store = await storeForTest();
+    const client = store.getClientForTests();
+    const now = new Date("2026-09-05T00:00:00.000Z");
+    const expired = new Date(
+      now.getTime() - 366 * 24 * 60 * 60 * 1_000,
+    ).toISOString();
+    const retained = new Date(
+      now.getTime() - 364 * 24 * 60 * 60 * 1_000,
+    ).toISOString();
+    await client.execute({
+      sql: "INSERT INTO support_stripe_refund_attempts(id, case_id, tenant_id, provider_account_id, command_fingerprint, idempotency_key, dispatch_id, lease_token, turn_id, command_data, status, refund_id, provider_status, terminal_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'succeeded', ?, ?, ?, ?, ?)",
+      args: [
+        "expired-refund-attempt",
+        "expired-refund-case",
+        "tenant",
+        "acct",
+        "expired-refund-fingerprint",
+        "expired-refund-key",
+        "dispatch",
+        "lease",
+        "turn",
+        JSON.stringify({
+          orderId: "ord_expired",
+          paymentIntentId: "pi_expired",
+        }),
+        "re_expired",
+        "succeeded",
+        expired,
+        expired,
+        expired,
+      ],
+    });
+    await store.recordEffect(
+      "expired-refund-key",
+      "expired-refund-fingerprint",
+      {
+        refundId: "re_expired",
+        orderId: "ord_expired",
+        paymentIntentId: "pi_expired",
+      },
+    );
+    await client.execute({
+      sql: "UPDATE support_idempotency SET created_at = ? WHERE idempotency_key = ?",
+      args: [expired, "expired-refund-key"],
+    });
+    await client.execute({
+      sql: "INSERT INTO support_subscription_cancellation_attempts(idempotency_key, case_id, turn_id, tenant_id, provider_account_id, subscription_id, fingerprint, command_data, status, cancels_at, terminal_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?)",
+      args: [
+        "expired-cancellation-key",
+        "expired-cancellation-case",
+        "turn",
+        "tenant",
+        "acct",
+        "sub_expired",
+        "expired-cancellation-fingerprint",
+        JSON.stringify({
+          subscriptionId: "sub_expired",
+          providerRef: "sub_expired",
+        }),
+        "2025-10-01T00:00:00.000Z",
+        expired,
+        expired,
+        expired,
+      ],
+    });
+    await store.recordEffect(
+      "expired-cancellation-key",
+      "expired-cancellation-fingerprint",
+      {
+        subscriptionId: "sub_expired",
+        cancelsAt: "2025-10-01T00:00:00.000Z",
+      },
+    );
+    await client.execute({
+      sql: "UPDATE support_idempotency SET created_at = ? WHERE idempotency_key = ?",
+      args: [expired, "expired-cancellation-key"],
+    });
+    // A late failed terminal row has no success effect, but it still needs a
+    // durable barrier before its provider identifiers can be removed.
+    await client.execute({
+      sql: "INSERT INTO support_stripe_refund_attempts(id, case_id, tenant_id, provider_account_id, command_fingerprint, idempotency_key, dispatch_id, lease_token, turn_id, command_data, status, terminal_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?, ?)",
+      args: [
+        "expired-failed-attempt",
+        "expired-failed-case",
+        "tenant",
+        "acct",
+        "expired-failed-fingerprint",
+        "expired-failed-key",
+        "dispatch",
+        "lease",
+        "turn",
+        JSON.stringify({ orderId: "ord_failed", paymentIntentId: "pi_failed" }),
+        expired,
+        expired,
+        expired,
+      ],
+    });
+    await client.execute({
+      sql: "INSERT INTO support_stripe_refund_attempts(id, case_id, tenant_id, provider_account_id, command_fingerprint, idempotency_key, dispatch_id, lease_token, turn_id, command_data, status, refund_id, provider_status, terminal_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'succeeded', ?, ?, ?, ?, ?)",
+      args: [
+        "retained-poll-attempt",
+        "retained-poll-case",
+        "tenant",
+        "acct",
+        "retained-poll-fingerprint",
+        "retained-poll-key",
+        "dispatch",
+        "lease",
+        "turn",
+        JSON.stringify({
+          orderId: "ord_retained",
+          paymentIntentId: "pi_retained",
+        }),
+        "re_retained",
+        "succeeded",
+        retained,
+        expired,
+        now.toISOString(),
+      ],
+    });
+    await store.recordEffect("retained-poll-key", "retained-poll-fingerprint", {
+      refundId: "re_retained",
+      orderId: "ord_retained",
+    });
+
+    await store.enforceRetention(() => now);
+    const payloads = await client.execute(
+      "SELECT idempotency_key, fingerprint, effect, created_at FROM support_idempotency WHERE idempotency_key IN ('expired-refund-key', 'expired-cancellation-key', 'expired-failed-key', 'retained-poll-key') ORDER BY idempotency_key",
+    );
+    expect(payloads.rows).toEqual([
+      {
+        idempotency_key: "expired-cancellation-key",
+        fingerprint: "expired-cancellation-fingerprint",
+        effect: '{"retention":"terminal-financial-effect"}',
+        created_at: expired,
+      },
+      {
+        idempotency_key: "expired-failed-key",
+        fingerprint: "expired-failed-fingerprint",
+        effect: '{"retention":"terminal-financial-effect"}',
+        created_at: expired,
+      },
+      {
+        idempotency_key: "expired-refund-key",
+        fingerprint: "expired-refund-fingerprint",
+        effect: '{"retention":"terminal-financial-effect"}',
+        created_at: expired,
+      },
+      {
+        idempotency_key: "retained-poll-key",
+        fingerprint: "retained-poll-fingerprint",
+        effect: '{"refundId":"re_retained","orderId":"ord_retained"}',
+        created_at: expect.any(String),
+      },
+    ]);
+    expect(JSON.stringify(payloads.rows)).not.toContain("pi_expired");
+    expect(JSON.stringify(payloads.rows)).not.toContain("sub_expired");
+    expect(await store.stripeRefundAttempt("retained-poll-key")).toMatchObject({
+      status: "succeeded",
+      refundId: "re_retained",
+    });
+    expect(await store.idempotency("retained-poll-key")).toMatchObject({
+      effect: { refundId: "re_retained" },
+    });
+    await expect(store.idempotency("expired-refund-key")).rejects.toThrow(
+      "tombstone",
+    );
+    await expect(
+      store.prepareStripeRefundAttempt({
+        caseId: "new-case",
+        binding: {
+          tenantId: "tenant",
+          providerKind: "stripe",
+          providerAccountId: "acct",
+          externalConversationId: "conversation",
+        },
+        fingerprint: "expired-refund-fingerprint",
+        idempotencyKey: "expired-refund-key",
+        dispatchId: "new-dispatch",
+        leaseToken: "new-lease",
+        turnId: "new-turn",
+        command: {},
+      }),
+    ).rejects.toThrow("tombstone");
+    await expect(
+      store.prepareSubscriptionCancellationAttempt({
+        caseId: "new-case",
+        turnId: "new-turn",
+        binding: {
+          tenantId: "tenant",
+          providerKind: "stripe",
+          providerAccountId: "acct",
+          externalConversationId: "conversation",
+        },
+        subscriptionId: "sub_new",
+        idempotencyKey: "expired-cancellation-key",
+        fingerprint: "expired-cancellation-fingerprint",
+        command: {},
+      }),
+    ).rejects.toThrow("tombstone");
+    const recreated = await client.execute(
+      "SELECT COUNT(*) AS total FROM support_stripe_refund_attempts WHERE idempotency_key = 'expired-refund-key' UNION ALL SELECT COUNT(*) AS total FROM support_subscription_cancellation_attempts WHERE idempotency_key = 'expired-cancellation-key'",
+    );
+    expect(recreated.rows).toEqual([{ total: 0 }, { total: 0 }]);
+    await store.close();
+  });
+
   it("minimizes every expired durable customer copy and removes the enumerated snapshot families", async () => {
     const store = await storeForTest();
     const now = new Date("2026-09-05T00:00:00.000Z");

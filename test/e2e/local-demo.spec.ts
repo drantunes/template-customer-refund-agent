@@ -12,6 +12,11 @@ import {
 
 type Runtime = Awaited<ReturnType<typeof loadDeterministicRuntime>>;
 
+const requestedApiPort = process.env.E2E_API_PORT ?? "4111";
+const e2eApiPort = Number(requestedApiPort);
+if (!Number.isInteger(e2eApiPort) || e2eApiPort < 1 || e2eApiPort > 65_535)
+  throw new Error("E2E_API_PORT must be an integer from 1 through 65535.");
+
 async function loadDeterministicRuntime() {
   const databasePath = `/private/tmp/phase003-e2e-${crypto.randomUUID()}.db`;
   process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
@@ -118,7 +123,11 @@ async function startSupportApi(runtime: Runtime) {
     "/support/cases/:caseId/feedback",
     routes.supportCaseFeedbackRoute.handler,
   );
-  const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 4111 });
+  const server = serve({
+    fetch: app.fetch,
+    hostname: "127.0.0.1",
+    port: e2eApiPort,
+  });
   if (!server.listening) await once(server, "listening");
   return () =>
     new Promise<void>((resolve, reject) =>

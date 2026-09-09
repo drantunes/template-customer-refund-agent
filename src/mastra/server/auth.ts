@@ -177,7 +177,12 @@ export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipa
     super({
       name: "local-support-auth",
       protected: ["/*"],
-      public: ["/health", "/support/auth/login", "/support/webhooks/intercom"],
+      public: [
+        "/health",
+        "/support/auth/login",
+        "/support/webhooks/intercom",
+        "/support/webhooks/stripe",
+      ],
     });
   }
   async authenticateToken(token: string) {
