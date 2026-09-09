@@ -180,7 +180,7 @@ describe("Phase 002 persistent local runtime", () => {
       .execute("INSERT INTO mastra_owned_probe VALUES ('keep')");
     await store.create(supportCase("legacy"));
     await expect(store.migrate(1)).rejects.toThrow(
-      "Refusing unsupported downgrade from support schema v13 to v1.",
+      "Refusing unsupported downgrade from support schema v22 to v1.",
     );
     expect((await store.get("legacy"))?.externalId).toBe("legacy");
     expect(
@@ -264,7 +264,7 @@ describe("Phase 002 persistent local runtime", () => {
     const { store } = await runtime();
     await store.create(supportCase("bad-migration"));
     await expect(store.migrate(3)).rejects.toThrow(
-      "Refusing unsupported downgrade from support schema v13 to v3.",
+      "Refusing unsupported downgrade from support schema v22 to v3.",
     );
     const versions = await store
       .getClientForTests()
@@ -272,7 +272,8 @@ describe("Phase 002 persistent local runtime", () => {
         "SELECT version FROM support_schema_migrations ORDER BY version",
       );
     expect(versions.rows.map((row) => Number(row.version))).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+      22,
     ]);
     expect(
       await store
@@ -683,6 +684,54 @@ describe("Phase 002 persistent local runtime", () => {
     await expect(timeout.findOrder(binding, "", "ORD-1001")).rejects.toThrow(
       "timeout",
     );
+    await store.close();
+  });
+
+  it("keeps a scheduled local subscription active until its controlled effective time through direct and loopback commerce", async () => {
+    const { store } = await runtime();
+    let current = new Date("2026-08-31T23:59:59.000Z");
+    const local = new LocalRuntime(store.getClientForTests(), () => current);
+    await local.seed(binding);
+    await store.getClientForTests().execute({
+      sql: "UPDATE local_subscriptions SET cancel_at_period_end = 1, cancels_at = renews_at WHERE tenant_id = ? AND provider_account_id = ? AND subscription_id = 'SUB-1001'",
+      args: [binding.tenantId, binding.providerAccountId],
+    });
+    const http = new LoopbackHttpCommerceProvider(
+      createLocalLoopbackFacade(local),
+    );
+    const before = {
+      direct: await local.findSubscription(binding, "alex@example.com"),
+      loopback: await http.findSubscription(binding, "alex@example.com"),
+    };
+    expect(before).toEqual({
+      direct: expect.objectContaining({
+        status: "active",
+        cancelAtPeriodEnd: true,
+        cancelsAt: "2026-09-01T00:00:00.000Z",
+      }),
+      loopback: expect.objectContaining({
+        status: "active",
+        cancelAtPeriodEnd: true,
+        cancelsAt: "2026-09-01T00:00:00.000Z",
+      }),
+    });
+    current = new Date("2026-09-01T00:00:00.000Z");
+    const after = {
+      direct: await local.findSubscription(binding, "alex@example.com"),
+      loopback: await http.findSubscription(binding, "alex@example.com"),
+    };
+    expect(after).toEqual({
+      direct: expect.objectContaining({
+        status: "cancelled",
+        cancelAtPeriodEnd: true,
+        cancelsAt: "2026-09-01T00:00:00.000Z",
+      }),
+      loopback: expect.objectContaining({
+        status: "cancelled",
+        cancelAtPeriodEnd: true,
+        cancelsAt: "2026-09-01T00:00:00.000Z",
+      }),
+    });
     await store.close();
   });
 

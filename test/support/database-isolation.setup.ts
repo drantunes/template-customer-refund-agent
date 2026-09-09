@@ -13,6 +13,19 @@ const inheritedAuthToken = process.env.TURSO_AUTH_TOKEN;
 delete process.env.SUPPORT_KNOWLEDGE_RETRIEVAL;
 delete process.env.OPENAI_API_KEY;
 delete process.env.OPENAI_BASE_URL;
+// Phase 006 external calls are opt-in and never belong in ordinary tests.
+// Clear every inherited Stripe setting before application composition can
+// register a remote adapter; focused tests pass only synthetic fake configs.
+process.env.COMMERCE_SOURCE = "mock";
+for (const name of [
+  "STRIPE_SANDBOX_ENABLED",
+  "STRIPE_TENANT_ID",
+  "STRIPE_ACCOUNT_ID",
+  "STRIPE_RESTRICTED_API_KEY",
+  "STRIPE_WEBHOOK_SECRET",
+  "STRIPE_API_BASE_URL",
+])
+  delete process.env[name];
 const databaseDirectory = mkdtempSync(join(tmpdir(), "phase001-vitest-"));
 const databasePath = join(databaseDirectory, "support.db");
 

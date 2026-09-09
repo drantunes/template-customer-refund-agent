@@ -3,6 +3,7 @@ import { RequestContext } from "@mastra/core/request-context";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { rm } from "node:fs/promises";
+import { createHmac } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { issueLocalSession } from "../../src/mastra/server/auth";
@@ -188,10 +189,18 @@ async function setup(
     allowInitialWorkflowFailure?: boolean;
     providerBindings?: CaseProviderBindings;
     knowledgeExpiresAt?: string;
+    triage?: Record<string, unknown>;
+    message?: string;
+    /** Reopen the same isolated SQLite database without accepting a second
+     * inbound event or running its workflow. */
+    databasePath?: string;
+    existingCase?: boolean;
   },
 ) {
-  const path = `/private/tmp/phase003-native-workflow-${crypto.randomUUID()}.db`;
-  files.push(path, `${path}-shm`, `${path}-wal`);
+  const path =
+    options?.databasePath ??
+    `/private/tmp/phase003-native-workflow-${crypto.randomUUID()}.db`;
+  if (!files.includes(path)) files.push(path, `${path}-shm`, `${path}-wal`);
   process.env.TURSO_DATABASE_URL = `file:${path}`;
   process.env.SUPPORT_SOURCE = "mock";
   vi.resetModules();
@@ -223,6 +232,7 @@ async function setup(
     supportCaseFeedbackRoute,
     supportCaseFollowUpRoute,
     supportInboundRoute,
+    stripeWebhookRoute,
   } = await import("../../src/mastra/server/routes");
 
   if (options?.quoteDelayMs || options?.quoteFailure) {
@@ -244,14 +254,16 @@ async function setup(
   // native approval snapshot, tool execution, workflow suspension and resume
   // all run through installed Mastra code.
   triageAgent.__updateModel({
-    model: jsonModel({
-      intent: "duplicate_charge",
-      urgency: "normal",
-      sentiment: "negative",
-      requiresHumanReview: true,
-      confidence: 1,
-      rationale: "Deterministic duplicate-charge triage.",
-    }) as never,
+    model: jsonModel(
+      options?.triage ?? {
+        intent: "duplicate_charge",
+        urgency: "normal",
+        sentiment: "negative",
+        requiresHumanReview: true,
+        confidence: 1,
+        rationale: "Deterministic duplicate-charge triage.",
+      },
+    ) as never,
   });
   const refundAmount = refund?.amount ?? 20;
   const refundCurrency = refund?.currency ?? "USD";
@@ -290,7 +302,9 @@ async function setup(
     ).values(),
   ];
   await Promise.all(
-    configuredBindings.map((candidate) => localRuntime.seed(candidate)),
+    configuredBindings
+      .filter((candidate) => candidate.providerKind === "local")
+      .map((candidate) => localRuntime.seed(candidate)),
   );
   if (options?.knowledgeExpiresAt)
     await caseStore.getClientForTests().execute({
@@ -302,17 +316,24 @@ async function setup(
       ],
     });
   const { legacyAmountToMoney } = await import("../../src/mastra/lib/money");
-  await caseStore.getClientForTests().execute({
-    sql: "UPDATE local_orders SET currency = ?, amount_minor = ? WHERE tenant_id = ? AND provider_account_id = ? AND order_id = ?",
-    args: [
-      refundCurrency,
-      legacyAmountToMoney(refundAmount + 1_000, refundCurrency).minor,
-      bindings.transactions.tenantId,
-      bindings.transactions.providerAccountId,
-      "ORD-1001",
-    ],
-  });
-  if (configuredBinding || options?.providerBindings) {
+  if (bindings.transactions.providerKind === "local")
+    await caseStore.getClientForTests().execute({
+      sql: "UPDATE local_orders SET currency = ?, amount_minor = ? WHERE tenant_id = ? AND provider_account_id = ? AND order_id = ?",
+      args: [
+        refundCurrency,
+        legacyAmountToMoney(refundAmount + 1_000, refundCurrency).minor,
+        bindings.transactions.tenantId,
+        bindings.transactions.providerAccountId,
+        "ORD-1001",
+      ],
+    });
+  // A Stripe binding is registered by the real composition root from the
+  // opt-in environment.  Do not replace it with the local loopback façade in
+  // this harness: phase-006 tests must exercise the actual Stripe registry.
+  if (
+    (configuredBinding || options?.providerBindings) &&
+    configuredBindings.every((candidate) => candidate.providerKind === "local")
+  ) {
     const { registerProviderRegistry } =
       await import("../../src/mastra/providers/registry");
     const { createLocalLoopbackFacade, LoopbackHttpProviderRegistry } =
@@ -324,34 +345,36 @@ async function setup(
       configuredBindings,
     );
   }
-  const createdAt = new Date().toISOString();
-  await caseStore.acceptInbound(
-    {
-      id: caseId,
-      externalId: `event-${caseId}`,
-      source: "mock-email",
-      customer: { email: "alex@example.com" },
-      subject: "I was charged twice",
-      messages: [
-        {
-          id: `message-${caseId}`,
-          author: "customer",
-          body: "Please refund the duplicate charge.",
-          createdAt,
+  if (!options?.existingCase) {
+    const createdAt = new Date().toISOString();
+    await caseStore.acceptInbound(
+      {
+        id: caseId,
+        externalId: `event-${caseId}`,
+        source: "mock-email",
+        customer: { email: "alex@example.com" },
+        subject: "I was charged twice",
+        messages: [
+          {
+            id: `message-${caseId}`,
+            author: "customer",
+            body: options?.message ?? "Please refund the duplicate charge.",
+            createdAt,
+          },
+        ],
+        status: "new",
+        createdAt,
+        updatedAt: createdAt,
+        metadata: {
+          providerBinding: binding,
+          providerBindings: bindings,
+          ownerId: "customer-alex",
         },
-      ],
-      status: "new",
-      createdAt,
-      updatedAt: createdAt,
-      metadata: {
-        providerBinding: binding,
-        providerBindings: bindings,
-        ownerId: "customer-alex",
       },
-    },
-    `event-${caseId}`,
-    `workflow-${caseId}`,
-  );
+      `event-${caseId}`,
+      `workflow-${caseId}`,
+    );
+  }
   let executionCaseId = caseId;
   const selectExecutionCase = (id: string) => {
     executionCaseId = id;
@@ -372,12 +395,16 @@ async function setup(
     });
     const command = JSON.parse(String(action.rows[0]?.data ?? "{}")) as {
       approvalCaseId?: string;
+      orderId?: string;
       idempotencyKey?: string;
       fingerprint?: string;
     };
     const input = {
       caseId: command.approvalCaseId ?? executionCaseId,
-      orderId: "ORD-1001",
+      // Native approval must execute the immutable target selected by the
+      // workflow (including a subscription renewal Invoice), never a fixture
+      // alias for the initial Checkout.
+      orderId: command.orderId ?? "ORD-1001",
       amount: refundAmount,
       currency: refundCurrency,
       reason: "duplicate charge",
@@ -407,8 +434,9 @@ async function setup(
   app.post("/support/cases/:caseId/approve", supportCaseApproveRoute.handler);
   app.post("/support/cases/:caseId/feedback", supportCaseFeedbackRoute.handler);
   app.post("/support/inbound", supportInboundRoute.handler);
+  app.post("/support/webhooks/stripe", stripeWebhookRoute.handler);
 
-  if (options?.deferInitialWorkflow)
+  if (options?.deferInitialWorkflow || options?.existingCase)
     return {
       binding,
       bindings,
@@ -436,9 +464,17 @@ async function setup(
   const initialRun = await mastra
     .getWorkflow("resolveSupportCaseWorkflow")
     .createRun({ runId: `workflow-${caseId}`, disableScorers: true });
-  const initial = await initialRun.start({
-    inputData: { caseId, turnId: dispatch.turnId },
-  });
+  const { withDispatchLeaseScope } =
+    await import("../../src/mastra/lib/dispatch-lease-scope");
+  const initial = await withDispatchLeaseScope(
+    {
+      dispatchId: dispatch.id,
+      caseId,
+      turnId: dispatch.turnId,
+      leaseToken: dispatch.leaseToken!,
+    },
+    () => initialRun.start({ inputData: { caseId, turnId: dispatch.turnId } }),
+  );
   await caseStore.completeDispatch(
     dispatch.id,
     initial.status === "suspended" ? "suspended" : "completed",
@@ -456,6 +492,8 @@ async function setup(
       selectExecutionCase,
       purgeExpiredWorkflowSnapshots,
       recoverApprovedNativeDecisions,
+      initialWorkflowStatus: initial.status,
+      databasePath: path,
     };
   if (refund && refund.amount > 1000)
     return {
@@ -491,6 +529,7 @@ async function setup(
     selectExecutionCase,
     purgeExpiredWorkflowSnapshots,
     recoverApprovedNativeDecisions,
+    databasePath: path,
   };
 }
 
@@ -498,7 +537,18 @@ afterEach(async () => {
   await Promise.all(runtimes.splice(0).map((runtime) => runtime.shutdown()));
   vi.doUnmock("../../src/mastra/evals");
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
+  process.env.COMMERCE_SOURCE = "mock";
+  for (const name of [
+    "STRIPE_SANDBOX_ENABLED",
+    "STRIPE_TENANT_ID",
+    "STRIPE_ACCOUNT_ID",
+    "STRIPE_RESTRICTED_API_KEY",
+    "STRIPE_WEBHOOK_SECRET",
+    "STRIPE_API_BASE_URL",
+  ])
+    delete process.env[name];
   delete process.env.SUPPORT_TEST_DISPATCH_LEASE_MS;
   delete process.env.SUPPORT_TEST_DISPATCH_HEARTBEAT_MS;
   await Promise.all(files.splice(0).map((file) => rm(file, { force: true })));
@@ -542,6 +592,304 @@ async function approveNativeRefund(
     },
     body: JSON.stringify({ commandFingerprint }),
   });
+}
+
+function enableSyntheticStripe() {
+  process.env.COMMERCE_SOURCE = "stripe";
+  process.env.STRIPE_SANDBOX_ENABLED = "true";
+  process.env.STRIPE_TENANT_ID = "local-demo";
+  process.env.STRIPE_ACCOUNT_ID = "acct_test_123";
+  process.env.STRIPE_RESTRICTED_API_KEY = "rk_test_synthetic";
+  process.env.STRIPE_WEBHOOK_SECRET = "whsec_synthetic";
+  process.env.STRIPE_API_BASE_URL = "http://stripe.test";
+}
+
+function syntheticStripeBindings(caseId: string): CaseProviderBindings {
+  const local = {
+    tenantId: "local-demo",
+    providerKind: "local" as const,
+    providerAccountId: "local-demo",
+    externalConversationId: `conversation-${caseId}`,
+  };
+  const stripe = {
+    tenantId: "local-demo",
+    providerKind: "stripe" as const,
+    providerAccountId: "acct_test_123",
+    externalConversationId: `conversation-${caseId}`,
+  };
+  return {
+    support: local,
+    commerce: stripe,
+    transactions: stripe,
+    knowledge: local,
+  };
+}
+
+function signedStripeEvent(event: Record<string, unknown>) {
+  const body = JSON.stringify(event);
+  const timestamp = Math.floor(Date.now() / 1_000);
+  const signature = createHmac("sha256", "whsec_synthetic")
+    .update(`${timestamp}.${body}`)
+    .digest("hex");
+  return {
+    body,
+    headers: {
+      "content-type": "application/json",
+      "stripe-signature": `t=${timestamp},v1=${signature}`,
+    },
+  };
+}
+
+/** A narrow Stripe fixture for the registered cancellation path.  The first
+ * POST is deliberately committed remotely and then loses its response; every
+ * recovery read must use this same persisted subscription id. */
+function cancellationStripeTransport(
+  observed: {
+    posts: number;
+    refundPosts?: number;
+    gets: string[];
+    keys: string[];
+    scheduled: boolean;
+    loseFirstPost: boolean;
+    preflightFailure?: boolean;
+    post4xx?: boolean;
+    invalidPostResponse?: "missing-schedule" | "malformed-items";
+  },
+  barrier?: (
+    path: string,
+  ) => { started: () => void; release: Promise<void> } | undefined,
+) {
+  const subscription = () => ({
+    id: "sub_cancel",
+    customer: "cus_1",
+    latest_invoice: "in_1",
+    livemode: false,
+    status: "active",
+    cancel_at_period_end: observed.scheduled,
+    items: {
+      data: [
+        {
+          current_period_end: 200,
+          price: {
+            currency: "usd",
+            unit_amount: 4900,
+            nickname: "Pro",
+          },
+        },
+      ],
+    },
+  });
+  return async (request: Request) => {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    if (request.method === "GET") {
+      observed.gets.push(path);
+      const held = barrier?.(path);
+      if (held) {
+        held.started();
+        await held.release;
+      }
+    }
+    if (path === "/v1/account")
+      return Response.json({ id: "acct_test_123", livemode: false });
+    if (path === "/v1/customers")
+      return Response.json({
+        data: [{ id: "cus_1", email: "alex@example.com", livemode: false }],
+        has_more: false,
+      });
+    if (path === "/v1/checkout/sessions")
+      return Response.json({
+        data: [
+          {
+            id: "cs_purchase",
+            customer: "cus_1",
+            customer_details: { email: "alex@example.com" },
+            payment_intent: "pi_purchase",
+            status: "complete",
+            payment_status: "paid",
+            livemode: false,
+            created: 1,
+          },
+        ],
+        has_more: false,
+      });
+    if (path === "/v1/customers/cus_1")
+      return Response.json({
+        id: "cus_1",
+        email: "alex@example.com",
+        livemode: false,
+      });
+    if (path === "/v1/checkout/sessions/cs_purchase/line_items")
+      return Response.json({ data: [], has_more: false });
+    if (path === "/v1/payment_intents/pi_purchase")
+      return Response.json({
+        id: "pi_purchase",
+        amount: 4900,
+        currency: "usd",
+        status: "succeeded",
+        livemode: false,
+      });
+    if (path === "/v1/payment_intents/pi_sub")
+      return Response.json({
+        id: "pi_sub",
+        amount: 4900,
+        currency: "usd",
+        status: "succeeded",
+        livemode: false,
+      });
+    if (path === "/v1/subscriptions" && request.method === "GET")
+      return Response.json({ data: [subscription()], has_more: false });
+    if (path === "/v1/invoices/in_1")
+      return Response.json({
+        id: "in_1",
+        customer: "cus_1",
+        status: "paid",
+        paid: true,
+        livemode: false,
+        created: 1,
+      });
+    if (path === "/v1/invoice_payments")
+      return Response.json({
+        data: [
+          {
+            id: "ip_1",
+            invoice: "in_1",
+            status: "paid",
+            livemode: false,
+            payment: {
+              type: "payment_intent",
+              payment_intent: "pi_sub",
+            },
+          },
+        ],
+        has_more: false,
+      });
+    if (path === "/v1/refunds" && request.method === "GET")
+      return Response.json({ data: [], has_more: false });
+    if (path === "/v1/refunds" && request.method === "POST") {
+      observed.refundPosts = (observed.refundPosts ?? 0) + 1;
+      throw new Error("refund must not execute");
+    }
+    if (path === "/v1/subscriptions/sub_cancel" && request.method === "GET")
+      if (observed.preflightFailure)
+        return Response.json({ error: "synthetic" }, { status: 400 });
+      else return Response.json(subscription());
+    if (path === "/v1/subscriptions/sub_cancel" && request.method === "POST") {
+      observed.posts += 1;
+      observed.keys.push(request.headers.get("idempotency-key") ?? "");
+      if (observed.post4xx)
+        return Response.json({ error: "synthetic" }, { status: 400 });
+      expect(await request.text()).toBe("cancel_at_period_end=true");
+      observed.scheduled = true;
+      if (observed.loseFirstPost) {
+        observed.loseFirstPost = false;
+        throw new Error("lost cancellation POST response after commit");
+      }
+      if (observed.invalidPostResponse === "missing-schedule") {
+        return Response.json({
+          ...subscription(),
+          cancel_at_period_end: undefined,
+        });
+      }
+      if (observed.invalidPostResponse === "malformed-items")
+        return Response.json({ ...subscription(), items: { data: [] } });
+      return Response.json(subscription());
+    }
+    throw new Error(
+      `Unexpected cancellation Stripe request ${request.method} ${path}`,
+    );
+  };
+}
+
+/** The native refund path needs the complete Checkout fixture: the workflow
+ * resolves ORD-1001 through Stripe before it suspends for approval, then the
+ * approved registered tool performs its final account GET directly before the
+ * store's first-effect fence.  Tests can hold precisely that final GET. */
+function nativeRefundStripeTransport(input: {
+  caseId: string;
+  fingerprint: () => string;
+  observed: {
+    posts: number;
+    accountGets: number;
+    gets: string[];
+    keys: string[];
+  };
+  firstPostThrows?: boolean;
+  barrier?: (
+    path: string,
+  ) => { started: () => void; release: Promise<void> } | undefined;
+}) {
+  return async (request: Request) => {
+    const path = new URL(request.url).pathname;
+    if (request.method === "GET") {
+      input.observed.gets.push(path);
+      const barrier = input.barrier?.(path);
+      if (barrier) {
+        barrier.started();
+        await barrier.release;
+      }
+    }
+    if (path === "/v1/account") {
+      input.observed.accountGets += 1;
+      return Response.json({ id: "acct_test_123", livemode: false });
+    }
+    if (path === "/v1/customers")
+      return Response.json({
+        data: [{ id: "cus_1", email: "alex@example.com", livemode: false }],
+        has_more: false,
+      });
+    if (path === "/v1/checkout/sessions")
+      return Response.json({
+        data: [
+          {
+            id: "ORD-1001",
+            customer: "cus_1",
+            customer_details: { email: "alex@example.com" },
+            payment_intent: "pi_1",
+            status: "complete",
+            payment_status: "paid",
+            livemode: false,
+            created: 1,
+          },
+        ],
+        has_more: false,
+      });
+    if (path === "/v1/checkout/sessions/ORD-1001/line_items")
+      return Response.json({ data: [], has_more: false });
+    if (path === "/v1/payment_intents/pi_1")
+      return Response.json({
+        id: "pi_1",
+        amount_received: 102000,
+        currency: "usd",
+        status: "succeeded",
+        livemode: false,
+      });
+    if (path === "/v1/subscriptions")
+      return Response.json({ data: [], has_more: false });
+    if (path === "/v1/refunds" && request.method === "GET")
+      return Response.json({ data: [], has_more: false });
+    if (path === "/v1/refunds" && request.method === "POST") {
+      input.observed.posts += 1;
+      input.observed.keys.push(request.headers.get("idempotency-key") ?? "");
+      if (input.firstPostThrows && input.observed.posts === 1)
+        throw new Error("synthetic response loss after refund POST");
+      return Response.json({
+        id: "re_native_fence",
+        amount: 2000,
+        currency: "usd",
+        status: "succeeded",
+        created: 2,
+        livemode: false,
+        metadata: {
+          support_case_id: input.caseId,
+          command_fingerprint: input.fingerprint(),
+        },
+      });
+    }
+    throw new Error(
+      `Unexpected native-fence Stripe request ${request.method} ${path}`,
+    );
+  };
 }
 
 describe("native approval workflow recovery", () => {
@@ -1607,17 +1955,18 @@ describe("native approval workflow recovery", () => {
     const { resumeApprovedNativeTool } =
       await import("../../src/mastra/providers/native-execution");
     // Fault exactly after the provider commits its idempotency/effect row and
-    // before issue_refund can project refundResult onto the case.
-    const originalUpdate = caseStore.update.bind(caseStore);
+    // before issue_refund can atomically project refundResult onto the case.
+    const originalProjection =
+      caseStore.projectRefundToolExecution.bind(caseStore);
     let projectionFault = true;
-    const update = vi
-      .spyOn(caseStore, "update")
-      .mockImplementation(async (id, patch, expectedVersion) => {
-        if (projectionFault && patch.refundResult) {
+    const projection = vi
+      .spyOn(caseStore, "projectRefundToolExecution")
+      .mockImplementation(async (input) => {
+        if (projectionFault && input.caseId === caseId) {
           projectionFault = false;
           throw new Error("injected post-provider projection crash");
         }
-        return originalUpdate(id, patch, expectedVersion);
+        return originalProjection(input);
       });
     await withDispatchLeaseScope(
       {
@@ -1641,7 +1990,7 @@ describe("native approval workflow recovery", () => {
           },
         }),
     );
-    update.mockRestore();
+    projection.mockRestore();
     await caseStore.completeDispatch(
       dispatch!.id,
       "suspended",
@@ -2794,6 +3143,2987 @@ describe("native approval workflow recovery", () => {
     ).toBe(0);
     expect(await localRefundCount(caseStore)).toBe(0);
     expect(await caseStore.get(caseId)).toMatchObject({ status: "escalated" });
+  });
+
+  it("uses the registered native approval path for a Stripe pending refund, then finalizes exactly once after polling succeeds", async () => {
+    const caseId = `stripe-native-pending-${crypto.randomUUID()}`;
+    process.env.COMMERCE_SOURCE = "stripe";
+    process.env.STRIPE_SANDBOX_ENABLED = "true";
+    process.env.STRIPE_TENANT_ID = "local-demo";
+    process.env.STRIPE_ACCOUNT_ID = "acct_test_123";
+    process.env.STRIPE_RESTRICTED_API_KEY = "rk_test_synthetic";
+    process.env.STRIPE_WEBHOOK_SECRET = "whsec_synthetic";
+    process.env.STRIPE_API_BASE_URL = "http://stripe.test";
+    let remoteStatus = "pending";
+    let transientRetrieveFailure = false;
+    let posts = 0;
+    let approvedFingerprint = "";
+    // This downstream lifecycle fixture intentionally includes the adapter's
+    // current account check field.  The separate client contract uses the
+    // real Account API shape and protects against treating it as normative.
+    vi.stubGlobal("fetch", async (request: Request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/v1/account")
+        return Response.json({ id: "acct_test_123", livemode: false });
+      if (path === "/v1/customers")
+        return Response.json({
+          data: [{ id: "cus_1", email: "alex@example.com", livemode: false }],
+          has_more: false,
+        });
+      if (path === "/v1/checkout/sessions")
+        return Response.json({
+          data: [
+            {
+              id: "ORD-1001",
+              customer: "cus_1",
+              customer_details: { email: "alex@example.com" },
+              payment_intent: "pi_1",
+              status: "complete",
+              payment_status: "paid",
+              livemode: false,
+              created: 1,
+            },
+          ],
+          has_more: false,
+        });
+      if (path === "/v1/payment_intents/pi_1")
+        return Response.json({
+          id: "pi_1",
+          livemode: false,
+          currency: "usd",
+          amount_received: 102000,
+          status: "succeeded",
+        });
+      if (path === "/v1/checkout/sessions/ORD-1001/line_items")
+        return Response.json({
+          data: [
+            { description: "Synthetic purchase", price: { product: "prod_1" } },
+          ],
+          has_more: false,
+        });
+      if (path === "/v1/subscriptions")
+        return Response.json({ data: [], has_more: false });
+      if (path === "/v1/refunds" && request.method === "GET")
+        return Response.json({ data: [], has_more: false });
+      if (path === "/v1/refunds" && request.method === "POST") {
+        posts += 1;
+        return Response.json({
+          id: "re_pending",
+          livemode: false,
+          currency: "usd",
+          amount: 2000,
+          created: 2,
+          status: remoteStatus,
+          metadata: {
+            support_case_id: caseId,
+            command_fingerprint: approvedFingerprint,
+          },
+        });
+      }
+      if (path === "/v1/refunds/re_pending") {
+        if (transientRetrieveFailure)
+          return new Response("temporary", { status: 503 });
+        return Response.json({
+          id: "re_pending",
+          livemode: false,
+          currency: "usd",
+          amount: 2000,
+          created: 2,
+          status: remoteStatus,
+          metadata: {
+            support_case_id: caseId,
+            command_fingerprint: approvedFingerprint,
+          },
+        });
+      }
+      throw new Error(`Unexpected Stripe request ${request.method} ${path}`);
+    });
+    const local = {
+      tenantId: "local-demo",
+      providerKind: "local" as const,
+      providerAccountId: "local-demo",
+      externalConversationId: `conversation-${caseId}`,
+    };
+    const stripe = {
+      tenantId: "local-demo",
+      providerKind: "stripe" as const,
+      providerAccountId: "acct_test_123",
+      externalConversationId: `conversation-${caseId}`,
+    };
+    const { caseStore, mastra, native, recoverApprovedNativeDecisions } =
+      await setup(caseId, undefined, undefined, undefined, {
+        providerBindings: {
+          support: local,
+          commerce: stripe,
+          transactions: stripe,
+          knowledge: local,
+        },
+      });
+    const command = (await caseStore.getAction(
+      caseId,
+      "refund-command",
+      native.fingerprint,
+    )) as { fingerprint: string; idempotencyKey: string };
+    approvedFingerprint = command.fingerprint;
+    await caseStore.recordApprovalDecision({
+      caseId,
+      turnId: native.turnId,
+      commandFingerprint: native.fingerprint,
+      principalId: "approver-demo",
+      approved: true,
+      nativeRunId: native.runId,
+      nativeToolCallId: native.toolCallId,
+    });
+    const recovered = await recoverApprovedNativeDecisions(mastra, caseStore, {
+      disableScorers: true,
+    });
+    expect({
+      recovered,
+      supportCase: await caseStore.get(caseId),
+    }).toMatchObject({ recovered: 1 });
+    expect(posts).toBe(1);
+    expect(await caseStore.get(caseId)).toMatchObject({
+      refundResult: { status: "pending" },
+    });
+    await expect(
+      caseStore.getClientForTests().execute({
+        sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ?",
+        args: [caseId],
+      }),
+    ).resolves.toMatchObject({ rows: [{ total: 0 }] });
+    remoteStatus = "succeeded";
+    const { reconcileStripeRefundAttempts } =
+      await import("../../src/mastra/providers/stripe/reconciliation");
+    const pendingAttempt = await caseStore.stripeRefundAttempt(
+      command.idempotencyKey,
+    );
+    await caseStore.updateStripeRefundAttempt(command.idempotencyKey, {
+      status: "pending",
+      nextAttemptAt: new Date(0).toISOString(),
+    });
+    // Claim the exact persisted pending receipt in this manual sweep. The
+    // explicit due-time avoids accepting timing from any runtime worker.
+    expect(pendingAttempt).toMatchObject({ status: "pending" });
+    expect(await reconcileStripeRefundAttempts(caseStore)).toBe(1);
+    expect(await reconcileStripeRefundAttempts(caseStore)).toBe(0);
+    expect(await caseStore.get(caseId)).toMatchObject({
+      status: "resolved",
+      refundResult: { status: "executed" },
+    });
+    const outbox = await caseStore.getClientForTests().execute({
+      sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ?",
+      args: [caseId],
+    });
+    expect(Number((outbox.rows[0] as { total: number }).total)).toBe(1);
+    // A terminal success stays terminal when its scheduled audit has a
+    // transient retrieval failure. Only a later authoritative provider read
+    // may change it to failed.
+    transientRetrieveFailure = true;
+    const succeededAttempt = await caseStore.stripeRefundAttempt(
+      (await caseStore.get(caseId))!.refundResult!.idempotencyKey,
+    );
+    await caseStore.updateStripeRefundAttempt(
+      succeededAttempt!.idempotencyKey,
+      {
+        status: "succeeded",
+        nextAttemptAt: new Date(0).toISOString(),
+      },
+    );
+    expect(await reconcileStripeRefundAttempts(caseStore)).toBe(0);
+    expect(
+      await caseStore.stripeRefundAttempt(succeededAttempt!.idempotencyKey),
+    ).toMatchObject({ status: "succeeded" });
+    transientRetrieveFailure = false;
+    // Stripe documents that a later authoritative failure may follow success.
+    // Re-open only the poll schedule; the immutable command/effect key stays.
+    remoteStatus = "failed";
+    const attempt = await caseStore.stripeRefundAttempt(
+      (await caseStore.get(caseId))!.refundResult!.idempotencyKey,
+    );
+    await caseStore.updateStripeRefundAttempt(attempt!.idempotencyKey, {
+      status: "succeeded",
+      nextAttemptAt: new Date(0).toISOString(),
+    });
+    expect(await reconcileStripeRefundAttempts(caseStore)).toBe(1);
+    expect(await caseStore.get(caseId)).toMatchObject({
+      status: "escalated",
+      refundResult: { status: "failed" },
+    });
+    const failures = await caseStore.getClientForTests().execute({
+      sql: "SELECT COUNT(*) AS total FROM support_actions WHERE case_id = ? AND kind = 'refund-failure'",
+      args: [caseId],
+    });
+    expect(Number((failures.rows[0] as { total: number }).total)).toBe(1);
+  });
+
+  it.each([
+    "Cancel? I do not want a refund, but I do not think you should cancel my subscription.",
+    "Could you terminate my subscription? No refund please.",
+    'The customer reported: "Please cancel my subscription. I do not want a refund."',
+    "If you can cancel my subscription, I do not want a refund.",
+  ])(
+    "escalates non-authoritative cancellation wording without a native Stripe cancellation POST: %s",
+    async (message) => {
+      const caseId = `stripe-cancel-denied-${crypto.randomUUID()}`;
+      enableSyntheticStripe();
+      const observed = {
+        posts: 0,
+        refundPosts: 0,
+        gets: [] as string[],
+        keys: [] as string[],
+        scheduled: false,
+        loseFirstPost: false,
+      };
+      vi.stubGlobal("fetch", cancellationStripeTransport(observed));
+      const { caseStore } = await setup(
+        caseId,
+        undefined,
+        undefined,
+        undefined,
+        {
+          providerBindings: syntheticStripeBindings(caseId),
+          triage: {
+            intent: "cancellation",
+            urgency: "normal",
+            sentiment: "neutral",
+            requiresHumanReview: false,
+            confidence: 1,
+            rationale: "customer mentioned cancellation",
+          },
+          message,
+          responseModel: jsonModel({
+            draftResponse: "draft",
+            citedSources: ["subscription-cancellation-policy"],
+            recommendRefund: false,
+            requiresEscalation: false,
+          }) as never,
+          allowInitialWorkflowFailure: true,
+        },
+      );
+      expect(observed).toMatchObject({ posts: 0, refundPosts: 0 });
+      expect(await caseStore.get(caseId)).toMatchObject({
+        status: "escalated",
+      });
+      const commands = await caseStore.getClientForTests().execute({
+        sql: "SELECT kind FROM support_actions WHERE case_id = ? AND kind IN ('subscription-cancellation-command', 'refund-command')",
+        args: [caseId],
+      });
+      expect(commands.rows).toEqual([]);
+    },
+  );
+
+  it("suppresses a refund recommendation before the explicit no-refund cancellation takes effect", async () => {
+    const caseId = `stripe-cancel-conflicting-draft-${crypto.randomUUID()}`;
+    enableSyntheticStripe();
+    const observed = {
+      posts: 0,
+      refundPosts: 0,
+      gets: [] as string[],
+      keys: [] as string[],
+      scheduled: false,
+      loseFirstPost: false,
+    };
+    vi.stubGlobal("fetch", cancellationStripeTransport(observed));
+    const { caseStore } = await setup(caseId, undefined, undefined, undefined, {
+      providerBindings: syntheticStripeBindings(caseId),
+      triage: {
+        intent: "cancellation",
+        urgency: "normal",
+        sentiment: "neutral",
+        requiresHumanReview: false,
+        confidence: 1,
+        rationale: "explicit no-refund cancellation",
+      },
+      message:
+        "Please cancel my subscription at the end of the period. I do not want a refund.",
+      responseModel: jsonModel({
+        draftResponse: "draft",
+        citedSources: ["subscription-cancellation-policy"],
+        recommendRefund: true,
+        refundAmount: 20,
+        refundCurrency: "USD",
+        refundReason: "model conflict",
+        requiresEscalation: false,
+      }) as never,
+      allowInitialWorkflowFailure: true,
+    });
+    expect(observed).toMatchObject({ posts: 1, refundPosts: 0 });
+    const stored = await caseStore.get(caseId);
+    expect(stored).toMatchObject({
+      status: "resolved",
+      draft: { recommendRefund: false },
+      metadata: {
+        cancellationEffect: { status: "scheduled" },
+      },
+    });
+    expect(
+      (stored!.metadata as Record<string, unknown>).nativeApproval,
+    ).toBeUndefined();
+    const refundCommands = await caseStore.getClientForTests().execute({
+      sql: "SELECT kind FROM support_actions WHERE case_id = ? AND kind = 'refund-command'",
+      args: [caseId],
+    });
+    expect(refundCommands.rows).toEqual([]);
+  });
+
+  it("schedules one explicit no-refund Stripe cancellation through the registered workflow and replays its durable command", async () => {
+    const caseId = `stripe-cancel-${crypto.randomUUID()}`;
+    Object.assign(process.env, {
+      COMMERCE_SOURCE: "stripe",
+      STRIPE_SANDBOX_ENABLED: "true",
+      STRIPE_TENANT_ID: "local-demo",
+      STRIPE_ACCOUNT_ID: "acct_test_123",
+      STRIPE_RESTRICTED_API_KEY: "rk_test_synthetic",
+      STRIPE_WEBHOOK_SECRET: "whsec_synthetic",
+      STRIPE_API_BASE_URL: "http://stripe.test",
+    });
+    let cancellationPosts = 0;
+    let refundPosts = 0;
+    vi.stubGlobal("fetch", async (request: Request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/v1/account") return Response.json({ id: "acct_test_123" });
+      if (path === "/v1/customers")
+        return Response.json({
+          data: [{ id: "cus_1", email: "alex@example.com", livemode: false }],
+          has_more: false,
+        });
+      if (path === "/v1/checkout/sessions")
+        return Response.json({
+          data: [
+            {
+              id: "cs_purchase",
+              customer: "cus_1",
+              customer_details: { email: "alex@example.com" },
+              payment_intent: "pi_purchase",
+              status: "complete",
+              payment_status: "paid",
+              livemode: false,
+              created: 1,
+            },
+          ],
+          has_more: false,
+        });
+      if (path === "/v1/customers/cus_1")
+        return Response.json({
+          id: "cus_1",
+          email: "alex@example.com",
+          livemode: false,
+        });
+      if (path === "/v1/checkout/sessions/cs_purchase/line_items")
+        return Response.json({ data: [], has_more: false });
+      if (path === "/v1/payment_intents/pi_purchase")
+        return Response.json({
+          id: "pi_purchase",
+          livemode: false,
+          currency: "usd",
+          amount: 4900,
+          status: "succeeded",
+        });
+      if (path === "/v1/subscriptions")
+        return Response.json({
+          data: [
+            {
+              id: "sub_cancel",
+              customer: "cus_1",
+              latest_invoice: "in_1",
+              livemode: false,
+              status: "active",
+              items: {
+                data: [
+                  {
+                    current_period_end: 200,
+                    price: {
+                      currency: "usd",
+                      unit_amount: 4900,
+                      nickname: "Pro",
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+          has_more: false,
+        });
+      if (path === "/v1/invoices/in_1")
+        return Response.json({
+          id: "in_1",
+          customer: "cus_1",
+          livemode: false,
+          status: "paid",
+          paid: true,
+          created: 1,
+        });
+      if (path === "/v1/invoice_payments")
+        return Response.json({
+          data: [
+            {
+              id: "ip_1",
+              invoice: "in_1",
+              payment_intent: "pi_sub",
+              livemode: false,
+              status: "paid",
+            },
+          ],
+          has_more: false,
+        });
+      if (path === "/v1/payment_intents/pi_sub")
+        return Response.json({
+          id: "pi_sub",
+          livemode: false,
+          currency: "usd",
+          amount: 4900,
+          status: "succeeded",
+        });
+      if (path === "/v1/refunds" && request.method === "GET")
+        return Response.json({ data: [], has_more: false });
+      if (path === "/v1/refunds" && request.method === "POST") {
+        refundPosts += 1;
+        throw new Error("refund must not execute");
+      }
+      if (path === "/v1/subscriptions/sub_cancel" && request.method === "GET")
+        return Response.json({
+          id: "sub_cancel",
+          customer: "cus_1",
+          livemode: false,
+          status: "active",
+        });
+      if (
+        path === "/v1/subscriptions/sub_cancel" &&
+        request.method === "POST"
+      ) {
+        cancellationPosts += 1;
+        expect(await request.text()).toBe("cancel_at_period_end=true");
+        return Response.json({
+          id: "sub_cancel",
+          customer: "cus_1",
+          livemode: false,
+          status: "active",
+          cancel_at_period_end: true,
+          items: { data: [{ current_period_end: 200 }] },
+        });
+      }
+      throw new Error(`Unexpected ${request.method} ${path}`);
+    });
+    const local = {
+      tenantId: "local-demo",
+      providerKind: "local" as const,
+      providerAccountId: "local-demo",
+      externalConversationId: `conversation-${caseId}`,
+    };
+    const stripe = {
+      tenantId: "local-demo",
+      providerKind: "stripe" as const,
+      providerAccountId: "acct_test_123",
+      externalConversationId: `conversation-${caseId}`,
+    };
+    const { caseStore, mastra } = await setup(
+      caseId,
+      undefined,
+      undefined,
+      undefined,
+      {
+        providerBindings: {
+          support: local,
+          commerce: stripe,
+          transactions: stripe,
+          knowledge: local,
+        },
+        triage: {
+          intent: "cancellation",
+          urgency: "normal",
+          sentiment: "neutral",
+          requiresHumanReview: false,
+          confidence: 1,
+          rationale: "explicit no-refund cancellation",
+        },
+        message:
+          "Please cancel my subscription at the end of the period. I do not want a refund.",
+        allowInitialWorkflowFailure: true,
+        responseModel: jsonModel({
+          draftResponse: "draft",
+          citedSources: ["subscription-cancellation-policy"],
+          recommendRefund: false,
+          requiresEscalation: false,
+        }) as never,
+      },
+    );
+    const cancellationFailure = await caseStore.getClientForTests().execute({
+      sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = 'subscription-cancellation-failure'",
+      args: [caseId],
+    });
+    expect(String(cancellationFailure.rows[0]?.data ?? "")).toBe("");
+    expect(cancellationPosts).toBe(1);
+    expect(refundPosts).toBe(0);
+    expect(await caseStore.get(caseId)).toMatchObject({
+      status: "resolved",
+      metadata: {
+        cancellationEffect: {
+          status: "scheduled",
+          cancelsAt: "1970-01-01T00:03:20.000Z",
+        },
+      },
+    });
+    const outbox = await caseStore.getClientForTests().execute({
+      sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ?",
+      args: [caseId],
+    });
+    expect(Number((outbox.rows[0] as { total: number }).total)).toBe(1);
+    const command = await caseStore.getClientForTests().execute({
+      sql: "SELECT idempotency_key FROM support_subscription_cancellation_attempts WHERE case_id = ?",
+      args: [caseId],
+    });
+    expect(command.rows).toHaveLength(1);
+    const stored = await caseStore.get(caseId);
+    expect(stored?.metadata.cancellationEffect).toMatchObject({
+      status: "scheduled",
+    });
+    // Restart/replay sees the terminal durable attempt and cannot POST again.
+    const tool = mastra.getTool("scheduleSubscriptionCancellationTool");
+    expect(tool).toBeDefined();
+    expect(cancellationPosts).toBe(1);
+  });
+
+  it.each(["preflight", "post-4xx"] as const)(
+    "terminalizes a deterministic Stripe cancellation %s without recovery work",
+    async (failure) => {
+      const caseId = `stripe-cancel-no-effect-${failure}-${crypto.randomUUID()}`;
+      enableSyntheticStripe();
+      const observed = {
+        posts: 0,
+        gets: [] as string[],
+        keys: [] as string[],
+        scheduled: false,
+        loseFirstPost: false,
+        ...(failure === "preflight"
+          ? { preflightFailure: true }
+          : { post4xx: true }),
+      };
+      vi.stubGlobal("fetch", cancellationStripeTransport(observed));
+      const { caseStore } = await setup(
+        caseId,
+        undefined,
+        undefined,
+        undefined,
+        {
+          providerBindings: syntheticStripeBindings(caseId),
+          triage: {
+            intent: "cancellation",
+            urgency: "normal",
+            sentiment: "neutral",
+            requiresHumanReview: false,
+            confidence: 1,
+            rationale: "explicit no-refund cancellation",
+          },
+          message:
+            "Please cancel my subscription at the end of the period. I do not want a refund.",
+          responseModel: jsonModel({
+            draftResponse: "draft",
+            citedSources: ["subscription-cancellation-policy"],
+            recommendRefund: false,
+            requiresEscalation: false,
+          }) as never,
+          allowInitialWorkflowFailure: true,
+        },
+      );
+      const attempt = await caseStore.getClientForTests().execute({
+        sql: "SELECT idempotency_key, fingerprint, status FROM support_subscription_cancellation_attempts WHERE case_id = ?",
+        args: [caseId],
+      });
+      const beforeRecovery = {
+        posts: observed.posts,
+        gets: [...observed.gets],
+      };
+      const { reconcileUnknownSubscriptionCancellations } =
+        await import("../../src/mastra/providers/stripe/cancellation-reconciliation");
+      expect(await reconcileUnknownSubscriptionCancellations(caseStore)).toBe(
+        0,
+      );
+      expect({
+        beforeRecovery,
+        afterRecovery: { posts: observed.posts, gets: observed.gets },
+        attempt: attempt.rows[0],
+        case: await caseStore.get(caseId),
+        audit: await caseStore.getAction(
+          caseId,
+          "subscription-cancellation-failure",
+          String((attempt.rows[0] as { fingerprint: string }).fingerprint),
+        ),
+      }).toMatchObject({
+        beforeRecovery: {
+          posts: failure === "post-4xx" ? 1 : 0,
+        },
+        afterRecovery: beforeRecovery,
+        attempt: { status: "failed" },
+        case: { status: "escalated" },
+        audit: { classification: "confirmed-no-effect" },
+      });
+      const outbox = await caseStore.getClientForTests().execute({
+        sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ?",
+        args: [caseId],
+      });
+      expect(Number((outbox.rows[0] as { total: number }).total)).toBe(1);
+    },
+  );
+
+  it.each(["missing-schedule", "malformed-items"] as const)(
+    "recovers a committed native Stripe cancellation after an invalid 2xx %s response",
+    async (invalidPostResponse) => {
+      const caseId = `stripe-cancel-invalid-2xx-${invalidPostResponse}-${crypto.randomUUID()}`;
+      enableSyntheticStripe();
+      const observed = {
+        posts: 0,
+        refundPosts: 0,
+        gets: [] as string[],
+        keys: [] as string[],
+        scheduled: false,
+        loseFirstPost: false,
+        invalidPostResponse,
+      };
+      vi.stubGlobal("fetch", cancellationStripeTransport(observed));
+      const { caseStore } = await setup(
+        caseId,
+        undefined,
+        undefined,
+        undefined,
+        {
+          providerBindings: syntheticStripeBindings(caseId),
+          triage: {
+            intent: "cancellation",
+            urgency: "normal",
+            sentiment: "neutral",
+            requiresHumanReview: false,
+            confidence: 1,
+            rationale: "explicit no-refund cancellation",
+          },
+          message:
+            "Please cancel my subscription at the end of the period. I do not want a refund.",
+          responseModel: jsonModel({
+            draftResponse: "draft",
+            citedSources: ["subscription-cancellation-policy"],
+            recommendRefund: false,
+            requiresEscalation: false,
+          }) as never,
+          allowInitialWorkflowFailure: true,
+        },
+      );
+      const attempt = await caseStore.getClientForTests().execute({
+        sql: "SELECT idempotency_key, fingerprint, status FROM support_subscription_cancellation_attempts WHERE case_id = ?",
+        args: [caseId],
+      });
+      const firstAttempt = attempt.rows[0] as {
+        fingerprint: string;
+        status: string;
+      };
+      const initialAudit = (await caseStore.getAction(
+        caseId,
+        "subscription-cancellation-failure",
+        firstAttempt.fingerprint,
+      )) as { classification?: string } | undefined;
+      expect({
+        posts: observed.posts,
+        refundPosts: observed.refundPosts,
+        remotelyScheduled: observed.scheduled,
+        attempt: firstAttempt,
+      }).toMatchObject({
+        posts: 1,
+        refundPosts: 0,
+        remotelyScheduled: true,
+        attempt: { status: "unknown" },
+      });
+      expect(initialAudit?.classification).not.toBe("confirmed-no-effect");
+      const initialOutbox = await caseStore.getClientForTests().execute({
+        sql: "SELECT status, body FROM support_outbox WHERE case_id = ? ORDER BY created_at, id",
+        args: [caseId],
+      });
+      const initialOutboxCount = initialOutbox.rows.length;
+      expect(initialOutbox.rows).toMatchObject([{ status: "escalated" }]);
+      expect(String((initialOutbox.rows[0] as { body: string }).body)).toMatch(
+        /additional review|support specialist/i,
+      );
+      const { reconcileUnknownSubscriptionCancellations } =
+        await import("../../src/mastra/providers/stripe/cancellation-reconciliation");
+      expect(await reconcileUnknownSubscriptionCancellations(caseStore)).toBe(
+        1,
+      );
+      expect(await reconcileUnknownSubscriptionCancellations(caseStore)).toBe(
+        0,
+      );
+      const outbox = await caseStore.getClientForTests().execute({
+        sql: "SELECT status FROM support_outbox WHERE case_id = ? ORDER BY created_at, id",
+        args: [caseId],
+      });
+      const finalAudit = (await caseStore.getAction(
+        caseId,
+        "subscription-cancellation-failure",
+        firstAttempt.fingerprint,
+      )) as { classification?: string } | undefined;
+      expect({
+        posts: observed.posts,
+        refundPosts: observed.refundPosts,
+        subscriptionGets: observed.gets.filter(
+          (path) => path === "/v1/subscriptions/sub_cancel",
+        ).length,
+        attempt: (
+          await caseStore.getClientForTests().execute({
+            sql: "SELECT status FROM support_subscription_cancellation_attempts WHERE case_id = ?",
+            args: [caseId],
+          })
+        ).rows[0],
+        case: await caseStore.get(caseId),
+        recoveryOutbox: outbox.rows.slice(initialOutboxCount),
+      }).toMatchObject({
+        posts: 1,
+        refundPosts: 0,
+        subscriptionGets: 2,
+        attempt: { status: "scheduled" },
+        case: {
+          status: "resolved",
+          metadata: { cancellationEffect: { status: "scheduled" } },
+        },
+        recoveryOutbox: [{ status: "resolved" }],
+      });
+      expect(finalAudit?.classification).not.toBe("confirmed-no-effect");
+    },
+  );
+
+  it("uses one validated paid InvoicePayment snapshot when the association changes before native refund execution", async () => {
+    for (const amount of [20, 1000]) {
+      const caseId = `stripe-renewal-${amount}-${crypto.randomUUID()}`;
+      enableSyntheticStripe();
+      const posts: Array<{ target: string | null; key: string | null }> = [];
+      const refundHistoryTargets: string[] = [];
+      let invoicePaymentReads = 0;
+      let fingerprint = "";
+      vi.stubGlobal("fetch", async (request: Request) => {
+        const path = new URL(request.url).pathname;
+        if (path === "/v1/account")
+          return Response.json({ id: "acct_test_123", livemode: false });
+        if (path === "/v1/customers")
+          return Response.json({
+            data: [
+              { id: "cus_renewal", email: "alex@example.com", livemode: false },
+            ],
+            has_more: false,
+          });
+        if (path === "/v1/customers/cus_renewal")
+          return Response.json({
+            id: "cus_renewal",
+            email: "alex@example.com",
+            livemode: false,
+          });
+        // A renewal has no Checkout to fall back to. The only executable
+        // target is its paid InvoicePayment's PaymentIntent.
+        if (path === "/v1/checkout/sessions")
+          return Response.json({ data: [], has_more: false });
+        if (path === "/v1/subscriptions")
+          return Response.json({
+            data: [
+              {
+                id: "sub_renewal",
+                customer: "cus_renewal",
+                latest_invoice: "in_renewal",
+                status: "active",
+                livemode: false,
+                items: {
+                  data: [
+                    {
+                      current_period_end: 2,
+                      price: {
+                        id: "price_renewal",
+                        nickname: "Renewal",
+                        currency: "usd",
+                        unit_amount: 100000,
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+            has_more: false,
+          });
+        if (path === "/v1/invoices/in_renewal")
+          return Response.json({
+            id: "in_renewal",
+            customer: "cus_renewal",
+            status: "paid",
+            paid: true,
+            created: 1,
+            livemode: false,
+            description: "Synthetic renewal",
+          });
+        if (path === "/v1/invoice_payments") {
+          invoicePaymentReads += 1;
+          const target = `pi_renewal_snapshot_${invoicePaymentReads}`;
+          return Response.json({
+            data: [
+              {
+                id: "ip_renewal",
+                invoice: "in_renewal",
+                status: "paid",
+                paid: true,
+                payment: {
+                  type: "payment_intent",
+                  payment_intent: target,
+                },
+                livemode: false,
+              },
+            ],
+            has_more: false,
+          });
+        }
+        if (/^\/v1\/payment_intents\/pi_renewal_snapshot_\d+$/.test(path))
+          return Response.json({
+            id: path.split("/").at(-1),
+            amount_received: 100000,
+            currency: "usd",
+            status: "succeeded",
+            livemode: false,
+          });
+        if (path === "/v1/refunds" && request.method === "GET") {
+          refundHistoryTargets.push(
+            new URL(request.url).searchParams.get("payment_intent") ?? "",
+          );
+          return Response.json({ data: [], has_more: false });
+        }
+        if (path === "/v1/refunds" && request.method === "POST") {
+          const payload = new URLSearchParams(await request.text());
+          posts.push({
+            target: payload.get("payment_intent"),
+            key: request.headers.get("idempotency-key"),
+          });
+          return Response.json({
+            id: `re_renewal_${amount}`,
+            amount: amount * 100,
+            currency: "usd",
+            status: "succeeded",
+            created: 3,
+            livemode: false,
+            metadata: {
+              support_case_id: caseId,
+              command_fingerprint: fingerprint,
+            },
+          });
+        }
+        throw new Error(
+          `Unexpected renewal Stripe request ${request.method} ${path}`,
+        );
+      });
+      const { caseStore, mastra, native, recoverApprovedNativeDecisions } =
+        await setup(
+          caseId,
+          undefined,
+          undefined,
+          { amount, currency: "USD" },
+          {
+            providerBindings: syntheticStripeBindings(caseId),
+          },
+        );
+      const command = (await caseStore.getAction(
+        caseId,
+        "refund-command",
+        native.fingerprint,
+      )) as { orderId: string; fingerprint: string; idempotencyKey: string };
+      fingerprint = command.fingerprint;
+      expect(command.orderId).toBe("in_renewal");
+      await caseStore.recordApprovalDecision({
+        caseId,
+        turnId: native.turnId,
+        commandFingerprint: native.fingerprint,
+        principalId: "approver-demo",
+        approved: true,
+        nativeRunId: native.runId,
+        nativeToolCallId: native.toolCallId,
+      });
+      expect(
+        await recoverApprovedNativeDecisions(mastra, caseStore, {
+          disableScorers: true,
+        }),
+      ).toBe(1);
+      expect(posts).toHaveLength(1);
+      expect(posts[0]).toMatchObject({ key: command.idempotencyKey });
+      const executedTarget = posts[0]!.target;
+      expect(executedTarget).toMatch(/^pi_renewal_snapshot_\d+$/);
+      expect(refundHistoryTargets.at(-1)).toBe(executedTarget);
+      expect(
+        await caseStore.stripeRefundAttempt(command.idempotencyKey),
+      ).toMatchObject({
+        stripeRequest: { paymentIntentId: executedTarget },
+      });
+      expect(await caseStore.get(caseId)).toMatchObject({
+        status: "resolved",
+        refundResult: { orderId: "in_renewal", status: "executed" },
+      });
+    }
+  });
+
+  it.each([
+    {
+      label: "ordinary webhook sequence",
+      nativeReceiptRace: false,
+      postProviderVersionRace: false,
+      providerReceiptStatus: "pending",
+    },
+    {
+      label: "terminal webhook after the native pending receipt",
+      nativeReceiptRace: true,
+      postProviderVersionRace: false,
+      providerReceiptStatus: "pending",
+    },
+    {
+      label:
+        "failed webhook after the provider success receipt and before the native projection",
+      nativeReceiptRace: false,
+      postProviderVersionRace: true,
+      providerReceiptStatus: "succeeded",
+    },
+  ])(
+    "applies signed pending, duplicate success, and late failed webhooks to the immutable attempt without a poll: $label",
+    async ({
+      nativeReceiptRace,
+      postProviderVersionRace,
+      providerReceiptStatus,
+    }) => {
+      const caseId = `stripe-signed-webhook-${crypto.randomUUID()}`;
+      enableSyntheticStripe();
+      let remoteStatus = "pending";
+      let fingerprint = "";
+      let posts = 0;
+      let refundGets = 0;
+      let webhookGetBarrier:
+        { started(): void; release: Promise<void> } | undefined;
+      vi.stubGlobal("fetch", async (request: Request) => {
+        const path = new URL(request.url).pathname;
+        if (path === "/v1/account")
+          return Response.json({ id: "acct_test_123", livemode: false });
+        if (path === "/v1/customers")
+          return Response.json({
+            data: [{ id: "cus_1", email: "alex@example.com", livemode: false }],
+            has_more: false,
+          });
+        if (path === "/v1/checkout/sessions")
+          return Response.json({
+            data: [
+              {
+                id: "ORD-1001",
+                customer: "cus_1",
+                customer_details: { email: "alex@example.com" },
+                payment_intent: "pi_1",
+                status: "complete",
+                payment_status: "paid",
+                livemode: false,
+                created: 1,
+              },
+            ],
+            has_more: false,
+          });
+        if (path === "/v1/checkout/sessions/ORD-1001/line_items")
+          return Response.json({
+            data: [{ description: "Synthetic", price: { product: "prod_1" } }],
+            has_more: false,
+          });
+        if (path === "/v1/payment_intents/pi_1")
+          return Response.json({
+            id: "pi_1",
+            amount_received: 102000,
+            currency: "usd",
+            status: "succeeded",
+            livemode: false,
+          });
+        if (path === "/v1/subscriptions")
+          return Response.json({ data: [], has_more: false });
+        if (path === "/v1/refunds" && request.method === "GET")
+          return Response.json({ data: [], has_more: false });
+        if (path === "/v1/refunds" && request.method === "POST") {
+          posts += 1;
+          return Response.json({
+            id: "re_webhook",
+            amount: 2000,
+            currency: "usd",
+            status: providerReceiptStatus,
+            created: 2,
+            livemode: false,
+            metadata: {
+              support_case_id: caseId,
+              command_fingerprint: fingerprint,
+            },
+          });
+        }
+        if (path === "/v1/refunds/re_webhook") {
+          refundGets += 1;
+          const barrier = webhookGetBarrier;
+          if (barrier) {
+            webhookGetBarrier = undefined;
+            barrier.started();
+            await barrier.release;
+          }
+          return Response.json({
+            id: "re_webhook",
+            amount: 2000,
+            currency: "usd",
+            status: remoteStatus,
+            created: 2,
+            livemode: false,
+            metadata: {
+              support_case_id: caseId,
+              command_fingerprint: fingerprint,
+            },
+          });
+        }
+        throw new Error(
+          `Unexpected webhook Stripe request ${request.method} ${path}`,
+        );
+      });
+      const {
+        app,
+        caseStore,
+        databasePath,
+        mastra,
+        native,
+        recoverApprovedNativeDecisions,
+      } = await setup(caseId, undefined, undefined, undefined, {
+        providerBindings: syntheticStripeBindings(caseId),
+      });
+      const command = (await caseStore.getAction(
+        caseId,
+        "refund-command",
+        native.fingerprint,
+      )) as { fingerprint: string };
+      fingerprint = command.fingerprint;
+      if (!postProviderVersionRace)
+        await caseStore.recordApprovalDecision({
+          caseId,
+          turnId: native.turnId,
+          commandFingerprint: native.fingerprint,
+          principalId: "approver-demo",
+          approved: true,
+          nativeRunId: native.runId,
+          nativeToolCallId: native.toolCallId,
+        });
+      const deliver = async (id: string, type: string) => {
+        const signed = signedStripeEvent({
+          id,
+          type,
+          api_version: "2026-08-26.dahlia",
+          created: 1,
+          livemode: false,
+          data: { object: { id: "re_webhook" } },
+        });
+        return app.request("http://support.test/support/webhooks/stripe", {
+          method: "POST",
+          headers: signed.headers,
+          body: signed.body,
+        });
+      };
+      const originalUpdate =
+        caseStore.updateStripeRefundAttempt.bind(caseStore);
+      const originalProjection =
+        caseStore.projectRefundToolExecution.bind(caseStore);
+      let nativeReceiptRaceFired = false;
+      let postProviderVersionRaceFired = false;
+      const pendingReceiptSpy = nativeReceiptRace
+        ? vi
+            .spyOn(caseStore, "updateStripeRefundAttempt")
+            .mockImplementation(async (idempotencyKey, update) => {
+              const updated = await originalUpdate(idempotencyKey, update);
+              if (
+                !nativeReceiptRaceFired &&
+                updated &&
+                idempotencyKey === command.idempotencyKey &&
+                update.status === "pending" &&
+                update.refundId === "re_webhook"
+              ) {
+                nativeReceiptRaceFired = true;
+                remoteStatus = "succeeded";
+                expect(
+                  (
+                    await deliver(
+                      "evt_native_pending_succeeded",
+                      "refund.updated",
+                    )
+                  ).status,
+                ).toBe(200);
+              }
+              return updated;
+            })
+        : undefined;
+      const projectionSpy = postProviderVersionRace
+        ? vi
+            .spyOn(caseStore, "projectRefundToolExecution")
+            .mockImplementation(async (input) => {
+              if (!postProviderVersionRaceFired && input.caseId === caseId) {
+                postProviderVersionRaceFired = true;
+                remoteStatus = "failed";
+                expect(
+                  (
+                    await deliver(
+                      "evt_post_provider_late_failed",
+                      "refund.failed",
+                    )
+                  ).status,
+                ).toBe(200);
+              }
+              return originalProjection(input);
+            })
+        : undefined;
+      let recovered: number | undefined;
+      try {
+        if (postProviderVersionRace) {
+          const response = await approveNativeRefund(
+            app,
+            caseId,
+            native.fingerprint,
+          );
+          expect(response.status).toBe(200);
+        } else
+          recovered = await recoverApprovedNativeDecisions(mastra, caseStore, {
+            disableScorers: true,
+          });
+      } finally {
+        pendingReceiptSpy?.mockRestore();
+        projectionSpy?.mockRestore();
+      }
+      if (!postProviderVersionRace) expect(recovered).toBe(1);
+      expect(posts).toBe(1);
+      if (postProviderVersionRace) {
+        expect(postProviderVersionRaceFired).toBe(true);
+        expect(
+          await caseStore.stripeRefundAttemptByRefundId("re_webhook"),
+        ).toMatchObject({ status: "failed" });
+        expect(
+          await caseStore.idempotency(command.idempotencyKey),
+        ).toBeUndefined();
+        expect(await caseStore.get(caseId)).toMatchObject({
+          status: "escalated",
+          refundResult: { status: "failed" },
+        });
+        const outbox = await caseStore.getClientForTests().execute({
+          sql: "SELECT status, body FROM support_outbox WHERE case_id = ? ORDER BY id",
+          args: [caseId],
+        });
+        expect(outbox.rows).toEqual([
+          expect.objectContaining({
+            status: "escalated",
+            body: expect.stringMatching(/additional review/i),
+          }),
+        ]);
+        // Reopen the durable database through the real native recovery entry
+        // after the HTTP approval returned. The failed ledger must suppress
+        // any resumed native continuation and must not issue another POST.
+        const restarted = await setup(caseId, undefined, undefined, undefined, {
+          databasePath,
+          existingCase: true,
+          providerBindings: syntheticStripeBindings(caseId),
+        });
+        expect(
+          await restarted.recoverApprovedNativeDecisions(
+            restarted.mastra,
+            restarted.caseStore,
+            { disableScorers: true },
+          ),
+        ).toBe(0);
+        expect(posts).toBe(1);
+        return;
+      }
+      if (nativeReceiptRace) {
+        expect(nativeReceiptRaceFired).toBe(true);
+        expect(
+          await caseStore.stripeRefundAttemptByRefundId("re_webhook"),
+        ).toMatchObject({ status: "succeeded" });
+        expect(
+          await caseStore.idempotency(command.idempotencyKey),
+        ).toMatchObject({
+          effect: { status: "succeeded", refundId: "re_webhook" },
+        });
+        expect(await caseStore.get(caseId)).toMatchObject({
+          status: "resolved",
+          refundResult: { status: "skipped" },
+        });
+        const originatingTurn = await caseStore.getClientForTests().execute({
+          sql: "SELECT state FROM support_turns WHERE id = ?",
+          args: [native.turnId],
+        });
+        expect(originatingTurn.rows[0]).toMatchObject({ state: "resolved" });
+        const outbox = await caseStore.getClientForTests().execute({
+          sql: "SELECT id, status, state, originating_turn_id, body FROM support_outbox WHERE case_id = ? ORDER BY id",
+          args: [caseId],
+        });
+        expect(
+          outbox.rows.map((row) => ({
+            id: String(row.id),
+            status: String(row.status),
+            state: String(row.state),
+            originatingTurnId: String(row.originating_turn_id),
+            body: String(row.body),
+          })),
+        ).toEqual([
+          {
+            id: `outbox_${caseId}_${native.turnId}_refund-final`,
+            status: "resolved",
+            state: "delivered",
+            originatingTurnId: native.turnId,
+            body: expect.any(String),
+          },
+        ]);
+        return;
+      }
+      expect((await deliver("evt_pending", "refund.updated")).status).toBe(200);
+      expect(await caseStore.get(caseId)).toMatchObject({
+        refundResult: { status: "pending" },
+      });
+      // `requires_action` is not an issued refund. It remains recoverable until
+      // a later authoritative provider read reports success.
+      remoteStatus = "requires_action";
+      expect(
+        (await deliver("evt_requires_action", "refund.updated")).status,
+      ).toBe(200);
+      expect(await caseStore.get(caseId)).toMatchObject({
+        refundResult: { status: "pending" },
+      });
+      // Two reconcilers race on the same durable row. Only one can acquire the
+      // CAS lease; a stale owner cannot later overwrite the winner's backoff.
+      const pendingAttempt =
+        await caseStore.stripeRefundAttemptByRefundId("re_webhook");
+      await caseStore.updateStripeRefundAttempt(
+        pendingAttempt!.idempotencyKey,
+        {
+          status: "pending",
+          nextAttemptAt: new Date(0).toISOString(),
+        },
+      );
+      const [firstClaims, secondClaims] = await Promise.all([
+        caseStore.claimableStripeRefundAttempts(),
+        caseStore.claimableStripeRefundAttempts(),
+      ]);
+      expect(firstClaims.length + secondClaims.length).toBe(1);
+      const claimed = [...firstClaims, ...secondClaims][0]!;
+      // This is the controlled interleaving after a worker has selected and
+      // claimed the candidate but before its stale continuation writes back.
+      // The signed provider terminalization wins; the stale worker must not
+      // restore pending/unknown state or create another notification.
+      remoteStatus = "succeeded";
+      expect(
+        (await deliver("evt_claim_terminal", "refund.updated")).status,
+      ).toBe(200);
+      expect(
+        await caseStore.rescheduleStripeRefundAttempt({
+          idempotencyKey: claimed.idempotencyKey,
+          reconcileLeaseToken: claimed.reconcileLeaseToken!,
+          status: "pending",
+          providerStatus: "retrying",
+          nextAttemptAt: new Date(Date.now() + 30_000).toISOString(),
+        }),
+      ).toBe(false);
+      expect(
+        await caseStore.rescheduleStripeRefundAttempt({
+          idempotencyKey: claimed.idempotencyKey,
+          reconcileLeaseToken: claimed.reconcileLeaseToken!,
+          status: "unknown",
+          providerStatus: "stale-worker",
+        }),
+      ).toBe(false);
+      // A new customer turn is allowed to become the active projection while
+      // the first attempt is pending. Its terminal webhook must still close and
+      // notify the immutable originating turn exactly once.
+      const followUp = await app.request(
+        `http://support.test/support/cases/${caseId}/follow-ups`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${issueLocalSession({ id: "customer-alex" })}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            body: "Please also confirm the renewal date.",
+          }),
+        },
+      );
+      expect(followUp.status).toBe(200);
+      const afterFollowUp = await caseStore.get(caseId);
+      expect(
+        (afterFollowUp!.metadata as Record<string, unknown>).activeTurnId,
+      ).not.toBe(native.turnId);
+      remoteStatus = "succeeded";
+      const getsBeforeCompletedReplay = refundGets;
+      let markWebhookGetStarted!: () => void;
+      let releaseWebhookGet!: () => void;
+      webhookGetBarrier = {
+        started: () => markWebhookGetStarted(),
+        release: new Promise<void>((resolve) => {
+          releaseWebhookGet = resolve;
+        }),
+      };
+      const webhookGetStarted = new Promise<void>((resolve) => {
+        markWebhookGetStarted = resolve;
+      });
+      const firstSuccess = deliver("evt_success", "refund.updated");
+      await webhookGetStarted;
+      // An identical signed delivery while the first reconciliation is in its
+      // provider GET is not a second job. Stripe will retry the 503 after the
+      // bounded claim, and no second GET starts.
+      expect((await deliver("evt_success", "refund.updated")).status).toBe(503);
+      expect(refundGets).toBe(getsBeforeCompletedReplay + 1);
+      releaseWebhookGet();
+      expect((await firstSuccess).status).toBe(200);
+      // The completed event is an acknowledgement-only replay. This exact
+      // counter is intentionally red against the former receipt-only code.
+      expect((await deliver("evt_success", "refund.updated")).status).toBe(200);
+      expect(refundGets).toBe(getsBeforeCompletedReplay + 1);
+      // Event IDs remain independent: a valid later event still drives its
+      // own authoritative provider read and can supersede the prior result.
+      expect(
+        (await deliver("evt_success_later", "refund.updated")).status,
+      ).toBe(200);
+      expect(refundGets).toBe(getsBeforeCompletedReplay + 2);
+      // Simulate a process dying after its durable receipt claim but before
+      // its GET. The active lease returns retryable without a GET; after its
+      // bounded expiry the real handler recovers and then completes it.
+      expect(
+        (await caseStore.claimStripeWebhookEvent("evt_crash_retry")).state,
+      ).toBe("claimed");
+      expect((await deliver("evt_crash_retry", "refund.updated")).status).toBe(
+        503,
+      );
+      expect(refundGets).toBe(getsBeforeCompletedReplay + 2);
+      await caseStore.getClientForTests().execute({
+        sql: "UPDATE support_stripe_webhook_receipts SET lease_until = ? WHERE event_id = ?",
+        args: [new Date(0).toISOString(), "evt_crash_retry"],
+      });
+      expect((await deliver("evt_crash_retry", "refund.updated")).status).toBe(
+        200,
+      );
+      expect(refundGets).toBe(getsBeforeCompletedReplay + 3);
+      expect((await deliver("evt_crash_retry", "refund.updated")).status).toBe(
+        200,
+      );
+      expect(refundGets).toBe(getsBeforeCompletedReplay + 3);
+      expect(await caseStore.get(caseId)).toMatchObject({
+        status: "waiting_approval",
+      });
+      const succeededOriginatingTurn = await caseStore
+        .getClientForTests()
+        .execute({
+          sql: "SELECT state, outcome_data FROM support_turns WHERE id = ?",
+          args: [native.turnId],
+        });
+      expect(succeededOriginatingTurn.rows[0]).toMatchObject({
+        state: "resolved",
+      });
+      const { reconcileStripeRefundAttempts } =
+        await import("../../src/mastra/providers/stripe/reconciliation");
+      const succeededAttempt =
+        await caseStore.stripeRefundAttemptByRefundId("re_webhook");
+      await caseStore.updateStripeRefundAttempt(
+        succeededAttempt!.idempotencyKey,
+        {
+          status: "succeeded",
+          nextAttemptAt: new Date(0).toISOString(),
+        },
+      );
+      const getsBeforeSucceededPoll = refundGets;
+      await reconcileStripeRefundAttempts(caseStore);
+      expect(refundGets).toBeGreaterThan(getsBeforeSucceededPoll);
+      await caseStore.enforceRetention(() => new Date());
+      expect(
+        await caseStore.stripeRefundAttemptByRefundId("re_webhook"),
+      ).toMatchObject({ status: "succeeded" });
+      await caseStore.updateStripeRefundAttempt(
+        succeededAttempt!.idempotencyKey,
+        {
+          status: "succeeded",
+          nextAttemptAt: new Date(0).toISOString(),
+        },
+      );
+      const client = caseStore.getClientForTests();
+      const originalExecute = client.execute.bind(client);
+      let selectBarrierFired = false;
+      client.execute = async (...args) => {
+        const selected = await originalExecute(...args);
+        const sql = typeof args[0] === "string" ? args[0] : args[0]?.sql;
+        if (
+          !selectBarrierFired &&
+          typeof sql === "string" &&
+          sql.startsWith(
+            "SELECT * FROM support_stripe_refund_attempts WHERE status IN",
+          )
+        ) {
+          selectBarrierFired = true;
+          remoteStatus = "failed";
+          expect(
+            (await deliver("evt_select_late_failed", "refund.failed")).status,
+          ).toBe(200);
+        }
+        return selected;
+      };
+      try {
+        expect(await caseStore.claimableStripeRefundAttempts()).toEqual([]);
+      } finally {
+        client.execute = originalExecute;
+      }
+      expect(selectBarrierFired).toBe(true);
+      expect(
+        await caseStore.stripeRefundAttemptByRefundId("re_webhook"),
+      ).toMatchObject({ status: "failed" });
+      expect(await caseStore.get(caseId)).toMatchObject({
+        status: "waiting_approval",
+      });
+      const originatingTurn = await caseStore.getClientForTests().execute({
+        sql: "SELECT state, outcome_data FROM support_turns WHERE id = ?",
+        args: [native.turnId],
+      });
+      expect(originatingTurn.rows[0]).toMatchObject({
+        state: "escalated",
+      });
+      const outbox = await caseStore.getClientForTests().execute({
+        sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ?",
+        args: [caseId],
+      });
+      expect(Number((outbox.rows[0] as { total: number }).total)).toBe(2);
+      // A recent terminal row remains after the runtime's normal reconcile then
+      // retention ordering; only its immutable terminal timestamp may expire it.
+      expect(await reconcileStripeRefundAttempts(caseStore)).toBe(0);
+      await caseStore.enforceRetention(() => new Date());
+      expect(
+        await caseStore.stripeRefundAttemptByRefundId("re_webhook"),
+      ).toMatchObject({ status: "failed" });
+      // Terminal financial identifiers and unrelated provider delivery receipts
+      // must disappear at their separate 365-day and raw-payload boundaries.
+      const old = new Date(
+        Date.now() - 366 * 24 * 60 * 60 * 1_000,
+      ).toISOString();
+      const attempt =
+        await caseStore.stripeRefundAttemptByRefundId("re_webhook");
+      await caseStore.getClientForTests().execute({
+        sql: "UPDATE support_stripe_refund_attempts SET created_at = ?, updated_at = ?, terminal_at = ? WHERE idempotency_key = ?",
+        args: [old, old, old, attempt!.idempotencyKey],
+      });
+      await caseStore.getClientForTests().execute({
+        sql: "UPDATE support_stripe_webhook_receipts SET created_at = ?, completed_at = ?, updated_at = ? WHERE state = 'completed'",
+        args: [old, old, old],
+      });
+      expect(await reconcileStripeRefundAttempts(caseStore)).toBe(0);
+      await caseStore.enforceRetention(() => new Date());
+      expect(
+        await caseStore.stripeRefundAttemptByRefundId("re_webhook"),
+      ).toBeUndefined();
+      const receipts = await caseStore.getClientForTests().execute({
+        sql: "SELECT COUNT(*) AS total FROM support_stripe_webhook_receipts",
+      });
+      expect(Number((receipts.rows[0] as { total: number }).total)).toBe(0);
+    },
+  );
+
+  it("purges an old succeeded Stripe attempt after an actual scheduled reconciliation poll", async () => {
+    const caseId = `stripe-succeeded-retention-${crypto.randomUUID()}`;
+    enableSyntheticStripe();
+    let fingerprint = "";
+    let refundGets = 0;
+    vi.stubGlobal("fetch", async (request: Request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/v1/account")
+        return Response.json({ id: "acct_test_123", livemode: false });
+      if (path === "/v1/customers")
+        return Response.json({
+          data: [{ id: "cus_old", email: "alex@example.com", livemode: false }],
+          has_more: false,
+        });
+      if (path === "/v1/checkout/sessions")
+        return Response.json({
+          data: [
+            {
+              id: "ORD-1001",
+              customer: "cus_old",
+              customer_details: { email: "alex@example.com" },
+              payment_intent: "pi_old",
+              status: "complete",
+              payment_status: "paid",
+              livemode: false,
+              created: 1,
+            },
+          ],
+          has_more: false,
+        });
+      if (path === "/v1/checkout/sessions/ORD-1001/line_items")
+        return Response.json({ data: [], has_more: false });
+      if (path === "/v1/payment_intents/pi_old")
+        return Response.json({
+          id: "pi_old",
+          amount_received: 102000,
+          currency: "usd",
+          status: "succeeded",
+          livemode: false,
+        });
+      if (path === "/v1/subscriptions")
+        return Response.json({ data: [], has_more: false });
+      if (path === "/v1/refunds" && request.method === "GET")
+        return Response.json({ data: [], has_more: false });
+      if (path === "/v1/refunds" && request.method === "POST")
+        return Response.json({
+          id: "re_old_succeeded",
+          amount: 2000,
+          currency: "usd",
+          status: "pending",
+          created: 2,
+          livemode: false,
+          metadata: {
+            support_case_id: caseId,
+            command_fingerprint: fingerprint,
+          },
+        });
+      if (path === "/v1/refunds/re_old_succeeded") {
+        refundGets += 1;
+        return Response.json({
+          id: "re_old_succeeded",
+          amount: 2000,
+          currency: "usd",
+          status: "succeeded",
+          created: 2,
+          livemode: false,
+          metadata: {
+            support_case_id: caseId,
+            command_fingerprint: fingerprint,
+          },
+        });
+      }
+      throw new Error(
+        `Unexpected succeeded-retention request ${request.method} ${path}`,
+      );
+    });
+    const { caseStore, mastra, native, recoverApprovedNativeDecisions } =
+      await setup(caseId, undefined, undefined, undefined, {
+        providerBindings: syntheticStripeBindings(caseId),
+      });
+    const command = (await caseStore.getAction(
+      caseId,
+      "refund-command",
+      native.fingerprint,
+    )) as { fingerprint: string; idempotencyKey: string };
+    fingerprint = command.fingerprint;
+    await caseStore.recordApprovalDecision({
+      caseId,
+      turnId: native.turnId,
+      commandFingerprint: native.fingerprint,
+      principalId: "approver-demo",
+      approved: true,
+      nativeRunId: native.runId,
+      nativeToolCallId: native.toolCallId,
+    });
+    expect(
+      await recoverApprovedNativeDecisions(mastra, caseStore, {
+        disableScorers: true,
+      }),
+    ).toBe(1);
+    const { reconcileStripeRefundAttempts } =
+      await import("../../src/mastra/providers/stripe/reconciliation");
+    const pending = await caseStore.stripeRefundAttempt(command.idempotencyKey);
+    await caseStore.updateStripeRefundAttempt(command.idempotencyKey, {
+      status: "pending",
+      nextAttemptAt: new Date(0).toISOString(),
+    });
+    expect(await reconcileStripeRefundAttempts(caseStore)).toBe(1);
+    expect(
+      await caseStore.stripeRefundAttempt(command.idempotencyKey),
+    ).toMatchObject({ status: "succeeded" });
+    const old = new Date(Date.now() - 366 * 24 * 60 * 60 * 1_000).toISOString();
+    await caseStore.getClientForTests().execute({
+      sql: "UPDATE support_stripe_refund_attempts SET created_at = ?, updated_at = ?, terminal_at = ?, next_attempt_at = ? WHERE idempotency_key = ?",
+      args: [old, old, old, new Date(0).toISOString(), pending!.idempotencyKey],
+    });
+    const beforePoll = refundGets;
+    expect(await reconcileStripeRefundAttempts(caseStore)).toBe(0);
+    expect(refundGets).toBeGreaterThan(beforePoll);
+    await caseStore.enforceRetention(() => new Date());
+    expect(
+      await caseStore.stripeRefundAttempt(command.idempotencyKey),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    { label: "retry count", ageExpires: false },
+    { label: "24-hour age", ageExpires: true },
+  ])(
+    "quarantines a known requires_action refund once by $label while preserving a newer turn",
+    async ({ ageExpires }) => {
+      const caseId = `stripe-known-unknown-${crypto.randomUUID()}`;
+      enableSyntheticStripe();
+      let fingerprint = "";
+      vi.stubGlobal("fetch", async (request: Request) => {
+        const path = new URL(request.url).pathname;
+        if (path === "/v1/account")
+          return Response.json({ id: "acct_test_123", livemode: false });
+        if (path === "/v1/customers")
+          return Response.json({
+            data: [
+              { id: "cus_unknown", email: "alex@example.com", livemode: false },
+            ],
+            has_more: false,
+          });
+        if (path === "/v1/checkout/sessions")
+          return Response.json({
+            data: [
+              {
+                id: "ORD-1001",
+                customer: "cus_unknown",
+                customer_details: { email: "alex@example.com" },
+                payment_intent: "pi_unknown",
+                status: "complete",
+                payment_status: "paid",
+                livemode: false,
+                created: 1,
+              },
+            ],
+            has_more: false,
+          });
+        if (path === "/v1/checkout/sessions/ORD-1001/line_items")
+          return Response.json({ data: [], has_more: false });
+        if (path === "/v1/payment_intents/pi_unknown")
+          return Response.json({
+            id: "pi_unknown",
+            amount_received: 102000,
+            currency: "usd",
+            status: "succeeded",
+            livemode: false,
+          });
+        if (path === "/v1/subscriptions")
+          return Response.json({ data: [], has_more: false });
+        if (path === "/v1/refunds" && request.method === "GET")
+          return Response.json({ data: [], has_more: false });
+        if (path === "/v1/refunds" && request.method === "POST")
+          return Response.json({
+            id: "re_requires_action",
+            amount: 2000,
+            currency: "usd",
+            status: "pending",
+            created: 2,
+            livemode: false,
+            metadata: {
+              support_case_id: caseId,
+              command_fingerprint: fingerprint,
+            },
+          });
+        if (path === "/v1/refunds/re_requires_action")
+          return Response.json({
+            id: "re_requires_action",
+            amount: 2000,
+            currency: "usd",
+            status: "requires_action",
+            created: 2,
+            livemode: false,
+            metadata: {
+              support_case_id: caseId,
+              command_fingerprint: fingerprint,
+            },
+          });
+        throw new Error(
+          `Unexpected known-unknown request ${request.method} ${path}`,
+        );
+      });
+      const { app, caseStore, mastra, native, recoverApprovedNativeDecisions } =
+        await setup(caseId, undefined, undefined, undefined, {
+          providerBindings: syntheticStripeBindings(caseId),
+        });
+      const command = (await caseStore.getAction(
+        caseId,
+        "refund-command",
+        native.fingerprint,
+      )) as { fingerprint: string; idempotencyKey: string };
+      fingerprint = command.fingerprint;
+      await caseStore.recordApprovalDecision({
+        caseId,
+        turnId: native.turnId,
+        commandFingerprint: native.fingerprint,
+        principalId: "approver-demo",
+        approved: true,
+        nativeRunId: native.runId,
+        nativeToolCallId: native.toolCallId,
+      });
+      expect(
+        await recoverApprovedNativeDecisions(mastra, caseStore, {
+          disableScorers: true,
+        }),
+      ).toBe(1);
+      const followUp = await app.request(
+        `http://support.test/support/cases/${caseId}/follow-ups`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${issueLocalSession({ id: "customer-alex" })}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            body: "Please also confirm the renewal date.",
+          }),
+        },
+      );
+      expect(followUp.status).toBe(200);
+      const { reconcileStripeRefundAttempts } =
+        await import("../../src/mastra/providers/stripe/reconciliation");
+      if (ageExpires)
+        await caseStore.getClientForTests().execute({
+          sql: "UPDATE support_stripe_refund_attempts SET created_at = ? WHERE idempotency_key = ?",
+          args: [
+            new Date(Date.now() - 24 * 60 * 60 * 1_000 - 1).toISOString(),
+            command.idempotencyKey,
+          ],
+        });
+      for (let retry = 0; retry < (ageExpires ? 1 : 8); retry += 1) {
+        await caseStore.getClientForTests().execute({
+          sql: "UPDATE support_stripe_refund_attempts SET next_attempt_at = ? WHERE idempotency_key = ?",
+          args: [new Date(0).toISOString(), command.idempotencyKey],
+        });
+        await reconcileStripeRefundAttempts(caseStore);
+      }
+      expect(
+        await caseStore.stripeRefundAttempt(command.idempotencyKey),
+      ).toMatchObject({
+        status: "quarantined",
+        refundId: "re_requires_action",
+      });
+      const original = await caseStore.turn(caseId, native.turnId);
+      expect(original?.outcome).toMatchObject({ status: "escalated" });
+      expect((await caseStore.get(caseId))?.status).toBe("waiting_approval");
+      const before = await caseStore.getClientForTests().execute({
+        sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ?",
+        args: [caseId],
+      });
+      const signed = signedStripeEvent({
+        id: `evt_known_duplicate_${crypto.randomUUID()}`,
+        type: "refund.updated",
+        api_version: "2026-08-26.dahlia",
+        created: 2,
+        livemode: false,
+        data: { object: { id: "re_requires_action" } },
+      });
+      expect(
+        (
+          await app.request("http://support.test/support/webhooks/stripe", {
+            method: "POST",
+            headers: signed.headers,
+            body: signed.body,
+          })
+        ).status,
+      ).toBe(200);
+      await reconcileStripeRefundAttempts(caseStore);
+      const after = await caseStore.getClientForTests().execute({
+        sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ?",
+        args: [caseId],
+      });
+      expect(after.rows).toEqual(before.rows);
+    },
+  );
+
+  it.each(["owner-mismatch", "policy-change"])(
+    "does not POST Stripe when %s is discovered after native approval",
+    async (denial) => {
+      const caseId = `stripe-${denial}-${crypto.randomUUID()}`;
+      enableSyntheticStripe();
+      let posts = 0;
+      vi.stubGlobal("fetch", async (request: Request) => {
+        const path = new URL(request.url).pathname;
+        if (path === "/v1/account")
+          return Response.json({ id: "acct_test_123", livemode: false });
+        if (path === "/v1/customers")
+          return Response.json({
+            data: [{ id: "cus_1", email: "alex@example.com", livemode: false }],
+            has_more: false,
+          });
+        if (path === "/v1/checkout/sessions")
+          return Response.json({
+            data: [
+              {
+                id: "ORD-1001",
+                customer: "cus_1",
+                customer_details: { email: "alex@example.com" },
+                payment_intent: "pi_1",
+                status: "complete",
+                payment_status: "paid",
+                livemode: false,
+                created: 1,
+              },
+            ],
+            has_more: false,
+          });
+        if (path === "/v1/checkout/sessions/ORD-1001/line_items")
+          return Response.json({ data: [], has_more: false });
+        if (path === "/v1/payment_intents/pi_1")
+          return Response.json({
+            id: "pi_1",
+            amount_received: 102000,
+            currency: "usd",
+            status: "succeeded",
+            livemode: false,
+          });
+        if (path === "/v1/subscriptions")
+          return Response.json({ data: [], has_more: false });
+        if (path === "/v1/refunds" && request.method === "GET")
+          return Response.json({ data: [], has_more: false });
+        if (path === "/v1/refunds" && request.method === "POST") {
+          posts += 1;
+          throw new Error("POST must be denied");
+        }
+        throw new Error(
+          `Unexpected authorization Stripe request ${request.method} ${path}`,
+        );
+      });
+      const { caseStore, mastra, native, recoverApprovedNativeDecisions } =
+        await setup(caseId, undefined, undefined, undefined, {
+          providerBindings: syntheticStripeBindings(caseId),
+        });
+      await caseStore.recordApprovalDecision({
+        caseId,
+        turnId: native.turnId,
+        commandFingerprint: native.fingerprint,
+        principalId: "approver-demo",
+        approved: true,
+        nativeRunId: native.runId,
+        nativeToolCallId: native.toolCallId,
+      });
+      const current = await caseStore.get(caseId);
+      if (denial === "owner-mismatch")
+        await caseStore.update(caseId, {
+          metadata: {
+            ...(current!.metadata as Record<string, unknown>),
+            ownerId: "customer-jordan",
+          },
+        });
+      else
+        await caseStore.update(caseId, {
+          draft: {
+            ...current!.draft!,
+            requiresEscalation: true,
+            escalationReason: "Policy changed after approval.",
+          },
+        });
+      expect(
+        await recoverApprovedNativeDecisions(mastra, caseStore, {
+          disableScorers: true,
+        }),
+      ).toBe(0);
+      expect(posts).toBe(0);
+    },
+  );
+
+  it("keeps a replacement reconciliation claim authoritative at the native recovery first-effect fence", async () => {
+    const caseId = `stripe-recovery-final-fence-${crypto.randomUUID()}`;
+    enableSyntheticStripe();
+    let fingerprint = "";
+    const observed = {
+      posts: 0,
+      accountGets: 0,
+      gets: [] as string[],
+      keys: [] as string[],
+    };
+    let recoveryBarrier:
+      { started: () => void; release: Promise<void> } | undefined;
+    vi.stubGlobal(
+      "fetch",
+      nativeRefundStripeTransport({
+        caseId,
+        fingerprint: () => fingerprint,
+        observed,
+        firstPostThrows: true,
+        barrier: (path) =>
+          path === "/v1/account" ? recoveryBarrier : undefined,
+      }),
+    );
+    const { app, caseStore, native } = await setup(
+      caseId,
+      undefined,
+      undefined,
+      undefined,
+      { providerBindings: syntheticStripeBindings(caseId) },
+    );
+    const command = (await caseStore.getAction(
+      caseId,
+      "refund-command",
+      native.fingerprint,
+    )) as { fingerprint: string; idempotencyKey: string };
+    fingerprint = command.fingerprint;
+    expect(
+      (await approveNativeRefund(app, caseId, native.fingerprint)).status,
+    ).toBe(500);
+    expect(
+      await caseStore.stripeRefundAttempt(command.idempotencyKey),
+    ).toMatchObject({
+      status: "unknown",
+    });
+
+    // Recovery is a fresh process boundary. Re-registering the real Stripe
+    // registry makes its account verification a genuine awaited GET while
+    // retaining the same durable SQLite attempt and command.
+    const { resetProviderRegistryForTests, registerProviderRegistry } =
+      await import("../../src/mastra/providers/registry");
+    const { StripeProviderRegistry } =
+      await import("../../src/mastra/providers/stripe/registry");
+    const { stripeSandboxConfig } =
+      await import("../../src/mastra/providers/stripe/config");
+    const bindings = syntheticStripeBindings(caseId);
+    resetProviderRegistryForTests();
+    registerProviderRegistry(
+      new StripeProviderRegistry(stripeSandboxConfig()!),
+      [bindings.transactions],
+    );
+    let releaseAccount!: () => void;
+    let markAccountStarted!: () => void;
+    const accountStarted = new Promise<void>((resolve) => {
+      markAccountStarted = resolve;
+    });
+    recoveryBarrier = {
+      started: () => markAccountStarted(),
+      release: new Promise<void>((resolve) => {
+        releaseAccount = resolve;
+      }),
+    };
+    const { reconcileStripeRefundAttempts } =
+      await import("../../src/mastra/providers/stripe/reconciliation");
+    const staleRecovery = reconcileStripeRefundAttempts(caseStore);
+    await Promise.race([
+      accountStarted,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `recovery did not await account: ${JSON.stringify(observed)}`,
+              ),
+            ),
+          1_000,
+        ),
+      ),
+    ]);
+    const staleClaim = await caseStore.stripeRefundAttempt(
+      command.idempotencyKey,
+    );
+    expect(staleClaim?.reconcileLeaseToken).toEqual(expect.any(String));
+    const replacementToken = `replacement-${crypto.randomUUID()}`;
+    await caseStore.getClientForTests().execute({
+      sql: "UPDATE support_stripe_refund_attempts SET reconcile_lease_token = ?, reconcile_lease_until = ? WHERE idempotency_key = ?",
+      args: [
+        replacementToken,
+        new Date(Date.now() + 60_000).toISOString(),
+        command.idempotencyKey,
+      ],
+    });
+    releaseAccount();
+    expect(await staleRecovery).toBe(0);
+    expect({
+      postsAfterStaleClaim: observed.posts,
+      attempt: await caseStore.stripeRefundAttempt(command.idempotencyKey),
+      issued: await caseStore.idempotency(command.idempotencyKey),
+    }).toMatchObject({
+      postsAfterStaleClaim: 1,
+      attempt: { status: "unknown", reconcileLeaseToken: replacementToken },
+      issued: undefined,
+    });
+
+    recoveryBarrier = undefined;
+    await caseStore.getClientForTests().execute({
+      sql: "UPDATE support_stripe_refund_attempts SET reconcile_lease_until = ? WHERE idempotency_key = ?",
+      args: [new Date(0).toISOString(), command.idempotencyKey],
+    });
+    expect(await reconcileStripeRefundAttempts(caseStore)).toBe(1);
+    expect({
+      posts: observed.posts,
+      keys: observed.keys,
+      attempt: await caseStore.stripeRefundAttempt(command.idempotencyKey),
+      issued: await caseStore.idempotency(command.idempotencyKey),
+    }).toMatchObject({
+      posts: 2,
+      keys: [command.idempotencyKey, command.idempotencyKey],
+      attempt: { status: "succeeded" },
+      issued: expect.any(Object),
+    });
+  });
+
+  it("keeps a replacement claim authoritative for a prepared native recovery before its first POST", async () => {
+    const caseId = `stripe-prepared-recovery-fence-${crypto.randomUUID()}`;
+    enableSyntheticStripe();
+    let fingerprint = "";
+    const observed = {
+      posts: 0,
+      accountGets: 0,
+      gets: [] as string[],
+      keys: [] as string[],
+    };
+    let preflightBarrier:
+      { started: () => void; release: Promise<void> } | undefined;
+    let recoveryBarrier:
+      { started: () => void; release: Promise<void> } | undefined;
+    vi.stubGlobal(
+      "fetch",
+      nativeRefundStripeTransport({
+        caseId,
+        fingerprint: () => fingerprint,
+        observed,
+        barrier: (path) =>
+          path === "/v1/refunds"
+            ? preflightBarrier
+            : path === "/v1/account"
+              ? recoveryBarrier
+              : undefined,
+      }),
+    );
+    const { app, caseStore, native } = await setup(
+      caseId,
+      undefined,
+      undefined,
+      undefined,
+      { providerBindings: syntheticStripeBindings(caseId) },
+    );
+    const command = (await caseStore.getAction(
+      caseId,
+      "refund-command",
+      native.fingerprint,
+    )) as { fingerprint: string; idempotencyKey: string };
+    fingerprint = command.fingerprint;
+    let releasePreflight!: () => void;
+    let markPreflightStarted!: () => void;
+    const preflightStarted = new Promise<void>((resolve) => {
+      markPreflightStarted = resolve;
+    });
+    preflightBarrier = {
+      started: () => markPreflightStarted(),
+      release: new Promise<void>((resolve) => {
+        releasePreflight = resolve;
+      }),
+    };
+    const initialApproval = approveNativeRefund(
+      app,
+      caseId,
+      native.fingerprint,
+    );
+    await preflightStarted;
+    const dispatch = await caseStore.getClientForTests().execute({
+      sql: "SELECT id FROM support_dispatch WHERE case_id = ? AND turn_id = ? ORDER BY created_at DESC LIMIT 1",
+      args: [caseId, native.turnId],
+    });
+    await caseStore.getClientForTests().execute({
+      sql: "UPDATE support_dispatch SET lease_until = ? WHERE id = ?",
+      args: [new Date(0).toISOString(), dispatch.rows[0]!.id as string],
+    });
+    releasePreflight();
+    expect((await initialApproval).status).toBe(409);
+    expect(
+      await caseStore.stripeRefundAttempt(command.idempotencyKey),
+    ).toMatchObject({
+      status: "prepared",
+      stripeRequest: { paymentIntentId: "pi_1" },
+    });
+    expect(observed.posts).toBe(0);
+
+    const { resetProviderRegistryForTests, registerProviderRegistry } =
+      await import("../../src/mastra/providers/registry");
+    const { StripeProviderRegistry } =
+      await import("../../src/mastra/providers/stripe/registry");
+    const { stripeSandboxConfig } =
+      await import("../../src/mastra/providers/stripe/config");
+    resetProviderRegistryForTests();
+    registerProviderRegistry(
+      new StripeProviderRegistry(stripeSandboxConfig()!),
+      [syntheticStripeBindings(caseId).transactions],
+    );
+    let releaseAccount!: () => void;
+    let markAccountStarted!: () => void;
+    const accountStarted = new Promise<void>((resolve) => {
+      markAccountStarted = resolve;
+    });
+    recoveryBarrier = {
+      started: () => markAccountStarted(),
+      release: new Promise<void>((resolve) => {
+        releaseAccount = resolve;
+      }),
+    };
+    const { reconcileStripeRefundAttempts } =
+      await import("../../src/mastra/providers/stripe/reconciliation");
+    const staleRecovery = reconcileStripeRefundAttempts(caseStore);
+    await accountStarted;
+    const staleClaim = await caseStore.stripeRefundAttempt(
+      command.idempotencyKey,
+    );
+    const replacementToken = `replacement-${crypto.randomUUID()}`;
+    await caseStore.getClientForTests().execute({
+      sql: "UPDATE support_stripe_refund_attempts SET reconcile_lease_token = ?, reconcile_lease_until = ? WHERE idempotency_key = ?",
+      args: [
+        replacementToken,
+        new Date(Date.now() + 60_000).toISOString(),
+        command.idempotencyKey,
+      ],
+    });
+    releaseAccount();
+    expect(await staleRecovery).toBe(0);
+    expect({
+      staleToken: staleClaim?.reconcileLeaseToken,
+      posts: observed.posts,
+      attempt: await caseStore.stripeRefundAttempt(command.idempotencyKey),
+      issued: await caseStore.idempotency(command.idempotencyKey),
+    }).toMatchObject({
+      staleToken: expect.any(String),
+      posts: 0,
+      attempt: { status: "prepared", reconcileLeaseToken: replacementToken },
+      issued: undefined,
+    });
+    recoveryBarrier = undefined;
+    await caseStore.getClientForTests().execute({
+      sql: "UPDATE support_stripe_refund_attempts SET reconcile_lease_until = ? WHERE idempotency_key = ?",
+      args: [new Date(0).toISOString(), command.idempotencyKey],
+    });
+    expect(await reconcileStripeRefundAttempts(caseStore)).toBe(1);
+    expect({
+      posts: observed.posts,
+      keys: observed.keys,
+      attempt: await caseStore.stripeRefundAttempt(command.idempotencyKey),
+    }).toMatchObject({
+      posts: 1,
+      keys: [command.idempotencyKey],
+      attempt: { status: "succeeded" },
+    });
+  });
+
+  it("denies a registered cancellation when its dispatch is replaced during the final subscription preflight", async () => {
+    const caseId = `stripe-cancellation-final-fence-${crypto.randomUUID()}`;
+    enableSyntheticStripe();
+    const observed = {
+      posts: 0,
+      refundPosts: 0,
+      gets: [] as string[],
+      keys: [] as string[],
+      scheduled: false,
+      loseFirstPost: false,
+    };
+    let releaseSubscription!: () => void;
+    let markSubscriptionStarted!: () => void;
+    let subscriptionBarrier:
+      { started: () => void; release: Promise<void> } | undefined;
+    vi.stubGlobal(
+      "fetch",
+      cancellationStripeTransport(observed, (path) =>
+        path === "/v1/subscriptions/sub_cancel"
+          ? subscriptionBarrier
+          : undefined,
+      ),
+    );
+    const { caseStore, mastra } = await setup(
+      caseId,
+      undefined,
+      undefined,
+      undefined,
+      {
+        deferInitialWorkflow: true,
+        providerBindings: syntheticStripeBindings(caseId),
+        triage: {
+          intent: "cancellation",
+          urgency: "normal",
+          sentiment: "neutral",
+          requiresHumanReview: false,
+          confidence: 1,
+          rationale: "explicit cancellation",
+        },
+        message:
+          "Please cancel my subscription at the end of the period. I do not want a refund.",
+        responseModel: jsonModel({
+          draftResponse: "draft",
+          citedSources: ["subscription-cancellation-policy"],
+          recommendRefund: false,
+          requiresEscalation: false,
+        }) as never,
+      },
+    );
+    const dispatch = await caseStore.claimDispatchForStart(
+      caseId,
+      `workflow-${caseId}`,
+    );
+    expect(dispatch).toMatchObject({
+      id: expect.any(String),
+      leaseToken: expect.any(String),
+    });
+    await caseStore.markDispatchStarted(dispatch!.id, dispatch!.leaseToken);
+    const current = await caseStore.get(caseId);
+    await caseStore.update(caseId, {
+      workflowRunId: `workflow-${caseId}`,
+      metadata: {
+        ...(current!.metadata as Record<string, unknown>),
+        activeTurnId: dispatch!.turnId,
+      },
+    });
+    const subscriptionStarted = new Promise<void>((resolve) => {
+      markSubscriptionStarted = resolve;
+    });
+    subscriptionBarrier = {
+      started: () => markSubscriptionStarted(),
+      release: new Promise<void>((resolve) => {
+        releaseSubscription = resolve;
+      }),
+    };
+    const { withDispatchLeaseScope } =
+      await import("../../src/mastra/lib/dispatch-lease-scope");
+    const run = await mastra
+      .getWorkflow("resolveSupportCaseWorkflow")
+      .createRun({ runId: `workflow-${caseId}`, disableScorers: true });
+    const cancellationRun = withDispatchLeaseScope(
+      {
+        dispatchId: dispatch!.id,
+        caseId,
+        turnId: dispatch!.turnId,
+        leaseToken: dispatch!.leaseToken!,
+      },
+      () => run.start({ inputData: { caseId, turnId: dispatch!.turnId } }),
+    );
+    await Promise.race([
+      subscriptionStarted,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `cancellation did not reach final subscription GET: ${JSON.stringify(observed)}`,
+              ),
+            ),
+          1_000,
+        ),
+      ),
+    ]);
+    await caseStore.getClientForTests().execute({
+      sql: "UPDATE support_dispatch SET lease_token = ?, lease_until = ? WHERE id = ?",
+      args: [
+        `replacement-${crypto.randomUUID()}`,
+        new Date(Date.now() + 60_000).toISOString(),
+        dispatch!.id,
+      ],
+    });
+    releaseSubscription();
+    await cancellationRun;
+    const attempts = await caseStore.getClientForTests().execute({
+      sql: "SELECT status FROM support_subscription_cancellation_attempts WHERE case_id = ?",
+      args: [caseId],
+    });
+    const issued = await caseStore.getClientForTests().execute({
+      sql: "SELECT COUNT(*) AS total FROM support_idempotency",
+    });
+    expect({
+      posts: observed.posts,
+      refundPosts: observed.refundPosts,
+      keys: observed.keys,
+      attempt: attempts.rows[0],
+    }).toMatchObject({
+      posts: 0,
+      refundPosts: 0,
+      keys: [],
+      attempt: { status: "unknown" },
+    });
+    expect(Number((issued.rows[0] as { total: number }).total)).toBe(0);
+  });
+
+  it.each([
+    "dispatch-expired",
+    "dispatch-replaced",
+    "owner-replaced",
+    "turn-replaced",
+    "command-replaced",
+    "policy-rejected",
+  ] as const)(
+    "denies a registered native refund when $0 changes at the final Stripe preflight GET",
+    async (mutation) => {
+      const caseId = `stripe-final-fence-${mutation}-${crypto.randomUUID()}`;
+      enableSyntheticStripe();
+      let fingerprint = "";
+      const observed = {
+        posts: 0,
+        accountGets: 0,
+        gets: [] as string[],
+        keys: [] as string[],
+      };
+      let releaseAccount!: () => void;
+      let markAccountStarted!: () => void;
+      let accountBarrier:
+        { started: () => void; release: Promise<void> } | undefined;
+      vi.stubGlobal(
+        "fetch",
+        nativeRefundStripeTransport({
+          caseId,
+          fingerprint: () => fingerprint,
+          observed,
+          barrier: (path) =>
+            path === "/v1/refunds" ? accountBarrier : undefined,
+        }),
+      );
+      const { app, caseStore, native } = await setup(
+        caseId,
+        undefined,
+        undefined,
+        undefined,
+        {
+          providerBindings: syntheticStripeBindings(caseId),
+        },
+      );
+      fingerprint = (
+        (await caseStore.getAction(
+          caseId,
+          "refund-command",
+          native.fingerprint,
+        )) as { fingerprint: string }
+      ).fingerprint;
+      const accountStarted = new Promise<void>((resolve) => {
+        markAccountStarted = resolve;
+      });
+      accountBarrier = {
+        started: () => markAccountStarted(),
+        release: new Promise<void>((resolve) => {
+          releaseAccount = resolve;
+        }),
+      };
+      const staleApproval = approveNativeRefund(
+        app,
+        caseId,
+        native.fingerprint,
+      );
+      await Promise.race([
+        accountStarted,
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `native approval did not reach final preflight GET: ${JSON.stringify(observed)}`,
+                ),
+              ),
+            1_000,
+          ),
+        ),
+      ]);
+      const command = (await caseStore.getAction(
+        caseId,
+        "refund-command",
+        native.fingerprint,
+      )) as { idempotencyKey: string; reason: string };
+      const dispatch = await caseStore.getClientForTests().execute({
+        sql: "SELECT id, lease_token FROM support_dispatch WHERE case_id = ? AND turn_id = ? ORDER BY created_at DESC LIMIT 1",
+        args: [caseId, native.turnId],
+      });
+      expect(dispatch.rows[0]).toMatchObject({
+        id: expect.any(String),
+        lease_token: expect.any(String),
+      });
+      if (mutation === "dispatch-expired")
+        await caseStore.getClientForTests().execute({
+          sql: "UPDATE support_dispatch SET lease_until = ? WHERE id = ?",
+          args: [new Date(0).toISOString(), dispatch.rows[0]!.id as string],
+        });
+      else if (mutation === "dispatch-replaced")
+        await caseStore.getClientForTests().execute({
+          sql: "UPDATE support_dispatch SET lease_token = ?, lease_until = ? WHERE id = ?",
+          args: [
+            `replacement-${crypto.randomUUID()}`,
+            new Date(Date.now() + 60_000).toISOString(),
+            dispatch.rows[0]!.id as string,
+          ],
+        });
+      else if (mutation === "owner-replaced" || mutation === "turn-replaced") {
+        const current = await caseStore.get(caseId);
+        await caseStore.update(caseId, {
+          metadata: {
+            ...(current!.metadata as Record<string, unknown>),
+            ...(mutation === "owner-replaced"
+              ? { ownerId: "customer-replaced" }
+              : { activeTurnId: `turn-replaced-${crypto.randomUUID()}` }),
+          },
+        });
+      } else if (mutation === "command-replaced")
+        await caseStore.getClientForTests().execute({
+          sql: "UPDATE support_actions SET data = ? WHERE case_id = ? AND kind = 'refund-command' AND fingerprint = ?",
+          args: [
+            JSON.stringify({ ...command, reason: "replaced after preflight" }),
+            caseId,
+            native.fingerprint,
+          ],
+        });
+      else {
+        const current = await caseStore.get(caseId);
+        await caseStore.update(caseId, {
+          draft: {
+            ...current!.draft!,
+            requiresEscalation: true,
+            escalationReason:
+              "Policy replaced while Stripe preflight was held.",
+          },
+        });
+      }
+      releaseAccount();
+      expect([409, 500]).toContain((await staleApproval).status);
+      expect({
+        observed,
+        attempt: await caseStore.stripeRefundAttempt(command.idempotencyKey),
+        issued: await caseStore.idempotency(command.idempotencyKey),
+      }).toMatchObject({
+        observed: { posts: 0, accountGets: 1, keys: [] },
+        attempt: { status: "prepared" },
+        issued: undefined,
+      });
+    },
+  );
+
+  it.each([
+    ["succeeded", "resolved", "executed"],
+    ["failed", "escalated", "failed"],
+    ["canceled", "escalated", "failed"],
+  ] as const)(
+    "finalizes an immediate native Stripe %s Refund payload without livemode with its audit and outbox",
+    async (providerStatus, caseStatus, refundStatus) => {
+      const caseId = `stripe-immediate-${providerStatus}-${crypto.randomUUID()}`;
+      enableSyntheticStripe();
+      let fingerprint = "";
+      let posts = 0;
+      vi.stubGlobal("fetch", async (request: Request) => {
+        const path = new URL(request.url).pathname;
+        if (path === "/v1/account")
+          return Response.json({ id: "acct_test_123", livemode: false });
+        if (path === "/v1/customers")
+          return Response.json({
+            data: [{ id: "cus_1", email: "alex@example.com", livemode: false }],
+            has_more: false,
+          });
+        if (path === "/v1/checkout/sessions")
+          return Response.json({
+            data: [
+              {
+                id: "ORD-1001",
+                customer: "cus_1",
+                customer_details: { email: "alex@example.com" },
+                payment_intent: "pi_1",
+                status: "complete",
+                payment_status: "paid",
+                livemode: false,
+                created: 1,
+              },
+            ],
+            has_more: false,
+          });
+        if (path === "/v1/checkout/sessions/ORD-1001/line_items")
+          return Response.json({ data: [], has_more: false });
+        if (path === "/v1/payment_intents/pi_1")
+          return Response.json({
+            id: "pi_1",
+            amount_received: 102000,
+            currency: "usd",
+            status: "succeeded",
+            livemode: false,
+          });
+        if (path === "/v1/subscriptions")
+          return Response.json({ data: [], has_more: false });
+        if (path === "/v1/refunds" && request.method === "GET")
+          return Response.json({ data: [], has_more: false });
+        if (path === "/v1/refunds" && request.method === "POST") {
+          posts += 1;
+          return Response.json({
+            id: `re_${providerStatus}`,
+            amount: 2000,
+            currency: "usd",
+            status: providerStatus,
+            created: 2,
+            metadata: {
+              support_case_id: caseId,
+              command_fingerprint: fingerprint,
+            },
+          });
+        }
+        throw new Error(
+          `Unexpected immediate Stripe request ${request.method} ${path}`,
+        );
+      });
+      const { caseStore, mastra, native, recoverApprovedNativeDecisions } =
+        await setup(caseId, undefined, undefined, undefined, {
+          providerBindings: syntheticStripeBindings(caseId),
+        });
+      fingerprint = (
+        (await caseStore.getAction(
+          caseId,
+          "refund-command",
+          native.fingerprint,
+        )) as { fingerprint: string }
+      ).fingerprint;
+      await caseStore.recordApprovalDecision({
+        caseId,
+        turnId: native.turnId,
+        commandFingerprint: native.fingerprint,
+        principalId: "approver-demo",
+        approved: true,
+        nativeRunId: native.runId,
+        nativeToolCallId: native.toolCallId,
+      });
+      expect(
+        await recoverApprovedNativeDecisions(mastra, caseStore, {
+          disableScorers: true,
+        }),
+      ).toBe(1);
+      expect(posts).toBe(1);
+      expect(await caseStore.get(caseId)).toMatchObject({
+        status: caseStatus,
+        refundResult: { status: refundStatus },
+      });
+      const outbox = await caseStore.getClientForTests().execute({
+        sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ?",
+        args: [caseId],
+      });
+      expect(Number((outbox.rows[0] as { total: number }).total)).toBe(1);
+      if (refundStatus === "failed") {
+        const audit = await caseStore.getAction(
+          caseId,
+          "refund-failure",
+          native.fingerprint,
+        );
+        expect(audit).toMatchObject({ classification: "confirmed-failed" });
+      }
+    },
+  );
+
+  it.each(["preflight", "post-4xx"] as const)(
+    "terminalizes a deterministic Stripe refund %s without reconciliation work",
+    async (failure) => {
+      const caseId = `stripe-no-effect-${failure}-${crypto.randomUUID()}`;
+      enableSyntheticStripe();
+      let posts = 0;
+      let refundGets = 0;
+      let denyPreflight = false;
+      vi.stubGlobal("fetch", async (request: Request) => {
+        const path = new URL(request.url).pathname;
+        if (path === "/v1/account")
+          return Response.json({ id: "acct_test_123", livemode: false });
+        if (path === "/v1/customers")
+          return Response.json({
+            data: [{ id: "cus_1", email: "alex@example.com", livemode: false }],
+            has_more: false,
+          });
+        if (path === "/v1/checkout/sessions")
+          return Response.json({
+            data: [
+              {
+                id: "ORD-1001",
+                customer: "cus_1",
+                customer_details: { email: "alex@example.com" },
+                payment_intent: "pi_1",
+                status: "complete",
+                payment_status: "paid",
+                livemode: false,
+                created: 1,
+              },
+            ],
+            has_more: false,
+          });
+        if (path === "/v1/checkout/sessions/ORD-1001/line_items")
+          return Response.json({ data: [], has_more: false });
+        if (path === "/v1/payment_intents/pi_1")
+          return Response.json({
+            id: "pi_1",
+            amount_received: 102000,
+            currency: "usd",
+            status: "succeeded",
+            livemode: false,
+          });
+        if (path === "/v1/subscriptions")
+          return Response.json({ data: [], has_more: false });
+        if (path === "/v1/refunds" && request.method === "GET") {
+          refundGets += 1;
+          if (failure === "preflight" && denyPreflight)
+            return Response.json({ error: "synthetic" }, { status: 400 });
+          return Response.json({ data: [], has_more: false });
+        }
+        if (path === "/v1/refunds" && request.method === "POST") {
+          posts += 1;
+          return Response.json({ error: "synthetic" }, { status: 400 });
+        }
+        throw new Error(`Unexpected no-effect Stripe request ${path}`);
+      });
+      const { caseStore, mastra, native, recoverApprovedNativeDecisions } =
+        await setup(caseId, undefined, undefined, undefined, {
+          providerBindings: syntheticStripeBindings(caseId),
+        });
+      const command = (await caseStore.getAction(
+        caseId,
+        "refund-command",
+        native.fingerprint,
+      )) as { idempotencyKey: string };
+      denyPreflight = true;
+      await caseStore.recordApprovalDecision({
+        caseId,
+        turnId: native.turnId,
+        commandFingerprint: native.fingerprint,
+        principalId: "approver-demo",
+        approved: true,
+        nativeRunId: native.runId,
+        nativeToolCallId: native.toolCallId,
+      });
+      await recoverApprovedNativeDecisions(mastra, caseStore, {
+        disableScorers: true,
+      });
+      const callsAfterEffect = { posts, refundGets };
+      const { reconcileStripeRefundAttempts } =
+        await import("../../src/mastra/providers/stripe/reconciliation");
+      expect(await reconcileStripeRefundAttempts(caseStore)).toBe(0);
+      await recoverApprovedNativeDecisions(mastra, caseStore, {
+        disableScorers: true,
+      });
+      expect({
+        callsAfterEffect,
+        callsAfterRecovery: { posts, refundGets },
+        attempt: await caseStore.stripeRefundAttempt(command.idempotencyKey),
+        case: await caseStore.get(caseId),
+        audit: await caseStore.getAction(
+          caseId,
+          "refund-failure",
+          native.fingerprint,
+        ),
+      }).toMatchObject({
+        callsAfterEffect: {
+          posts: failure === "post-4xx" ? 1 : 0,
+        },
+        callsAfterRecovery: callsAfterEffect,
+        attempt: { status: "failed", providerStatus: "confirmed-no-effect" },
+        case: { status: "escalated" },
+        audit: { classification: "confirmed-no-effect" },
+      });
+      const outbox = await caseStore.getClientForTests().execute({
+        sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ?",
+        args: [caseId],
+      });
+      expect(Number((outbox.rows[0] as { total: number }).total)).toBe(1);
+    },
+  );
+
+  it("reuses one persisted Stripe payment target and idempotency key after a lost POST response, and quarantines after expiry", async () => {
+    const caseId = `stripe-lost-response-${crypto.randomUUID()}`;
+    enableSyntheticStripe();
+    let fingerprint = "";
+    let remoteBalance = 102000;
+    let posts = 0;
+    const observed: Array<{ key: string | null; target: string | null }> = [];
+    vi.stubGlobal("fetch", async (request: Request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/v1/account")
+        return Response.json({ id: "acct_test_123", livemode: false });
+      if (path === "/v1/customers")
+        return Response.json({
+          data: [{ id: "cus_1", email: "alex@example.com", livemode: false }],
+          has_more: false,
+        });
+      if (path === "/v1/checkout/sessions")
+        return Response.json({
+          data: [
+            {
+              id: "ORD-1001",
+              customer: "cus_1",
+              customer_details: { email: "alex@example.com" },
+              payment_intent: "pi_original",
+              status: "complete",
+              payment_status: "paid",
+              livemode: false,
+              created: 1,
+            },
+          ],
+          has_more: false,
+        });
+      if (path === "/v1/checkout/sessions/ORD-1001/line_items")
+        return Response.json({ data: [], has_more: false });
+      if (path === "/v1/payment_intents/pi_original")
+        return Response.json({
+          id: "pi_original",
+          amount_received: remoteBalance,
+          currency: "usd",
+          status: "succeeded",
+          livemode: false,
+        });
+      if (path === "/v1/subscriptions")
+        return Response.json({ data: [], has_more: false });
+      if (path === "/v1/refunds" && request.method === "GET")
+        return Response.json({ data: [], has_more: false });
+      if (path === "/v1/refunds" && request.method === "POST") {
+        posts += 1;
+        const body = new URLSearchParams(await request.text());
+        observed.push({
+          key: request.headers.get("idempotency-key"),
+          target: body.get("payment_intent"),
+        });
+        remoteBalance -= 2000;
+        if (posts === 1) throw new Error("response lost after remote commit");
+        return Response.json({
+          id: "re_recovered",
+          amount: 2000,
+          currency: "usd",
+          status: "succeeded",
+          created: 2,
+          livemode: false,
+          metadata: {
+            support_case_id: caseId,
+            command_fingerprint: fingerprint,
+          },
+        });
+      }
+      throw new Error(
+        `Unexpected lost-response Stripe request ${request.method} ${path}`,
+      );
+    });
+    const { caseStore, mastra, native, recoverApprovedNativeDecisions } =
+      await setup(caseId, undefined, undefined, undefined, {
+        providerBindings: syntheticStripeBindings(caseId),
+      });
+    const command = (await caseStore.getAction(
+      caseId,
+      "refund-command",
+      native.fingerprint,
+    )) as { fingerprint: string; idempotencyKey: string };
+    fingerprint = command.fingerprint;
+    await caseStore.recordApprovalDecision({
+      caseId,
+      turnId: native.turnId,
+      commandFingerprint: native.fingerprint,
+      principalId: "approver-demo",
+      approved: true,
+      nativeRunId: native.runId,
+      nativeToolCallId: native.toolCallId,
+    });
+    expect(
+      await recoverApprovedNativeDecisions(mastra, caseStore, {
+        disableScorers: true,
+      }),
+    ).toBe(0);
+    const attempt = await caseStore.stripeRefundAttempt(command.idempotencyKey);
+    expect(attempt).toMatchObject({
+      status: "unknown",
+      stripeRequest: { paymentIntentId: "pi_original" },
+    });
+    const { reconcileStripeRefundAttempts } =
+      await import("../../src/mastra/providers/stripe/reconciliation");
+    expect(await reconcileStripeRefundAttempts(caseStore)).toBe(1);
+    expect(observed).toEqual([
+      { key: command.idempotencyKey, target: "pi_original" },
+      { key: command.idempotencyKey, target: "pi_original" },
+    ]);
+    const recovered = await caseStore.stripeRefundAttempt(
+      command.idempotencyKey,
+    );
+    await caseStore.getClientForTests().execute({
+      sql: "UPDATE support_stripe_refund_attempts SET status = 'unknown', refund_id = NULL, created_at = ?, next_attempt_at = ? WHERE idempotency_key = ?",
+      args: [
+        new Date(0).toISOString(),
+        new Date(0).toISOString(),
+        command.idempotencyKey,
+      ],
+    });
+    expect(await reconcileStripeRefundAttempts(caseStore)).toBe(0);
+    expect(
+      await caseStore.stripeRefundAttempt(command.idempotencyKey),
+    ).toMatchObject({ status: "quarantined" });
+    expect(posts).toBe(2);
+    expect(recovered).toMatchObject({ status: "succeeded" });
+  });
+
+  it("recovers a lost native Stripe cancellation after a SQLite restart without replacing a newer turn", async () => {
+    const caseId = `cancel-restart-${crypto.randomUUID()}`;
+    enableSyntheticStripe();
+    const observed = {
+      posts: 0,
+      gets: [] as string[],
+      keys: [] as string[],
+      scheduled: false,
+      loseFirstPost: true,
+    };
+    vi.stubGlobal("fetch", cancellationStripeTransport(observed));
+    const cancellationOptions = {
+      providerBindings: syntheticStripeBindings(caseId),
+      triage: {
+        intent: "cancellation",
+        urgency: "normal",
+        sentiment: "neutral",
+        requiresHumanReview: false,
+        confidence: 1,
+        rationale: "explicit no-refund cancellation",
+      },
+      message:
+        "Please cancel my subscription at the end of the period. I do not want a refund.",
+      responseModel: jsonModel({
+        draftResponse: "draft",
+        citedSources: ["subscription-cancellation-policy"],
+        recommendRefund: false,
+        requiresEscalation: false,
+      }) as never,
+      allowInitialWorkflowFailure: true,
+    };
+    const initial = await setup(
+      caseId,
+      undefined,
+      undefined,
+      undefined,
+      cancellationOptions,
+    );
+    const databasePath = initial.databasePath;
+    const initialTurn = (await initial.caseStore.turns(caseId))[0]!;
+    const commandRow = await initial.caseStore.getClientForTests().execute({
+      sql: "SELECT idempotency_key, subscription_id, status FROM support_subscription_cancellation_attempts WHERE case_id = ?",
+      args: [caseId],
+    });
+    expect(commandRow.rows[0]).toMatchObject({
+      subscription_id: "sub_cancel",
+      status: "unknown",
+    });
+    expect(observed.posts).toBe(1);
+    const initialOutbox = await initial.caseStore.getClientForTests().execute({
+      sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ?",
+      args: [caseId],
+    });
+    const initialOutboxCount = Number(
+      (initialOutbox.rows[0] as { total: number }).total,
+    );
+    await initial.mastra.shutdown();
+
+    // A new customer message gets its own durable turn before the former
+    // process restarts. Cancellation recovery owns the original turn only.
+    const reopened = await setup(caseId, undefined, undefined, undefined, {
+      ...cancellationOptions,
+      databasePath,
+      existingCase: true,
+    });
+    const followUp = await reopened.caseStore.appendFollowUp({
+      caseId,
+      eventId: `cancel-follow-up-${crypto.randomUUID()}`,
+      runId: `cancel-follow-up-run-${crypto.randomUUID()}`,
+      message: {
+        id: `cancel-follow-up-message-${crypto.randomUUID()}`,
+        author: "customer",
+        body: "Can you also send me a renewal-date reminder?",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    expect(followUp.appended).toBe(true);
+    const { reconcileUnknownSubscriptionCancellations } =
+      await import("../../src/mastra/providers/stripe/cancellation-reconciliation");
+    const firstRecovery = await reconcileUnknownSubscriptionCancellations(
+      reopened.caseStore,
+    );
+    const secondRecovery = await reconcileUnknownSubscriptionCancellations(
+      reopened.caseStore,
+    );
+    const recoveredCase = await reopened.caseStore.get(caseId);
+    const originalTurn = await reopened.caseStore.turn(caseId, initialTurn.id);
+    const outbox = await reopened.caseStore.getClientForTests().execute({
+      sql: "SELECT originating_turn_id FROM support_outbox WHERE case_id = ? ORDER BY created_at, id",
+      args: [caseId],
+    });
+    const durableEffect = await reopened.caseStore.idempotency(
+      String(
+        (commandRow.rows[0] as { idempotency_key: string }).idempotency_key,
+      ),
+    );
+    expect({
+      firstRecovery,
+      secondRecovery,
+      posts: observed.posts,
+      exactRecoveryGets: observed.gets.filter(
+        (path) => path === "/v1/subscriptions/sub_cancel",
+      ).length,
+      keys: observed.keys,
+      durableEffect: durableEffect?.effect,
+      originalOutcome: originalTurn?.outcome?.status,
+      newerTurn: recoveredCase
+        ? (recoveredCase.metadata as Record<string, unknown>).pendingTurnId
+        : undefined,
+      currentStatus: recoveredCase?.status,
+      recoveryOutbox: outbox.rows.slice(initialOutboxCount),
+    }).toMatchObject({
+      firstRecovery: 1,
+      secondRecovery: 0,
+      posts: 1,
+      exactRecoveryGets: 2,
+      keys: [expect.stringMatching(new RegExp(`^cancel:${caseId}:`))],
+      durableEffect: {
+        subscriptionId: "sub_cancel",
+        cancelAtPeriodEnd: true,
+      },
+      originalOutcome: "resolved",
+      newerTurn: followUp.turnId,
+      currentStatus: "new",
+      recoveryOutbox: [{ originating_turn_id: initialTurn.id }],
+    });
+  });
+
+  it("quarantines an unconfirmed cancellation older than 24 hours with one durable staff escalation", async () => {
+    const caseId = `cancel-expired-${crypto.randomUUID()}`;
+    enableSyntheticStripe();
+    const observed = {
+      posts: 0,
+      gets: [] as string[],
+      keys: [] as string[],
+      scheduled: false,
+      loseFirstPost: true,
+    };
+    vi.stubGlobal("fetch", cancellationStripeTransport(observed));
+    const { caseStore } = await setup(caseId, undefined, undefined, undefined, {
+      providerBindings: syntheticStripeBindings(caseId),
+      triage: {
+        intent: "cancellation",
+        urgency: "normal",
+        sentiment: "neutral",
+        requiresHumanReview: false,
+        confidence: 1,
+        rationale: "explicit no-refund cancellation",
+      },
+      message:
+        "Please cancel my subscription at the end of the period. I do not want a refund.",
+      responseModel: jsonModel({
+        draftResponse: "draft",
+        citedSources: ["subscription-cancellation-policy"],
+        recommendRefund: false,
+        requiresEscalation: false,
+      }) as never,
+      allowInitialWorkflowFailure: true,
+    });
+    const attempt = await caseStore.getClientForTests().execute({
+      sql: "SELECT idempotency_key, fingerprint FROM support_subscription_cancellation_attempts WHERE case_id = ?",
+      args: [caseId],
+    });
+    const initialOutbox = await caseStore.getClientForTests().execute({
+      sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ?",
+      args: [caseId],
+    });
+    const initialOutboxCount = Number(
+      (initialOutbox.rows[0] as { total: number }).total,
+    );
+    await caseStore.getClientForTests().execute({
+      sql: "UPDATE support_subscription_cancellation_attempts SET created_at = ? WHERE idempotency_key = ?",
+      args: [
+        new Date(Date.now() - 24 * 60 * 60 * 1_000 - 1).toISOString(),
+        (attempt.rows[0] as { idempotency_key: string }).idempotency_key,
+      ],
+    });
+    const { reconcileUnknownSubscriptionCancellations } =
+      await import("../../src/mastra/providers/stripe/cancellation-reconciliation");
+    await reconcileUnknownSubscriptionCancellations(caseStore);
+    await reconcileUnknownSubscriptionCancellations(caseStore);
+    const expired = await caseStore.getClientForTests().execute({
+      sql: "SELECT status FROM support_subscription_cancellation_attempts WHERE idempotency_key = ?",
+      args: [(attempt.rows[0] as { idempotency_key: string }).idempotency_key],
+    });
+    const audit = await caseStore.getAction(
+      caseId,
+      "subscription-cancellation-failure",
+      (attempt.rows[0] as { fingerprint: string }).fingerprint,
+    );
+    const outbox = await caseStore.getClientForTests().execute({
+      sql: "SELECT originating_turn_id, status FROM support_outbox WHERE case_id = ? ORDER BY created_at, id",
+      args: [caseId],
+    });
+    expect({
+      posts: observed.posts,
+      attempt: expired.rows[0],
+      case: await caseStore.get(caseId),
+      audit,
+      recoveryOutbox: outbox.rows.slice(initialOutboxCount),
+    }).toMatchObject({
+      posts: 1,
+      attempt: { status: "quarantined" },
+      case: {
+        status: "escalated",
+        escalationReason: expect.stringMatching(/could not be confirmed/i),
+      },
+      audit: { classification: "unconfirmed-expired" },
+      recoveryOutbox: [{ status: "escalated" }],
+    });
   });
 });
 
