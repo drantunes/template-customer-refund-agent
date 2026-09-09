@@ -1,5 +1,9 @@
 import type { ContextWithMastra } from "@mastra/core/server";
-import type { SupportCase } from "../domain/support-case";
+import {
+  staffCaseMetadataSchema,
+  type PublicSupportCase,
+  type SupportCase,
+} from "../domain/support-case";
 import { hasRole, principalFromHeaders, type SupportPrincipal } from "./auth";
 import { canAccessCase } from "./auth";
 import { errorResponseSchema } from "./contracts";
@@ -52,8 +56,7 @@ export function caseScope(
 export function scopedCaseDto(
   supportCase: SupportCase,
   current: SupportPrincipal,
-): SupportCase {
-  const metadata = supportCase.metadata as Record<string, unknown>;
+): PublicSupportCase {
   if (hasRole(current, "customer"))
     return {
       id: supportCase.id,
@@ -69,14 +72,12 @@ export function scopedCaseDto(
       updatedAt: supportCase.updatedAt,
       feedback: supportCase.feedback,
       metadata: {},
-    };
-  const command = metadata.refundCommand as
-    { fingerprint?: unknown } | undefined;
+    } as PublicSupportCase;
+  const command = supportCase.metadata.refundCommand;
   return {
     ...supportCase,
-    metadata:
-      typeof command?.fingerprint === "string"
-        ? { refundCommand: { fingerprint: command.fingerprint } }
-        : {},
-  };
+    metadata: staffCaseMetadataSchema.parse(
+      command ? { refundCommand: { fingerprint: command.fingerprint } } : {},
+    ),
+  } as PublicSupportCase;
 }

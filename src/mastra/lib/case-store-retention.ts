@@ -1,17 +1,20 @@
 import type { Client } from "@libsql/client";
-import type { SupportCase } from "../domain/support-case";
+import type { SupportCase } from "../domain/support-case.ts";
 import {
-  parse,
+  parseLegacyCase,
   financialRetentionTombstone,
   caseBinding,
   retentionPolicyFromEnvironment,
   StaleCaseWriteError,
-  RetentionPolicy,
-  RetentionResult,
-} from "./case-store-shared";
+} from "./case-store-shared.ts";
+import type { RetentionPolicy, RetentionResult } from "./case-store-shared.ts";
 
 export class CaseStoreRetention {
-  constructor(private readonly client: Client) {}
+  private readonly client: Client;
+
+  constructor(client: Client) {
+    this.client = client;
+  }
   async enforceRetention(
     clock: () => Date = () => new Date(),
     policy: RetentionPolicy = retentionPolicyFromEnvironment(),
@@ -49,6 +52,7 @@ export class CaseStoreRetention {
     let dispatchesExpired = 0;
     let decisionsRedacted = 0;
     let actionsRedacted = 0;
+    let feedbackDeleted = 0;
     let auditPayloadsRedacted = 0;
     let financialReasonsRedacted = 0;
     let pendingCasesExpired = 0;
@@ -56,7 +60,9 @@ export class CaseStoreRetention {
     const expiredWorkflowRunIds = new Set<string>();
     for (const row of rows.rows) {
       const id = String(row.id);
-      const supportCase = parse(row as Record<string, unknown>);
+      // Historical contaminated tombstones must be readable only long enough
+      // for this repair path to redact them into the current retained shape.
+      const supportCase = parseLegacyCase(row as Record<string, unknown>);
       const acceptedAt = String(row.accepted_at ?? row.created_at);
       const metadata = { ...supportCase.metadata };
       // A prior supported-storage delete may have failed after this durable
@@ -110,8 +116,7 @@ export class CaseStoreRetention {
         const wasPending = ["new", "processing", "waiting_approval"].includes(
           supportCase.status,
         );
-        const command = metadata.refundCommand as
-          { fingerprint?: unknown; idempotencyKey?: unknown } | undefined;
+        const command = metadata.refundCommand;
         updated = {
           ...updated,
           customer: { email: "redacted@invalid.local" },
@@ -164,8 +169,7 @@ export class CaseStoreRetention {
         expiredCaseIds.add(id);
         if (supportCase.workflowRunId)
           expiredWorkflowRunIds.add(supportCase.workflowRunId);
-        const nativeApproval = metadata.nativeApproval as
-          { runId?: unknown } | undefined;
+        const nativeApproval = metadata.nativeApproval;
         if (typeof nativeApproval?.runId === "string")
           expiredWorkflowRunIds.add(nativeApproval.runId);
         const dispatchedRuns = await this.client.execute({
@@ -238,10 +242,11 @@ export class CaseStoreRetention {
             actionsRedacted += Number(actions.rowsAffected ?? 0);
             // Ratings/comments are customer content. Aggregates only include
             // retained feedback; a tombstoned case cannot retain its rating.
-            await tx.execute({
+            const feedback = await tx.execute({
               sql: "DELETE FROM support_feedback WHERE case_id = ?",
               args: [id],
             });
+            feedbackDeleted += Number(feedback.rowsAffected ?? 0);
           }
           await tx.commit();
         } catch (error) {
@@ -312,6 +317,7 @@ export class CaseStoreRetention {
       dispatchesExpired,
       decisionsRedacted,
       actionsRedacted,
+      feedbackDeleted,
       auditPayloadsRedacted,
       financialReasonsRedacted,
       // Mastra owns its tables. The configured LibSQLStore retention policy

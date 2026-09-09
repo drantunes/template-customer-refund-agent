@@ -23,6 +23,8 @@ export const retrievePolicyStep = createStep({
       inputData.turnId,
     );
     const bindings = bindingsForPersistedCase(supportCase);
+    if (!supportCase.metadata.ownerId)
+      throw new Error("The active support case is missing its owner.");
     const queryText =
       `${supportCase.triage?.intent ?? ""} ${supportCase.subject} ${turn.message!.body}`.trim();
     if (!mastra)
@@ -42,8 +44,7 @@ export const retrievePolicyStep = createStep({
     const result = await withTrustedCaseReadScope(
       {
         caseId: supportCase.id,
-        ownerId: (supportCase.metadata as Record<string, unknown>)
-          .ownerId as string,
+        ownerId: supportCase.metadata.ownerId,
         tenantId: bindings.knowledge.tenantId,
       },
       () =>

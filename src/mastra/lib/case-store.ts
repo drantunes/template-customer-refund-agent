@@ -674,7 +674,7 @@ export class CaseStore {
     return this.cancellation.finalizeUnknownSubscriptionCancellation(input);
   }
 
-  getClientForTests() {
+  getClient() {
     return this.client;
   }
 }

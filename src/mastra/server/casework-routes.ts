@@ -329,8 +329,7 @@ export const supportCaseFeedbackRoute = registerApiRoute(
         feedback,
       });
       const updated =
-        (supportCase.metadata as Record<string, unknown>).activeTurnId ===
-        ratedTurn.id
+        supportCase.metadata.activeTurnId === ratedTurn.id
           ? await caseStore.update(caseId, { feedback: persistedFeedback })
           : supportCase;
 

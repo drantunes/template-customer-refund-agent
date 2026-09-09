@@ -79,7 +79,7 @@ async function loadDeterministicRuntime() {
   const refundModels = new Map<string, DeterministicRefundModel>();
   const resolveRefundModel = async () => {
     const action = await caseStore
-      .getClientForTests()
+      .getClient()
       .execute(
         "SELECT data FROM support_actions WHERE kind = 'refund-command' ORDER BY created_at DESC LIMIT 1",
       );
@@ -509,7 +509,7 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
       commandFingerprint: fingerprint,
     });
     const effects = await runtime.caseStore
-      .getClientForTests()
+      .getClient()
       .execute(
         "SELECT COUNT(*) AS count FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?",
         ["local-demo", "local-demo"],
@@ -645,7 +645,7 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
       },
     );
     const effectsAfterRejection = await runtime.caseStore
-      .getClientForTests()
+      .getClient()
       .execute(
         "SELECT COUNT(*) AS count FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?",
         ["local-demo", "local-demo"],

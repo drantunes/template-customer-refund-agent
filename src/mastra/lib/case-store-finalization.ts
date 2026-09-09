@@ -58,10 +58,7 @@ export class CaseStoreFinalization {
       const row = rowResult.rows[0];
       if (!row) throw new Error(`Support case not found: ${input.caseId}`);
       const current = parse(row as Record<string, unknown>);
-      if (
-        (current.metadata as Record<string, unknown>).activeTurnId !==
-        input.turnId
-      )
+      if (current.metadata.activeTurnId !== input.turnId)
         throw new StaleCaseWriteError(input.caseId);
       const lease = activeDispatchLeaseScope();
       if (lease) {

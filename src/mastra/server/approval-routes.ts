@@ -65,13 +65,7 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
 
   const mastra = c.get("mastra");
   const resolveWorkflow = mastra.getWorkflow("resolveSupportCaseWorkflow");
-  const command = (supportCase.metadata as Record<string, unknown>)
-    .refundCommand as
-    | {
-        fingerprint?: string;
-        idempotencyKey?: string;
-      }
-    | undefined;
+  const command = supportCase.metadata.refundCommand;
   if (!command?.fingerprint)
     return c.json(
       errorResponseSchema.parse({
@@ -86,15 +80,7 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
       }),
       409,
     );
-  const native = (supportCase.metadata as Record<string, unknown>)
-    .nativeApproval as
-    | {
-        runId?: string;
-        toolCallId?: string;
-        fingerprint?: string;
-        turnId?: string;
-      }
-    | undefined;
+  const native = supportCase.metadata.nativeApproval;
   if (
     !native?.runId ||
     !native.toolCallId ||
@@ -218,16 +204,7 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
         supportCase: currentCase ?? supportCase,
         dispatch,
         fingerprint: command.fingerprint,
-        command: (currentCase?.metadata as Record<string, unknown> | undefined)
-          ?.refundCommand as
-          | {
-              orderId?: string;
-              idempotencyKey?: string;
-              fingerprint?: string;
-              amount?: number;
-              currency?: string;
-            }
-          | undefined,
+        command: currentCase?.metadata.refundCommand,
       });
       const pendingStripeAttempt =
         !reconciled &&

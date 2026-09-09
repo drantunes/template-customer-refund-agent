@@ -947,7 +947,7 @@ describe("configured Mastra built-in API authorization", () => {
       summaryB.telemetry.providerCalls.map((item) => item.operation),
     ).not.toContain("knowledge.list_changed");
     expect(
-      await caseStore.getClientForTests().execute({
+      await caseStore.getClient().execute({
         sql: "SELECT state, attempts FROM support_outbox WHERE id = ?",
         args: ["tenant-b-retry-delivery"],
       }),
@@ -1080,7 +1080,7 @@ describe("configured Mastra built-in API authorization", () => {
         runId,
       );
       const turn = (await caseStore.turns(id))[0]!;
-      await caseStore.getClientForTests().execute({
+      await caseStore.getClient().execute({
         sql: "UPDATE support_turns SET state = 'resolved', run_id = ?, outcome_data = ? WHERE id = ?",
         args: [
           runId,

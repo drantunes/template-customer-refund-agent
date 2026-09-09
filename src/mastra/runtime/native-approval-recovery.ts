@@ -90,8 +90,7 @@ export async function reconcileApprovedRefundEffect(input: {
         metadata: {
           ...supportCase.metadata,
           refundEffects: {
-            ...((supportCase.metadata as Record<string, unknown>)
-              .refundEffects as Record<string, unknown> | undefined),
+            ...supportCase.metadata.refundEffects,
             [fingerprint]: reconciled,
           },
         },
@@ -156,8 +155,7 @@ export async function recoverApprovedNativeDecisions(
       item.turnId,
     );
     if (!dispatch || !item.workflowRunId) continue;
-    const command = (item.supportCase.metadata as Record<string, unknown>)
-      .refundCommand as PersistedRefundCommand | undefined;
+    const command = item.supportCase.metadata.refundCommand;
     const lease = renewDispatchLeaseWhileRunning(store, dispatch);
     try {
       await lease.renew();

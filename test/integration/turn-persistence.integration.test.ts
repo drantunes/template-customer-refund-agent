@@ -141,7 +141,12 @@ describe("per-turn conversation persistence", () => {
       metadata: {
         ...(await store.get("case-turns"))!.metadata,
         activeTurnId: firstTurn.id,
-        nativeApproval: { turnId: firstTurn.id, fingerprint: firstFingerprint },
+        nativeApproval: {
+          runId: "native-run-first",
+          toolCallId: "native-call-first",
+          turnId: firstTurn.id,
+          fingerprint: firstFingerprint,
+        },
       },
     });
     await store.recordApprovalDecision({
@@ -181,6 +186,8 @@ describe("per-turn conversation persistence", () => {
         ...(await store.get("case-turns"))!.metadata,
         activeTurnId: secondTurn.id,
         nativeApproval: {
+          runId: "native-run-second",
+          toolCallId: "native-call-second",
           turnId: secondTurn.id,
           fingerprint: secondFingerprint,
         },
@@ -208,13 +215,26 @@ describe("per-turn conversation persistence", () => {
     const [firstTurn] = await store.turns("case-turns");
     await store.update("case-turns", {
       status: "escalated",
-      draft: { draftResponse: "Staff must investigate.", citedSources: [] },
+      draft: {
+        draftResponse: "Staff must investigate.",
+        citedSources: [],
+        recommendRefund: false,
+        requiresEscalation: true,
+      },
       escalationReason: "Policy requires staff review.",
       finalResponse: "We escalated your case.",
       metadata: {
         ...(await store.get("case-turns"))!.metadata,
         activeTurnId: firstTurn.id,
-        refundCommand: { fingerprint: "terminal-command" },
+        refundCommand: {
+          approvalCaseId: "case-turns",
+          orderId: "ORD-terminal",
+          amount: 20,
+          currency: "USD",
+          reason: "duplicate",
+          idempotencyKey: "terminal-command",
+          fingerprint: "terminal-command",
+        },
       },
     });
     const followUp = await store.appendFollowUp({
@@ -245,10 +265,7 @@ describe("per-turn conversation persistence", () => {
     expect(reopened?.status).toBe("new");
     expect(reopened?.finalResponse).toBeUndefined();
     expect(reopened?.escalationReason).toBeUndefined();
-    const metadata = reopened
-      ? (reopened.metadata as Record<string, unknown>)
-      : {};
-    expect(metadata.refundCommand).toBeUndefined();
+    expect(reopened?.metadata.refundCommand).toBeUndefined();
   });
 
   it("allows exactly one worker to atomically claim and activate a queued turn", async () => {
@@ -294,7 +311,12 @@ describe("per-turn conversation persistence", () => {
         confidence: 1,
         rationale: "First immutable turn.",
       },
-      draft: { draftResponse: "First result", citedSources: [] },
+      draft: {
+        draftResponse: "First result",
+        citedSources: [],
+        recommendRefund: false,
+        requiresEscalation: false,
+      },
     });
     const queued = await store.appendFollowUp({
       caseId: "case-turns",
@@ -340,7 +362,7 @@ describe("per-turn conversation persistence", () => {
     const { store } = await createConversation();
     const [claim] = await store.claimDispatch();
     expect(await store.activateDispatch(claim!)).toBe(true);
-    await store.getClientForTests().execute({
+    await store.getClient().execute({
       sql: "UPDATE support_dispatch SET lease_token = ? WHERE id = ?",
       args: ["new-worker-token", claim!.id],
     });

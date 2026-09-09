@@ -344,9 +344,7 @@ export class CaseStoreCancellation {
           now(),
         ],
       });
-      if (
-        (current.metadata as Record<string, unknown>).activeTurnId === turnId
-      ) {
+      if (current.metadata.activeTurnId === turnId) {
         const updated = {
           ...current,
           status,
@@ -361,8 +359,10 @@ export class CaseStoreCancellation {
                 ...current.metadata,
                 cancellationEffect: {
                   subscriptionId: input.effect!.subscriptionId,
+                  cancelAtPeriodEnd: true,
                   cancelsAt: input.effect!.cancelsAt,
-                  status: "scheduled",
+                  idempotencyKey: input.effect!.idempotencyKey,
+                  replayed: input.effect!.replayed,
                 },
               }
             : current.metadata,

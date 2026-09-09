@@ -33,11 +33,9 @@ export class CaseStoreFinancial {
       const row = caseResult.rows[0] as Record<string, unknown> | undefined;
       if (!row) throw new Error(`Support case not found: ${input.caseId}`);
       const current = parse({ data: row.data });
-      const metadata = current.metadata as Record<string, unknown>;
-      const command = metadata.refundCommand as
-        { fingerprint?: unknown; idempotencyKey?: unknown } | undefined;
-      const native = metadata.nativeApproval as
-        { fingerprint?: unknown; turnId?: unknown } | undefined;
+      const metadata = current.metadata;
+      const command = metadata.refundCommand;
+      const native = metadata.nativeApproval;
       // Migrations give pre-turn records a durable legacy turn identity, but
       // those records have no activeTurnId projection marker. Accept only the
       // exact per-case legacy identity when the marker is absent; any actual
@@ -104,7 +102,7 @@ export class CaseStoreFinancial {
         metadata: {
           ...metadata,
           refundEffects: {
-            ...(metadata.refundEffects as Record<string, unknown> | undefined),
+            ...metadata.refundEffects,
             [input.fingerprint]: input.result,
           },
         },
@@ -378,8 +376,7 @@ export class CaseStoreFinancial {
       }
       const current = parse({ data: row.data });
       const turnId = attempt.turn_id ? String(attempt.turn_id) : undefined;
-      const activeTurnId = (current.metadata as Record<string, unknown>)
-        .activeTurnId;
+      const activeTurnId = current.metadata.activeTurnId;
       // Keep the provider audit authoritative, but never change a current case
       // projection that belongs to a newer customer turn.
       if (!turnId) {
@@ -739,9 +736,7 @@ export class CaseStoreFinancial {
           now(),
         ],
       });
-      if (
-        (current.metadata as Record<string, unknown>).activeTurnId === turnId
-      ) {
+      if (current.metadata.activeTurnId === turnId) {
         const updated = {
           ...current,
           status: "escalated" as const,

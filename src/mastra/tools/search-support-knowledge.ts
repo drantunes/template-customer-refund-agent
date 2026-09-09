@@ -54,7 +54,7 @@ export const searchSupportKnowledgeTool = createTool({
       throw new Error(
         "Knowledge read scope references a missing support case.",
       );
-    const ownerId = (supportCase.metadata as Record<string, unknown>).ownerId;
+    const ownerId = supportCase.metadata.ownerId;
     const configured = resolveConfiguredBinding(
       bindingsForCase(supportCase).knowledge,
     );

@@ -15,14 +15,14 @@ export type ResolveSupportCaseInput = z.infer<
 export async function getActiveCaseOrThrow(caseId: string, turnId: string) {
   const supportCase = await caseStore.get(caseId);
   if (!supportCase) throw new Error(`Support case not found: ${caseId}`);
-  if ((supportCase.metadata as Record<string, unknown>).activeTurnId !== turnId)
+  if (supportCase.metadata.activeTurnId !== turnId)
     throw new Error(
       "Workflow turn is no longer the active durable projection.",
     );
   const turn = await caseStore.turn(caseId, turnId);
   if (!turn?.message)
     throw new Error("Workflow turn is missing its immutable customer message.");
-  const ownerId = (supportCase.metadata as Record<string, unknown>).ownerId;
+  const ownerId = supportCase.metadata.ownerId;
   if (typeof ownerId !== "string" || !ownerId)
     throw new Error("Workflow case has no verified owner binding.");
   return { supportCase: supportCase as SupportCase, turn, ownerId };

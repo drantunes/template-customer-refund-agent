@@ -23,9 +23,57 @@ afterEach(async () => {
 });
 
 describe("DEC-015 retention", () => {
+  it("rejects partial operational refund metadata before it reaches storage", async () => {
+    const store = await storeForTest();
+    const createdAt = "2026-09-05T00:00:00.000Z";
+    const base = {
+      id: "metadata-boundary-case",
+      externalId: "metadata-boundary-event",
+      source: "mock-email" as const,
+      customer: { email: "metadata-boundary@example.test" },
+      subject: "original subject",
+      messages: [],
+      status: "new" as const,
+      createdAt,
+      updatedAt: createdAt,
+      metadata: {
+        providerBinding: {
+          tenantId: "local-demo",
+          providerKind: "local" as const,
+          providerAccountId: "local-demo",
+          externalConversationId: "metadata-boundary",
+        },
+      },
+    };
+    await store.create(base);
+    await expect(
+      store.update(base.id, {
+        subject: "must not persist",
+        metadata: {
+          ...base.metadata,
+          refundCommand: { fingerprint: "partial" },
+        },
+      }),
+    ).rejects.toThrow("partial refund command");
+    expect((await store.get(base.id))?.subject).toBe("original subject");
+    await expect(
+      store.create({
+        ...base,
+        id: "invalid-created-metadata-case",
+        externalId: "invalid-created-metadata-event",
+        metadata: {
+          ...base.metadata,
+          refundCommand: { fingerprint: "partial" },
+        },
+      }),
+    ).rejects.toThrow("partial refund command");
+    expect(await store.get("invalid-created-metadata-case")).toBeUndefined();
+    await store.close();
+  });
+
   it("uses accepted_at, removes terminal approval prose, and repairs a contaminated tombstone", async () => {
     const store = await storeForTest();
-    const client = store.getClientForTests();
+    const client = store.getClient();
     const now = new Date("2026-09-05T00:00:00.000Z");
     const old = "2025-05-01T00:00:00.000Z";
     await store.create({
@@ -151,7 +199,7 @@ describe("DEC-015 retention", () => {
     const store = await storeForTest();
     const now = new Date("2026-09-05T00:00:00.000Z");
     const old = "2026-05-01T00:00:00.000Z";
-    const client = store.getClientForTests();
+    const client = store.getClient();
     const mastraStorage = new LibSQLStore({
       id: `retention-${crypto.randomUUID()}`,
       client,
@@ -250,6 +298,10 @@ describe("DEC-015 retention", () => {
         },
         rawPayload: { email: "alex@example.com" },
         refundCommand: {
+          approvalCaseId: "pending-case",
+          orderId: "ORD-1001",
+          amount: 25,
+          currency: "USD",
           fingerprint: "pending-fingerprint",
           idempotencyKey: "pending-key",
           reason: "alex@example.com",
@@ -352,7 +404,7 @@ describe("DEC-015 retention", () => {
     await store.recordEffect("replay-key", "fingerprint", {
       refundId: "REF-1",
     });
-    await store.getClientForTests().execute({
+    await store.getClient().execute({
       sql: "INSERT INTO support_audit(id, case_id, kind, data, created_at) VALUES (?, ?, ?, ?, ?)",
       args: [
         "recent-audit",
@@ -362,7 +414,7 @@ describe("DEC-015 retention", () => {
         "2026-01-01T00:00:00.000Z",
       ],
     });
-    await store.getClientForTests().execute({
+    await store.getClient().execute({
       sql: "INSERT INTO support_audit(id, case_id, kind, data, created_at) VALUES (?, ?, ?, ?, ?)",
       args: [
         "old-audit",
@@ -393,7 +445,7 @@ describe("DEC-015 retention", () => {
     });
     expect(redacted?.traceId).toBeUndefined();
     const messages = await store
-      .getClientForTests()
+      .getClient()
       .execute("SELECT data FROM support_messages WHERE case_id = ?", [
         "expired-case",
       ]);
@@ -403,7 +455,7 @@ describe("DEC-015 retention", () => {
       effect: { refundId: "REF-1" },
     });
     const audits = await store
-      .getClientForTests()
+      .getClient()
       .execute("SELECT id FROM support_audit ORDER BY id");
     expect(audits.rows).toEqual([{ id: "recent-audit" }]);
     await store.close();
@@ -411,7 +463,7 @@ describe("DEC-015 retention", () => {
 
   it("minimizes 366-day terminal Stripe effects into non-executable tombstones without reopening provider mutations", async () => {
     const store = await storeForTest();
-    const client = store.getClientForTests();
+    const client = store.getClient();
     const now = new Date("2026-09-05T00:00:00.000Z");
     const expired = new Date(
       now.getTime() - 366 * 24 * 60 * 60 * 1_000,
@@ -621,7 +673,7 @@ describe("DEC-015 retention", () => {
     const store = await storeForTest();
     const now = new Date("2026-09-05T00:00:00.000Z");
     const old = "2026-05-01T00:00:00.000Z";
-    const client = store.getClientForTests();
+    const client = store.getClient();
     await store.create({
       id: "all-copies-case",
       externalId: "all-copies-event",
@@ -649,6 +701,10 @@ describe("DEC-015 retention", () => {
         },
         rawPayload: "SYNTHETIC-COPY-003",
         refundCommand: {
+          approvalCaseId: "all-copies-case",
+          orderId: "ORD-1001",
+          amount: 25,
+          currency: "USD",
           fingerprint: "replay-fingerprint",
           idempotencyKey: "replay-key-003",
           reason: "SYNTHETIC-COPY-003",
@@ -808,7 +864,7 @@ describe("DEC-015 retention", () => {
       "cli-retention-event",
       "cli-inbound-run",
     );
-    const client = store.getClientForTests();
+    const client = store.getClient();
     const storage = new LibSQLStore({
       id: `retention-cli-${crypto.randomUUID()}`,
       client,
@@ -873,7 +929,7 @@ describe("DEC-015 retention", () => {
       JSON.stringify(await reopened.get("cli-retention-case")),
     ).not.toContain("cli terminal approval marker");
     expect(
-      await reopened.getClientForTests().execute({
+      await reopened.getClient().execute({
         sql: "SELECT COUNT(*) AS count FROM support_feedback WHERE case_id = ?",
         args: ["cli-retention-case"],
       }),
@@ -910,7 +966,7 @@ describe("DEC-015 retention", () => {
     await expect(store.migrate(6)).rejects.toThrow(
       "Refusing unsupported downgrade from support schema v7 to v6.",
     );
-    const client = store.getClientForTests();
+    const client = store.getClient();
     const createdAt = "2026-09-05T00:00:00.000Z";
     const caseData = JSON.stringify({
       id: "migration-case",
@@ -1004,7 +1060,7 @@ describe("DEC-015 retention", () => {
     files.push(path, `${path}-shm`, `${path}-wal`);
     const store = new CaseStore({ url: `file:${path}` });
     await store.migrate(8);
-    const client = store.getClientForTests();
+    const client = store.getClient();
     const caseData = (id: string, conversation: string, createdAt: string) =>
       JSON.stringify({
         id,

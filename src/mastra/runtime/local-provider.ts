@@ -81,7 +81,7 @@ export class LocalRuntime
   private readonly seeded = new Map<string, Promise<void>>();
   private readonly fixtureQueues = new Map<string, Promise<void>>();
   constructor(
-    client: Client = caseStore.getClientForTests(),
+    client: Client = caseStore.getClient(),
     private readonly clock: () => Date = () => new Date(),
   ) {
     this.client = client;

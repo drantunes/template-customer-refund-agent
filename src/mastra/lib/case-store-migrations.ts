@@ -2,7 +2,7 @@ import type { Client } from "@libsql/client";
 import { createHash } from "node:crypto";
 import type { CaseFeedback } from "../domain/support-case";
 import { type ProviderBinding } from "../providers/contracts";
-import { now, parse, caseBinding } from "./case-store-shared";
+import { now, parseLegacyCase, caseBinding } from "./case-store-shared";
 
 export class CaseStoreMigrations {
   constructor(private readonly client: Client) {}
@@ -63,7 +63,8 @@ export class CaseStoreMigrations {
         "SELECT id, data FROM support_cases",
       );
       for (const row of cases.rows)
-        for (const message of parse(row as Record<string, unknown>).messages)
+        for (const message of parseLegacyCase(row as Record<string, unknown>)
+          .messages)
           await this.client.execute({
             sql: "INSERT OR IGNORE INTO support_messages(id, case_id, data, created_at) VALUES (?, ?, ?, ?)",
             args: [
@@ -377,7 +378,7 @@ export class CaseStoreMigrations {
     );
     for (const row of rows.rows) {
       const value = row as Record<string, unknown>;
-      const supportCase = parse({ data: value.data });
+      const supportCase = parseLegacyCase({ data: value.data });
       const message = supportCase.messages.filter(
         (entry) => entry.author === "customer",
       )[Math.max(0, Number(value.sequence) - 1)];
@@ -418,10 +419,9 @@ export class CaseStoreMigrations {
       );
       for (const row of cases.rows) {
         const value = row as Record<string, unknown>;
-        const supportCase = parse(value);
+        const supportCase = parseLegacyCase(value);
         const binding = caseBinding(supportCase);
-        const storedOwner = (supportCase.metadata as Record<string, unknown>)
-          .ownerId;
+        const storedOwner = supportCase.metadata.ownerId;
         const ownerId =
           typeof storedOwner === "string" && storedOwner
             ? storedOwner
@@ -596,7 +596,7 @@ export class CaseStoreMigrations {
           ON support_feedback(case_id, created_at DESC);
       `);
       for (const row of cases.rows) {
-        const supportCase = parse(row as Record<string, unknown>);
+        const supportCase = parseLegacyCase(row as Record<string, unknown>);
         if (!supportCase.feedback) continue;
         await this.insertLegacyFeedback(
           tx,

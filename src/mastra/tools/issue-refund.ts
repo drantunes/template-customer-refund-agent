@@ -75,23 +75,9 @@ export const issueRefundTool = createTool({
       );
     const decision = await caseStore.approvalDecision(
       input.caseId,
-      (
-        (supportCase.metadata as Record<string, unknown>).nativeApproval as
-          | {
-              turnId?: string;
-            }
-          | undefined
-      )?.turnId,
+      supportCase.metadata.nativeApproval?.turnId,
     );
-    const native = (supportCase.metadata as Record<string, unknown>)
-      .nativeApproval as
-      | {
-          runId?: string;
-          toolCallId?: string;
-          fingerprint?: string;
-          turnId?: string;
-        }
-      | undefined;
+    const native = supportCase.metadata.nativeApproval;
     const decisionBinding = bindingsForPersistedCase(supportCase).transactions;
     if (
       !decision?.approved ||
@@ -109,7 +95,7 @@ export const issueRefundTool = createTool({
         "Refund execution requires a current authorized decision bound to the native tool call.",
       );
     const stored = persistedRefundCommandSchema.safeParse(
-      (supportCase.metadata as Record<string, unknown>).refundCommand,
+      supportCase.metadata.refundCommand,
     );
     if (!stored.success)
       throw new Error("The persisted refund command is missing.");

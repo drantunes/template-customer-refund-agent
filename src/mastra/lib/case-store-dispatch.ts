@@ -195,8 +195,7 @@ export class CaseStoreDispatch {
         : undefined;
       const ownerCurrent =
         supportCase &&
-        (supportCase.metadata as Record<string, unknown>).ownerId ===
-          input.ownerId &&
+        supportCase.metadata.ownerId === input.ownerId &&
         ownerIdForCustomer(
           command.binding.tenantId,
           supportCase.customer.email,
@@ -242,8 +241,7 @@ export class CaseStoreDispatch {
           String(attempt?.dispatch_id ?? "") === input.dispatch.dispatchId &&
           String(attempt?.lease_token ?? "") === input.dispatch.leaseToken &&
           String(attempt?.turn_id ?? "") === input.dispatch.turnId &&
-          (supportCase?.metadata as Record<string, unknown> | undefined)
-            ?.activeTurnId === input.dispatch.turnId;
+          supportCase?.metadata.activeTurnId === input.dispatch.turnId;
       } else if (input.reconciliationLeaseToken) {
         leaseCurrent =
           String(attempt?.reconcile_lease_token ?? "") ===
@@ -336,10 +334,8 @@ export class CaseStoreDispatch {
         String(turnResult.rows[0]?.command_fingerprint ?? "") ===
           command.fingerprint &&
         supportCase !== undefined &&
-        (supportCase.metadata as Record<string, unknown>).activeTurnId ===
-          command.turnId &&
-        (supportCase.metadata as Record<string, unknown>).ownerId ===
-          command.ownerId &&
+        supportCase.metadata.activeTurnId === command.turnId &&
+        supportCase.metadata.ownerId === command.ownerId &&
         ownerIdForCustomer(
           command.binding.tenantId,
           supportCase.customer.email,
@@ -560,8 +556,7 @@ export class CaseStoreDispatch {
       if (!row.rows[0])
         throw new Error(`Support case not found: ${dispatch.caseId}`);
       const current = parse(row.rows[0] as Record<string, unknown>);
-      const previousTurnId = (current.metadata as Record<string, unknown>)
-        .activeTurnId;
+      const previousTurnId = current.metadata.activeTurnId;
       const switchesTurn = previousTurnId !== dispatch.turnId;
       if (switchesTurn && typeof previousTurnId === "string")
         await tx.execute({

@@ -374,8 +374,7 @@ export async function computeRefundApprovalMetrics(
   for (const supportCase of cases) {
     const turns = await caseStore.turns(supportCase.id);
     for (const turn of turns) {
-      const activeTurnId = (supportCase.metadata as Record<string, unknown>)
-        .activeTurnId;
+      const activeTurnId = supportCase.metadata.activeTurnId;
       const draft =
         recordAt(turn.outcome?.draft) ??
         (activeTurnId === turn.id ? recordAt(supportCase.draft) : undefined);
@@ -399,9 +398,7 @@ export async function computeRefundApprovalMetrics(
         }
       }
     }
-    const effects = recordAt(
-      (supportCase.metadata as Record<string, unknown>).refundEffects,
-    );
+    const effects = recordAt(supportCase.metadata.refundEffects);
     for (const effect of Object.values(effects ?? {})) {
       const result = refundResult(effect);
       const key = String(result?.idempotencyKey ?? "");

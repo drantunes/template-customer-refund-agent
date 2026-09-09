@@ -50,9 +50,8 @@ async function verifiedCommerceBinding(
     throw new Error(
       "Trusted commerce scope references a missing support case.",
     );
-  const metadata = supportCase.metadata as Record<string, unknown>;
-  const persistedBindings = metadata.providerBindings as
-    { commerce?: typeof fallbackBinding } | undefined;
+  const metadata = supportCase.metadata;
+  const persistedBindings = metadata.providerBindings;
   const persisted = resolveConfiguredBinding(
     persistedBindings?.commerce ?? fallbackBinding,
   );

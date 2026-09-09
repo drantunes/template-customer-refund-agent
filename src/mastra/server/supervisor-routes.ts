@@ -71,7 +71,7 @@ export const supportCaseSupervisorRoute = registerApiRoute(
           errorResponseSchema.parse({ error: "Invalid supervisor request." }),
           400,
         );
-      const ownerId = (supportCase.metadata as Record<string, unknown>).ownerId;
+      const ownerId = supportCase.metadata.ownerId;
       if (typeof ownerId !== "string" || !ownerId)
         return c.json(
           errorResponseSchema.parse({ error: "Case has no verified owner." }),

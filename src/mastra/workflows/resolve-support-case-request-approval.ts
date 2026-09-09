@@ -77,7 +77,7 @@ async function recoveredApprovalDecision(
     throw new Error("The persisted approval decision is missing its approver.");
   if (decision.approved) {
     const stored = persistedRefundCommandSchema.safeParse(
-      (supportCase.metadata as Record<string, unknown>).refundCommand,
+      supportCase.metadata.refundCommand,
     );
     if (!stored.success)
       throw new Error("The persisted refund command is missing.");
@@ -356,7 +356,7 @@ export const requestApprovalStep = createStep({
       });
     }
 
-    if (!(supportCase.metadata as Record<string, unknown>).refundCommand)
+    if (!supportCase.metadata.refundCommand)
       throw new Error("The persisted refund command is missing.");
     // HTTP records the authenticated decision atomically before it resumes the
     // workflow. This step must only consume that record, never manufacture a

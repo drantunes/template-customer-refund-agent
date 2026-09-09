@@ -115,7 +115,7 @@ async function loadCharacterizationRuntime(draft: {
     },
   });
   const executionModel = async () => {
-    const action = await caseStore.getClientForTests().execute({
+    const action = await caseStore.getClient().execute({
       sql: "SELECT data FROM support_actions WHERE kind = 'refund-command' ORDER BY created_at DESC LIMIT 1",
     });
     const command = JSON.parse(String(action.rows[0]?.data ?? "{}")) as {
@@ -247,7 +247,7 @@ describe("resolve support case WIP characterization", () => {
         .getWorkflow("resolveSupportCaseWorkflow")
         .getWorkflowRunById(runId),
     ).toMatchObject({ status: "suspended" });
-    const dispatch = await caseStore.getClientForTests().execute({
+    const dispatch = await caseStore.getClient().execute({
       sql: "SELECT state FROM support_dispatch WHERE case_id = ?",
       args: [caseId],
     });
@@ -380,7 +380,7 @@ describe("resolve support case WIP characterization", () => {
       message: { body: "A separate second request must be escalated." },
       outcome: { status: "escalated" },
     });
-    const outbox = await caseStore.getClientForTests().execute({
+    const outbox = await caseStore.getClient().execute({
       sql: "SELECT id, body FROM support_outbox WHERE case_id = ? ORDER BY created_at, id",
       args: [supportCase.id],
     });
@@ -524,7 +524,7 @@ describe("resolve support case WIP characterization", () => {
     await vi.waitFor(async () =>
       expect(
         (
-          await caseStore.getClientForTests().execute({
+          await caseStore.getClient().execute({
             sql: "SELECT state FROM support_dispatch WHERE case_id = ?",
             args: [ingested.result.caseId],
           })
@@ -661,7 +661,7 @@ describe("resolve support case WIP characterization", () => {
       );
       expect(
         (
-          await caseStore.getClientForTests().execute({
+          await caseStore.getClient().execute({
             sql: "SELECT state FROM support_dispatch WHERE case_id = ?",
             args: [first.result.caseId],
           })

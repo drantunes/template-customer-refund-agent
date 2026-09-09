@@ -55,7 +55,7 @@ async function completedRefundResponse(
   supportCase: SupportCase,
   turnId: string,
 ) {
-  const metadata = supportCase.metadata as Record<string, unknown>;
+  const metadata = supportCase.metadata;
   const command = persistedRefundCommandSchema.safeParse(
     metadata.refundCommand,
   );
@@ -99,8 +99,7 @@ async function completedRefundResponse(
   const idempotency = await caseStore.idempotency(command.data.idempotencyKey);
   const effect = durableRefundEffectSchema.safeParse(idempotency?.effect);
   const decision = await caseStore.approvalDecision(supportCase.id, turnId);
-  const projected = metadata.refundEffects as
-    Record<string, unknown> | undefined;
+  const projected = metadata.refundEffects;
   const projectedResult = projected?.[command.data.fingerprint];
 
   if (
@@ -181,13 +180,11 @@ export const resolveCaseStep = createStep({
     if (triageReason) status = "escalated";
     const mustEscalate = Boolean(triageReason || draft.requiresEscalation);
 
-    const cancellation = (supportCase.metadata as Record<string, unknown>)
-      .cancellationEffect as
-      { status?: string; cancelsAt?: string } | undefined;
+    const cancellation = supportCase.metadata.cancellationEffect;
     if (
       !mustEscalate &&
       supportCase.triage?.intent === "cancellation" &&
-      cancellation?.status === "scheduled" &&
+      cancellation?.cancelAtPeriodEnd &&
       cancellation.cancelsAt
     ) {
       status = "resolved";

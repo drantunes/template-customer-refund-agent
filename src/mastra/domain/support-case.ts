@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { persistedRefundCommandSchema } from "./refund-command.ts";
 
 export const caseSourceSchema = z.enum([
   "mock-email",
@@ -177,6 +178,103 @@ export const refundResultSchema = z.object({
 });
 export type RefundResult = z.infer<typeof refundResultSchema>;
 
+/** The binding is selected when a case is accepted and is immutable thereafter. */
+export const providerBindingSchema = z.object({
+  tenantId: z.string().min(1),
+  providerKind: z.enum(["local", "intercom", "stripe"]),
+  providerAccountId: z.string().min(1),
+  externalConversationId: z.string().min(1),
+});
+export type PersistedProviderBinding = z.infer<typeof providerBindingSchema>;
+
+export const caseProviderBindingsSchema = z.object({
+  support: providerBindingSchema,
+  commerce: providerBindingSchema,
+  transactions: providerBindingSchema,
+  knowledge: providerBindingSchema,
+});
+export type PersistedCaseProviderBindings = z.infer<
+  typeof caseProviderBindingsSchema
+>;
+
+/** This is a reference only. It can never be used to execute a refund. */
+export const retainedRefundCommandReferenceSchema = z.object({
+  fingerprint: z.string().min(1),
+  idempotencyKey: z.string().min(1).optional(),
+});
+export type RetainedRefundCommandReference = z.infer<
+  typeof retainedRefundCommandReferenceSchema
+>;
+
+export const nativeApprovalSchema = z.object({
+  runId: z.string().min(1),
+  toolCallId: z.string().min(1),
+  fingerprint: z.string().min(1),
+  turnId: z.string().min(1),
+});
+export type NativeApproval = z.infer<typeof nativeApprovalSchema>;
+
+export const subscriptionCancellationEffectSchema = z.object({
+  subscriptionId: z.string().min(1),
+  cancelAtPeriodEnd: z.literal(true),
+  cancelsAt: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+  replayed: z.boolean(),
+});
+export type PersistedSubscriptionCancellationEffect = z.infer<
+  typeof subscriptionCancellationEffectSchema
+>;
+
+/**
+ * Known metadata is checked at persistence and API boundaries. `catchall`
+ * deliberately preserves integration-specific metadata without granting it
+ * operational meaning.
+ */
+const knownCaseMetadataSchema = z
+  .object({
+    ownerId: z.string().min(1).optional(),
+    activeTurnId: z.string().min(1).optional(),
+    providerBinding: providerBindingSchema.optional(),
+    providerBindings: caseProviderBindingsSchema.optional(),
+    refundCommand: z
+      .union([
+        persistedRefundCommandSchema,
+        retainedRefundCommandReferenceSchema,
+      ])
+      .optional(),
+    nativeApproval: nativeApprovalSchema.optional(),
+    cancellationEffect: subscriptionCancellationEffectSchema.optional(),
+    refundEffects: z.record(z.string(), refundResultSchema).optional(),
+    retentionRedactedAt: z.string().optional(),
+  })
+  .catchall(z.unknown());
+export const caseMetadataSchema = knownCaseMetadataSchema.superRefine(
+  (metadata, context) => {
+    if (
+      metadata.refundCommand &&
+      !persistedRefundCommandSchema.safeParse(metadata.refundCommand).success &&
+      metadata.retentionRedactedAt === undefined
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["refundCommand"],
+        message:
+          "A partial refund command is valid only on a marked retention tombstone.",
+      });
+  },
+);
+export type CaseMetadata = z.infer<typeof caseMetadataSchema>;
+
+/** The API has its own deliberately minimal financial metadata view. */
+export const staffCaseMetadataSchema = z.object({
+  refundCommand: retainedRefundCommandReferenceSchema
+    .pick({
+      fingerprint: true,
+    })
+    .optional(),
+});
+export type StaffCaseMetadata = z.infer<typeof staffCaseMetadataSchema>;
+
 export const supportCaseSchema = z.object({
   id: z.string(),
   externalId: z.string(),
@@ -208,9 +306,19 @@ export const supportCaseSchema = z.object({
     })
     .optional(),
   feedback: caseFeedbackSchema.optional(),
-  metadata: z.record(z.string(), z.unknown()).default({}),
+  metadata: caseMetadataSchema.default({}),
 });
 export type SupportCase = z.infer<typeof supportCaseSchema>;
+
+/**
+ * HTTP never exposes the operational metadata object. Staff receive only the
+ * immutable command fingerprint; customer responses use the same schema with
+ * its empty metadata form.
+ */
+export const publicSupportCaseSchema = supportCaseSchema.extend({
+  metadata: staffCaseMetadataSchema,
+});
+export type PublicSupportCase = z.infer<typeof publicSupportCaseSchema>;
 
 /** Create the application-owned identifier before a normalized case is saved. */
 export function generateCaseId(): string {

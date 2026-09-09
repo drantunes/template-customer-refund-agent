@@ -135,8 +135,7 @@ export class CaseStoreActions {
         throw new Error("Case is not waiting for approval.");
       const turnId =
         input.turnId ??
-        ((current.metadata as Record<string, unknown>).activeTurnId as
-          string | undefined) ??
+        current.metadata.activeTurnId ??
         `legacy:${input.caseId}`;
       const existing = await tx.execute({
         sql: "SELECT id FROM support_decisions WHERE case_id = ? AND turn_id = ? AND command_fingerprint = ?",

@@ -375,10 +375,21 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             "type": "array",
                           },
                           "metadata": {
-                            "additionalProperties": {},
-                            "default": {},
-                            "propertyNames": {
-                              "type": "string",
+                            "additionalProperties": false,
+                            "properties": {
+                              "refundCommand": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "fingerprint": {
+                                    "minLength": 1,
+                                    "type": "string",
+                                  },
+                                },
+                                "required": [
+                                  "fingerprint",
+                                ],
+                                "type": "object",
+                              },
                             },
                             "type": "object",
                           },
@@ -1002,10 +1013,21 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                       "type": "array",
                     },
                     "metadata": {
-                      "additionalProperties": {},
-                      "default": {},
-                      "propertyNames": {
-                        "type": "string",
+                      "additionalProperties": false,
+                      "properties": {
+                        "refundCommand": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "fingerprint": {
+                              "minLength": 1,
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "fingerprint",
+                          ],
+                          "type": "object",
+                        },
                       },
                       "type": "object",
                     },
@@ -1688,10 +1710,21 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                       "type": "array",
                     },
                     "metadata": {
-                      "additionalProperties": {},
-                      "default": {},
-                      "propertyNames": {
-                        "type": "string",
+                      "additionalProperties": false,
+                      "properties": {
+                        "refundCommand": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "fingerprint": {
+                              "minLength": 1,
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "fingerprint",
+                          ],
+                          "type": "object",
+                        },
                       },
                       "type": "object",
                     },
@@ -2444,10 +2477,21 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                       "type": "array",
                     },
                     "metadata": {
-                      "additionalProperties": {},
-                      "default": {},
-                      "propertyNames": {
-                        "type": "string",
+                      "additionalProperties": false,
+                      "properties": {
+                        "refundCommand": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "fingerprint": {
+                              "minLength": 1,
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "fingerprint",
+                          ],
+                          "type": "object",
+                        },
                       },
                       "type": "object",
                     },
@@ -3169,10 +3213,21 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                       "type": "array",
                     },
                     "metadata": {
-                      "additionalProperties": {},
-                      "default": {},
-                      "propertyNames": {
-                        "type": "string",
+                      "additionalProperties": false,
+                      "properties": {
+                        "refundCommand": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "fingerprint": {
+                              "minLength": 1,
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "fingerprint",
+                          ],
+                          "type": "object",
+                        },
                       },
                       "type": "object",
                     },
@@ -3939,10 +3994,21 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                       "type": "array",
                     },
                     "metadata": {
-                      "additionalProperties": {},
-                      "default": {},
-                      "propertyNames": {
-                        "type": "string",
+                      "additionalProperties": false,
+                      "properties": {
+                        "refundCommand": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "fingerprint": {
+                              "minLength": 1,
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "fingerprint",
+                          ],
+                          "type": "object",
+                        },
                       },
                       "type": "object",
                     },

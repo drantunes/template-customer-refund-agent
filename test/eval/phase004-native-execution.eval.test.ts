@@ -159,7 +159,7 @@ async function pinDeterministicKnowledgeFixture(
   const { publishKnowledge } =
     await import("../../src/mastra/lib/publish-knowledge");
   const authority = trajectoryAuthorityForDatasetCase(authorityId);
-  const client = caseStore.getClientForTests();
+  const client = caseStore.getClient();
   await client.execute({
     sql: "UPDATE local_knowledge SET expires_at = ? WHERE tenant_id = ? AND provider_account_id = ? AND source = ?",
     args: [
@@ -471,7 +471,7 @@ async function workflowGuardEvidence(evidenceKind: "invalid" | "expired") {
         ? new Date(Date.now() + 60_000).toISOString()
         : undefined;
     if (evidenceKind === "expired")
-      await caseStore.getClientForTests().execute({
+      await caseStore.getClient().execute({
         sql: "UPDATE local_knowledge SET expires_at = ? WHERE tenant_id = ? AND provider_account_id = ? AND source = ?",
         args: [
           expiresAt,
@@ -514,7 +514,7 @@ async function workflowGuardEvidence(evidenceKind: "invalid" | "expired") {
           .createRun({ runId: `phase004-workflow-${id}`, disableScorers: true })
       ).start({ inputData: { caseId: id, turnId: turn.id } });
       const persisted = await caseStore.get(id);
-      const outbox = await caseStore.getClientForTests().execute({
+      const outbox = await caseStore.getClient().execute({
         sql: "SELECT body FROM support_outbox WHERE case_id = ?",
         args: [id],
       });
@@ -598,7 +598,7 @@ async function observedFinancialEvidence(
         throw new Error("Financial workflow case was not persisted.");
       const activeTurnId = (current.metadata as Record<string, unknown>)
         .activeTurnId;
-      const action = await caseStore.getClientForTests().execute({
+      const action = await caseStore.getClient().execute({
         sql: "SELECT action.data FROM support_actions AS action JOIN support_turns AS turn ON turn.case_id = action.case_id AND turn.command_fingerprint = action.fingerprint WHERE action.case_id = ? AND action.kind = 'refund-command' AND turn.id = ? LIMIT 1",
         args: [id, activeTurnId],
       });
@@ -761,7 +761,7 @@ async function observedFinancialEvidence(
         ]);
     }
     const refunds = await localRuntime.refunds(configured, "ORD-1001");
-    const durableActions = await caseStore.getClientForTests().execute({
+    const durableActions = await caseStore.getClient().execute({
       sql: "SELECT COUNT(*) AS count FROM support_actions WHERE case_id = ? AND kind IN ('refund-failure', 'refund-uncertain', 'refund-command')",
       args: [id],
     });
@@ -864,7 +864,7 @@ async function caseRefundEffects(
   const { caseStore } = await import("../../src/mastra/lib/case-store");
   const { localRuntime } =
     await import("../../src/mastra/runtime/local-runtime");
-  const actions = await caseStore.getClientForTests().execute({
+  const actions = await caseStore.getClient().execute({
     sql: "SELECT COUNT(*) AS count FROM support_actions WHERE case_id = ? AND kind IN ('refund-command', 'refund-failure', 'refund-uncertain')",
     args: [caseId],
   });

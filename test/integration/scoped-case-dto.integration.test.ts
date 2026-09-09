@@ -83,11 +83,26 @@ function fixture(id: string, ownerId: string, tenantId = "local-demo") {
     traceId: "trace-private",
     metadata: {
       ownerId,
-      providerBinding: { tenantId, providerAccountId: "private-account" },
+      providerBinding: {
+        tenantId,
+        providerKind: "local",
+        providerAccountId: "private-account",
+        externalConversationId: `private-conversation-${id}`,
+      },
       rawPayload: { email: "alex@example.com", card: "not-for-client" },
-      nativeApproval: { runId: "native-private", toolCallId: "tool-private" },
+      nativeApproval: {
+        runId: "native-private",
+        toolCallId: "tool-private",
+        fingerprint: "immutable-command-hash",
+        turnId: "turn-private",
+      },
       activeTurnId: "turn-private",
       refundCommand: {
+        approvalCaseId: id,
+        orderId: "ORD-private",
+        amount: 49,
+        currency: "USD",
+        reason: "duplicate",
         fingerprint: "immutable-command-hash",
         idempotencyKey: "private-idempotency-key",
       },

@@ -1,4 +1,5 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import type { CaseMetadata } from "../domain/support-case";
 import { MastraAuthProvider } from "@mastra/core/server";
 import { resourceIdForOwner } from "../domain/support-case";
 import { currentTrustedCaseReadScope } from "../lib/trusted-run-scope";
@@ -222,11 +223,10 @@ export function canAccessCase(
   principal: SupportPrincipal,
   supportCase: {
     customer: { email: string };
-    metadata: Record<string, unknown>;
+    metadata: CaseMetadata;
   },
 ) {
-  const binding = supportCase.metadata.providerBinding as
-    { tenantId?: string } | undefined;
+  const binding = supportCase.metadata.providerBinding;
   if (binding?.tenantId !== principal.tenantId) return false;
   if (
     principal.roles.some(

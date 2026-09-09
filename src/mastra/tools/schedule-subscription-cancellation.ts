@@ -1,6 +1,7 @@
 import { createTool } from "@mastra/core/tools";
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { subscriptionCancellationEffectSchema } from "../domain/support-case";
 import { caseStore } from "../lib/case-store";
 import { activeDispatchLeaseScope } from "../lib/dispatch-lease-scope";
 import { bindingsForPersistedCase } from "../runtime/provider-bindings";
@@ -77,11 +78,7 @@ export const scheduleSubscriptionCancellationTool = createTool({
   description:
     "Schedule an already-authorized, no-refund subscription cancellation at period end.",
   inputSchema: cancellationInputSchema,
-  outputSchema: z.object({
-    subscriptionId: z.string(),
-    cancelsAt: z.string(),
-    status: z.enum(["scheduled", "pending"]),
-  }),
+  outputSchema: subscriptionCancellationEffectSchema,
   execute: async (input) => {
     const trusted = activeTrustedCancellationScope();
     const lease = activeDispatchLeaseScope();
@@ -130,15 +127,7 @@ export const scheduleSubscriptionCancellationTool = createTool({
         throw new Error(
           "Scheduled cancellation is missing its durable effect.",
         );
-      const value = effect.effect as {
-        subscriptionId: string;
-        cancelsAt: string;
-      };
-      return {
-        subscriptionId: value.subscriptionId,
-        cancelsAt: value.cancelsAt,
-        status: "scheduled" as const,
-      };
+      return effect.effect as import("../providers/contracts").SubscriptionCancellationEffect;
     }
     if (attempt.status !== "prepared")
       throw new Error(
@@ -164,11 +153,7 @@ export const scheduleSubscriptionCancellationTool = createTool({
         cancelsAt: effect.cancelsAt,
         effect,
       });
-      return {
-        subscriptionId: effect.subscriptionId,
-        cancelsAt: effect.cancelsAt,
-        status: "scheduled" as const,
-      };
+      return effect;
     } catch (error) {
       await caseStore.finalizeSubscriptionCancellationAttempt({
         idempotencyKey: input.idempotencyKey,

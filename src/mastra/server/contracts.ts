@@ -1,5 +1,8 @@
 import { z } from "zod";
-import { caseFeedbackSchema, supportCaseSchema } from "../domain/support-case";
+import {
+  caseFeedbackSchema,
+  publicSupportCaseSchema,
+} from "../domain/support-case";
 
 export const mockEmailPayloadSchema = z
   .object({
@@ -20,7 +23,7 @@ export const inboundSupportResponseSchema = z.object({
 });
 
 export const caseListResponseSchema = z.object({
-  cases: z.array(supportCaseSchema),
+  cases: z.array(publicSupportCaseSchema),
 });
 export const approvalRequestSchema = z.object({
   commandFingerprint: z.string().min(1),
@@ -354,7 +357,9 @@ export const supportOpenApiDocument = {
           "200": {
             description: "Support case",
             content: {
-              "application/json": { schema: jsonSchema(supportCaseSchema) },
+              "application/json": {
+                schema: jsonSchema(publicSupportCaseSchema),
+              },
             },
           },
           "404": {
@@ -382,7 +387,9 @@ export const supportOpenApiDocument = {
           "200": {
             description: "Updated support case",
             content: {
-              "application/json": { schema: jsonSchema(supportCaseSchema) },
+              "application/json": {
+                schema: jsonSchema(publicSupportCaseSchema),
+              },
             },
           },
           "400": {
@@ -419,7 +426,9 @@ export const supportOpenApiDocument = {
           "200": {
             description: "Updated support case",
             content: {
-              "application/json": { schema: jsonSchema(supportCaseSchema) },
+              "application/json": {
+                schema: jsonSchema(publicSupportCaseSchema),
+              },
             },
           },
           "400": {
@@ -500,7 +509,9 @@ export const supportOpenApiDocument = {
           "200": {
             description: "Updated support case",
             content: {
-              "application/json": { schema: jsonSchema(supportCaseSchema) },
+              "application/json": {
+                schema: jsonSchema(publicSupportCaseSchema),
+              },
             },
           },
           "400": {
@@ -534,7 +545,9 @@ export const supportOpenApiDocument = {
           "200": {
             description: "Appended authorized customer follow-up",
             content: {
-              "application/json": { schema: jsonSchema(supportCaseSchema) },
+              "application/json": {
+                schema: jsonSchema(publicSupportCaseSchema),
+              },
             },
           },
           "400": {
@@ -630,7 +643,7 @@ export const supportOpenApiDocument = {
 } as const;
 
 export type MockEmailPayload = z.infer<typeof mockEmailPayloadSchema>;
-export type SupportCaseDto = z.infer<typeof supportCaseSchema>;
+export type SupportCaseDto = z.infer<typeof publicSupportCaseSchema>;
 export type CaseListResponse = z.infer<typeof caseListResponseSchema>;
 export type InboundSupportResponse = z.infer<
   typeof inboundSupportResponseSchema

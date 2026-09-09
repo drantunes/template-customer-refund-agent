@@ -279,8 +279,7 @@ export class CaseStoreCases {
       const invalidatesApproval = current.status === "waiting_approval";
       const terminal =
         current.status === "resolved" || current.status === "escalated";
-      const activeTurnId = (current.metadata as Record<string, unknown>)
-        .activeTurnId;
+      const activeTurnId = current.metadata.activeTurnId;
       if (
         (invalidatesApproval || terminal) &&
         typeof activeTurnId === "string"
@@ -446,7 +445,7 @@ export class CaseStoreCases {
     });
     const binding = caseBinding(persisted);
     const storageEventId = scopedEventId(binding, eventId);
-    const storedOwner = (persisted.metadata as Record<string, unknown>).ownerId;
+    const storedOwner = persisted.metadata.ownerId;
     const ownerId =
       typeof storedOwner === "string" && storedOwner ? storedOwner : undefined;
     const tx = await this.client.transaction("write");

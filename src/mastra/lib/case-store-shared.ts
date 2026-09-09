@@ -3,12 +3,13 @@ import type {
   CaseFeedback,
   CaseMessage,
   SupportCase,
-} from "../domain/support-case";
+} from "../domain/support-case.ts";
+import { supportCaseSchema } from "../domain/support-case.ts";
 import {
   bindingsForCase,
   sameBinding,
   type ProviderBinding,
-} from "../providers/contracts";
+} from "../providers/contracts.ts";
 
 export type DispatchState =
   "pending" | "claimed" | "completed" | "suspended" | "failed";
@@ -136,6 +137,7 @@ export interface RetentionResult {
   dispatchesExpired: number;
   decisionsRedacted: number;
   actionsRedacted: number;
+  feedbackDeleted: number;
   auditPayloadsRedacted: number;
   financialReasonsRedacted: number;
   mastraMessagesDeleted: number;
@@ -174,7 +176,18 @@ export function dispatchLeaseUntil() {
   return new Date(Date.now() + dispatchLeaseDurationMs()).toISOString();
 }
 export function parse(row: Record<string, unknown>): SupportCase {
-  return JSON.parse(String(row.data)) as SupportCase;
+  const value: unknown = JSON.parse(String(row.data));
+  return supportCaseSchema.parse(value);
+}
+
+/**
+ * Migrations and retention repair may read historical rows before normalizing
+ * old metadata. Runtime operations must always use `parse` above.
+ */
+export function parseLegacyCase(row: Record<string, unknown>): SupportCase {
+  const value: unknown = JSON.parse(String(row.data));
+  if (value && typeof value === "object") return value as SupportCase;
+  throw new Error("Persisted legacy support case is not an object.");
 }
 export function scopedEventId(binding: ProviderBinding, eventId: string) {
   // `support_events.id` is the physical primary key as well as the logical
@@ -197,10 +210,7 @@ export function scopedMessageId(caseId: string, messageId: string) {
 }
 
 export function isRetentionTombstone(supportCase: SupportCase) {
-  return (
-    (supportCase.metadata as Record<string, unknown>).retentionRedactedAt !==
-    undefined
-  );
+  return supportCase.metadata.retentionRedactedAt !== undefined;
 }
 
 /**
@@ -237,14 +247,14 @@ export function caseBinding(case_: SupportCase): ProviderBinding {
 /** New records always carry all four independently addressable bindings. */
 export function withBindings(case_: SupportCase): SupportCase {
   const bindings = bindingsForCase(case_);
-  return {
+  return supportCaseSchema.parse({
     ...case_,
     metadata: {
       ...case_.metadata,
       providerBinding: bindings.support,
       providerBindings: bindings,
     },
-  };
+  });
 }
 
 export function assertBindingsUnchanged(
