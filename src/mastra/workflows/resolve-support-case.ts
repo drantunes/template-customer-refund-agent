@@ -14,10 +14,8 @@ import {
   type PolicyMatch,
   type SupportCase,
 } from "../domain/support-case";
-import {
-  MAX_STANDARD_REVIEW_REFUND,
-  refundExecutionInputSchema,
-} from "../tools/issue-refund";
+import { refundExecutionInputSchema } from "../tools/issue-refund";
+import { STANDARD_REFUND_REVIEW_LIMIT } from "../domain/refund-review-limit";
 import { persistedRefundCommandSchema } from "../domain/refund-command";
 import {
   escalationReasonForDraft,
@@ -42,7 +40,6 @@ import { knowledgePublicationStore } from "../lib/knowledge-publications";
 import { withTrustedCaseReadScope } from "../lib/trusted-run-scope";
 import { publishKnowledge } from "../lib/publish-knowledge";
 import { traceOperationalPort } from "../lib/operational-spans";
-import { intercomDevelopmentConfig } from "../providers/intercom/config";
 import { withTrustedCancellationScope } from "../providers/cancellation-execution";
 import { cancellationFingerprint } from "../tools/schedule-subscription-cancellation";
 
@@ -849,7 +846,16 @@ const scheduleCancellationStep = createStep({
     );
     if (supportCase.triage?.intent !== "cancellation") return inputData;
     const subscription = supportCase.subscriptionLookup?.subscription;
+    // Triage and the grounded writer decide whether this turn needs staff
+    // review before any provider effect is considered.  Finalization repeats
+    // this decision for its response, but it is too late to use it as the
+    // first effect fence: a cancellation POST must never precede escalation.
+    const escalationReason =
+      triageEscalationReason(supportCase.triage) ??
+      supportCase.draft?.escalationReason;
     if (
+      escalationReason ||
+      supportCase.draft?.requiresEscalation ||
       !subscription ||
       subscription.status !== "active" ||
       !explicitNoRefundCancellation(turn.message!.body) ||
@@ -858,6 +864,7 @@ const scheduleCancellationStep = createStep({
       await caseStore.update(supportCase.id, {
         status: "escalated",
         escalationReason:
+          escalationReason ??
           "Cancellation requires an explicit no-refund request for one active owned subscription.",
       });
       return inputData;
@@ -975,14 +982,14 @@ const requestApprovalStep = createStep({
     // rule is repeated by LocalRuntime in its provider write transaction.
     if (
       draft.requiresEscalation ||
-      (draft.refundAmount ?? 0) > MAX_STANDARD_REVIEW_REFUND
+      (draft.refundAmount ?? 0) > STANDARD_REFUND_REVIEW_LIMIT
     ) {
       if (!draft.requiresEscalation)
         await caseStore.update(supportCase.id, {
           draft: {
             ...draft,
             requiresEscalation: true,
-            escalationReason: `Refund amount ${draft.refundAmount} exceeds the ${MAX_STANDARD_REVIEW_REFUND} standard review limit and needs manual handling.`,
+            escalationReason: `Refund amount ${draft.refundAmount} exceeds the ${STANDARD_REFUND_REVIEW_LIMIT} standard review limit and needs manual handling.`,
           },
         });
       return {
@@ -1257,9 +1264,9 @@ const resolveCaseStep = createStep({
           status = "escalated";
           escalationReason =
             "Refund was approved but no order id was on file - needs manual handling.";
-        } else if ((draft.refundAmount ?? 0) > MAX_STANDARD_REVIEW_REFUND) {
+        } else if ((draft.refundAmount ?? 0) > STANDARD_REFUND_REVIEW_LIMIT) {
           status = "escalated";
-          escalationReason = `Refund amount ${draft.refundAmount} exceeds the ${MAX_STANDARD_REVIEW_REFUND} standard review limit and needs a senior approver.`;
+          escalationReason = `Refund amount ${draft.refundAmount} exceeds the ${STANDARD_REFUND_REVIEW_LIMIT} standard review limit and needs a senior approver.`;
         } else {
           if (!mastra)
             throw new Error(
@@ -1306,6 +1313,18 @@ const resolveCaseStep = createStep({
       body: finalResponse,
       createdAt: new Date().toISOString(),
     };
+    const supportBinding = resolveConfiguredBinding(
+      bindingsForPersistedCase(supportCase).support,
+    );
+    const providerPlan = providerRegistry(supportBinding)
+      .support(supportBinding)
+      .planFinalizationOutbox?.({
+        caseId: supportCase.id,
+        turnId: inputData.turnId,
+        status,
+        subject: supportCase.subject,
+        escalationReason,
+      });
     await persistentCaseStore.finalizeCaseAndEnqueue({
       caseId: supportCase.id,
       turnId: inputData.turnId,
@@ -1316,59 +1335,18 @@ const resolveCaseStep = createStep({
       outbox: {
         id: `outbox_${supportCase.id}_${inputData.turnId}_${terminalOutboxKind}`,
         caseId: supportCase.id,
-        binding: resolveConfiguredBinding(
-          bindingsForPersistedCase(supportCase).support,
-        ),
+        binding: supportBinding,
         body: finalResponse,
         status,
       },
-      additionalOutbox:
-        bindingsForPersistedCase(supportCase).support.providerKind ===
-        "intercom"
-          ? [
-              ...(status === "escalated"
-                ? [
-                    {
-                      id: `outbox_${supportCase.id}_${inputData.turnId}_note`,
-                      caseId: supportCase.id,
-                      binding: resolveConfiguredBinding(
-                        bindingsForPersistedCase(supportCase).support,
-                      ),
-                      body:
-                        escalationReason ??
-                        "Support escalation requires staff review.",
-                      status,
-                      operation: "note" as const,
-                    },
-                  ]
-                : []),
-              {
-                id: `outbox_${supportCase.id}_${inputData.turnId}_status`,
-                caseId: supportCase.id,
-                binding: resolveConfiguredBinding(
-                  bindingsForPersistedCase(supportCase).support,
-                ),
-                body: "",
-                status,
-                operation: "status" as const,
-              },
-              ...(status === "escalated" &&
-              intercomDevelopmentConfig()?.ticketTypeId
-                ? [
-                    {
-                      id: `outbox_${supportCase.id}_${inputData.turnId}_ticket`,
-                      caseId: supportCase.id,
-                      binding: resolveConfiguredBinding(
-                        bindingsForPersistedCase(supportCase).support,
-                      ),
-                      body: escalationReason ?? "Support escalation",
-                      status: supportCase.subject,
-                      operation: "ticket" as const,
-                    },
-                  ]
-                : []),
-            ]
-          : undefined,
+      additionalOutbox: providerPlan?.map((operation) => ({
+        id: `outbox_${supportCase.id}_${inputData.turnId}_${operation.suffix}`,
+        caseId: supportCase.id,
+        binding: supportBinding,
+        body: operation.body,
+        status: operation.status,
+        operation: operation.operation,
+      })),
     });
     await deliverOutbox(undefined, 10, caseStore, { mastra }).catch((error) =>
       mastra

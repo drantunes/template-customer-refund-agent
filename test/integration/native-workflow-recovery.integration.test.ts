@@ -276,6 +276,13 @@ async function setup(
         {
           draftResponse: "We will process the duplicate-charge refund.",
           citedSources: ["duplicate-charge-policy"],
+          selectedPolicyExcerpts: [
+            {
+              source: "duplicate-charge-policy",
+              excerpt:
+                "If a customer's order or subscription shows more than one charge for the same billing period, the duplicate charge is eligible for a **full refund of the extra charge only**.",
+            },
+          ],
           recommendRefund: true,
           refundAmount,
           refundCurrency,
@@ -3580,6 +3587,13 @@ describe("native approval workflow recovery", () => {
       responseModel: jsonModel({
         draftResponse: "draft",
         citedSources: ["subscription-cancellation-policy"],
+        selectedPolicyExcerpts: [
+          {
+            source: "subscription-cancellation-policy",
+            excerpt:
+              "If a customer explicitly says they do not want a refund and only want to cancel, do not offer or recommend one - honor the customer's stated intent.",
+          },
+        ],
         recommendRefund: true,
         refundAmount: 20,
         refundCurrency: "USD",
@@ -3605,6 +3619,122 @@ describe("native approval workflow recovery", () => {
       args: [caseId],
     });
     expect(refundCommands.rows).toEqual([]);
+  });
+
+  it.each([
+    {
+      name: "mandatory triage review",
+      triage: {
+        requiresHumanReview: true,
+        confidence: 1,
+        rationale: "Cancellation needs a specialist.",
+      },
+    },
+    {
+      name: "low triage confidence without an explicit review flag",
+      triage: {
+        requiresHumanReview: false,
+        confidence: 0.49,
+        rationale: "Cancellation classification is uncertain.",
+      },
+    },
+  ])(
+    "does not execute an explicit no-refund cancellation with $name",
+    async ({ triage }) => {
+      const caseId = `stripe-cancel-review-${crypto.randomUUID()}`;
+      enableSyntheticStripe();
+      const observed = {
+        posts: 0,
+        refundPosts: 0,
+        gets: [] as string[],
+        keys: [] as string[],
+        scheduled: false,
+        loseFirstPost: false,
+      };
+      vi.stubGlobal("fetch", cancellationStripeTransport(observed));
+      const { caseStore } = await setup(
+        caseId,
+        undefined,
+        undefined,
+        undefined,
+        {
+          providerBindings: syntheticStripeBindings(caseId),
+          triage: {
+            intent: "cancellation",
+            urgency: "normal",
+            sentiment: "neutral",
+            ...triage,
+          },
+          message:
+            "Please cancel my subscription at the end of the period. I do not want a refund.",
+          responseModel: jsonModel({
+            draftResponse: "The cancellation is ready to schedule.",
+            citedSources: ["subscription-cancellation-policy"],
+            selectedPolicyExcerpts: [
+              {
+                source: "subscription-cancellation-policy",
+                excerpt:
+                  "Customers can cancel a subscription at any time. Cancellation takes effect at the end of the current billing period.",
+              },
+            ],
+            recommendRefund: false,
+            requiresEscalation: false,
+          }) as never,
+          allowInitialWorkflowFailure: true,
+        },
+      );
+
+      expect(observed).toMatchObject({ posts: 0, refundPosts: 0 });
+      expect(await caseStore.get(caseId)).toMatchObject({
+        status: "escalated",
+      });
+      const commands = await caseStore.getClientForTests().execute({
+        sql: "SELECT kind FROM support_actions WHERE case_id = ? AND kind = 'subscription-cancellation-command'",
+        args: [caseId],
+      });
+      expect(commands.rows).toEqual([]);
+    },
+  );
+
+  it("does not execute an explicit no-refund cancellation when the writer escalates it", async () => {
+    const caseId = `stripe-cancel-writer-escalation-${crypto.randomUUID()}`;
+    enableSyntheticStripe();
+    const observed = {
+      posts: 0,
+      refundPosts: 0,
+      gets: [] as string[],
+      keys: [] as string[],
+      scheduled: false,
+      loseFirstPost: false,
+    };
+    vi.stubGlobal("fetch", cancellationStripeTransport(observed));
+    const { caseStore } = await setup(caseId, undefined, undefined, undefined, {
+      providerBindings: syntheticStripeBindings(caseId),
+      triage: {
+        intent: "cancellation",
+        urgency: "normal",
+        sentiment: "neutral",
+        requiresHumanReview: false,
+        confidence: 1,
+        rationale: "Verified cancellation intent.",
+      },
+      message:
+        "Please cancel my subscription at the end of the period. I do not want a refund.",
+      responseModel: jsonModel({
+        draftResponse: "A specialist needs to check this cancellation.",
+        citedSources: ["subscription-cancellation-policy"],
+        recommendRefund: false,
+        requiresEscalation: true,
+        escalationReason: "The writer needs a specialist to verify the plan.",
+      }) as never,
+      allowInitialWorkflowFailure: true,
+    });
+
+    expect(observed).toMatchObject({ posts: 0, refundPosts: 0 });
+    expect(await caseStore.get(caseId)).toMatchObject({
+      status: "escalated",
+      escalationReason: "The writer needs a specialist to verify the plan.",
+    });
   });
 
   it("schedules one explicit no-refund Stripe cancellation through the registered workflow and replays its durable command", async () => {
@@ -3783,6 +3913,13 @@ describe("native approval workflow recovery", () => {
         responseModel: jsonModel({
           draftResponse: "draft",
           citedSources: ["subscription-cancellation-policy"],
+          selectedPolicyExcerpts: [
+            {
+              source: "subscription-cancellation-policy",
+              excerpt:
+                "Customers can cancel a subscription at any time. Cancellation takes effect at the end of the current billing period unless the customer explicitly asks for an immediate cancellation with a prorated refund.",
+            },
+          ],
           recommendRefund: false,
           requiresEscalation: false,
         }) as never,

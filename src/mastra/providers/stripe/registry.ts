@@ -20,8 +20,9 @@ import {
 import { activePrincipalHasRole } from "../../server/auth";
 import { ownerIdForCustomer } from "../../server/auth";
 import { activeTrustedCancellationScope } from "../cancellation-execution";
-import { assertRefundPolicyEvidenceAtFirstEffect } from "../../runtime/local-runtime";
+import { assertRefundPolicyEvidenceAtFirstEffect } from "../../lib/refund-policy-evidence-persistence";
 import { legacyAmountToMoney, structurallyEqual } from "../../lib/money";
+import { exceedsStandardRefundReviewLimit } from "../../domain/refund-review-limit";
 import type { StripeSandboxConfig } from "./config";
 import { StripeClient, StripeHttpError } from "./client";
 
@@ -337,9 +338,7 @@ export class StripeProviderRegistry
       );
     if (
       supportCase.draft?.requiresEscalation ||
-      command.amount.minor >
-        // Keep the same currency-aware policy boundary as LocalRuntime.
-        legacyAmountToMoney(1000, command.amount.currency).minor
+      exceedsStandardRefundReviewLimit(command.amount)
     )
       throw new Error(
         "Stripe refund is not permitted by the current deterministic policy.",

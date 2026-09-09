@@ -2,7 +2,20 @@ import type {
   CaseMessage,
   SupportCase,
 } from "../../src/mastra/domain/support-case";
-import type { SupportSourceAdapter } from "../../src/mastra/integrations/support-source";
+
+/** Test-only shape used by the mock inbound provider. Application adapters
+ * use the provider contract directly and do not import fixture abstractions. */
+interface SupportSourceAdapter {
+  source: "mock-email";
+  normalizeInbound(payload: unknown): Promise<
+    Omit<SupportCase, "id" | "status" | "metadata"> & {
+      metadata: Record<string, unknown>;
+    }
+  >;
+  sendReply(caseId: string, body: string): Promise<void>;
+  addInternalNote(caseId: string, body: string): Promise<void>;
+  updateStatus(caseId: string, status: string): Promise<void>;
+}
 
 export interface MockEmailPayload {
   externalId: string;

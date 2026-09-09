@@ -40,10 +40,7 @@ import {
   ApplicationSpanRedactor,
   RedactingPinoLogger,
 } from "./lib/observability-redaction";
-import {
-  registerConfiguredIntercomProvider,
-  registerConfiguredStripeProvider,
-} from "./providers/registry";
+import { composeConfiguredProviders } from "./providers/composition";
 
 const retentionPolicy = retentionPolicyFromEnvironment();
 let localRuntimeWorkers: Promise<undefined | (() => Promise<void>)> =
@@ -52,8 +49,7 @@ let localRuntimeWorkers: Promise<undefined | (() => Promise<void>)> =
 // This is deliberately evaluated during composition: an explicit external
 // opt-in with incomplete development configuration fails rather than routing
 // an Intercom case to local fixtures.
-registerConfiguredIntercomProvider();
-registerConfiguredStripeProvider();
+composeConfiguredProviders();
 
 export const mastra = new Mastra({
   agents: {

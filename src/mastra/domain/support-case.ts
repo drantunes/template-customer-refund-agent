@@ -212,6 +212,11 @@ export const supportCaseSchema = z.object({
 });
 export type SupportCase = z.infer<typeof supportCaseSchema>;
 
+/** Create the application-owned identifier before a normalized case is saved. */
+export function generateCaseId(): string {
+  return `case_${crypto.randomUUID().slice(0, 8)}`;
+}
+
 export function threadIdForCase(caseId: string, tenantId: string): string {
   return `tenant_${tenantId}_conversation_${caseId}`;
 }

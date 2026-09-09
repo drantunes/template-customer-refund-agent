@@ -19,7 +19,6 @@ import { traceOperationalPort } from "../lib/operational-spans";
 import { isRefundPolicyEvidenceError } from "../lib/refund-policy-evidence";
 import { persistedRefundCommandSchema } from "../domain/refund-command";
 
-export const MAX_STANDARD_REVIEW_REFUND = 1000;
 /**
  * An exception alone cannot prove a financial effect failed: a transport can
  * break after the provider commits. Only deterministic provider rejections

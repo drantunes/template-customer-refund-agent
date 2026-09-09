@@ -1,21 +1,11 @@
 import type { ProviderBinding, ProviderRegistry } from "./contracts";
-import { defaultLocalBinding, localRuntime } from "../runtime/local-runtime";
-import { intercomDevelopmentConfig, intercomBinding } from "./intercom/config";
-import { IntercomProviderRegistry } from "./intercom/registry";
-import { stripeBinding, stripeSandboxConfig } from "./stripe/config";
-import { StripeProviderRegistry } from "./stripe/registry";
 
 const registryKey = (binding: ProviderBinding) =>
   `${binding.tenantId}\u0000${binding.providerKind}\u0000${binding.providerAccountId}`;
 const registrations = new Map<
   string,
   { binding: ProviderBinding; registry: ProviderRegistry }
->([
-  [
-    registryKey(defaultLocalBinding()),
-    { binding: defaultLocalBinding(), registry: localRuntime },
-  ],
-]);
+>();
 
 /**
  * Composition root registration. A tenant/account route cannot be replaced in
@@ -23,7 +13,7 @@ const registrations = new Map<
  */
 export function registerProviderRegistry(
   registry: ProviderRegistry,
-  bindings: ProviderBinding[] = [defaultLocalBinding()],
+  bindings: ProviderBinding[],
 ) {
   if (bindings.length === 0)
     throw new Error(
@@ -39,33 +29,9 @@ export function registerProviderRegistry(
   }
 }
 
-/** Isolated tests may reset composition before accepting any case. */
+/** Isolated tests may reset explicit composition before accepting any case. */
 export function resetProviderRegistryForTests() {
   registrations.clear();
-  registrations.set(registryKey(defaultLocalBinding()), {
-    binding: defaultLocalBinding(),
-    registry: localRuntime,
-  });
-}
-
-/** Register the opt-in development account once at process composition. */
-export function registerConfiguredIntercomProvider() {
-  const config = intercomDevelopmentConfig();
-  if (!config) return undefined;
-  const binding = intercomBinding(config, "configured");
-  registerProviderRegistry(new IntercomProviderRegistry(config), [binding]);
-  return config;
-}
-
-/** Stripe selection is independent from support selection and registers only
- * the persisted tenant/account route configured at process composition. */
-export function registerConfiguredStripeProvider() {
-  const config = stripeSandboxConfig();
-  if (!config) return undefined;
-  registerProviderRegistry(new StripeProviderRegistry(config), [
-    stripeBinding(config, "configured"),
-  ]);
-  return config;
 }
 
 /** Reject typoed/redirected accounts before a port can perform an effect. */

@@ -133,7 +133,7 @@ async function loadDeterministicRuntime() {
       intent: "duplicate_charge",
       urgency: "normal",
       sentiment: "negative",
-      requiresHumanReview: true,
+      requiresHumanReview: false,
       confidence: 1,
       rationale: "Deterministic HTTP context test.",
     },
@@ -144,6 +144,13 @@ async function loadDeterministicRuntime() {
     object: {
       draftResponse: "A deterministic refund response.",
       citedSources: ["duplicate-charge-policy"],
+      selectedPolicyExcerpts: [
+        {
+          source: "duplicate-charge-policy",
+          excerpt:
+            "If a customer's order or subscription shows more than one charge for the same billing period, the duplicate charge is eligible for a **full refund of the extra charge only**.",
+        },
+      ],
       recommendRefund: true,
       refundAmount: 49,
       refundCurrency: "USD",
@@ -1186,6 +1193,13 @@ describe("support workflow HTTP context propagation", () => {
           // The registered retrieval fixture exposes this active, applicable
           // policy title. Both model flags deliberately avoid approval.
           citedSources: ["Duplicate Charge Policy"],
+          selectedPolicyExcerpts: [
+            {
+              source: "Duplicate Charge Policy",
+              excerpt:
+                "Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.",
+            },
+          ],
           recommendRefund: false,
           requiresEscalation: false,
         },
@@ -1219,7 +1233,7 @@ describe("support workflow HTTP context propagation", () => {
         args: [caseId],
       });
       expect(supportCase.finalResponse).toBe(
-        "We reviewed your order ORD-1001. Its current status is fulfilled.",
+        "The published Duplicate Charge Policy says: “Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.” Your order ORD-1001 is currently recorded as fulfilled. Your Pro Plan - Monthly subscription is currently recorded as active.",
       );
       expect(supportCase.finalResponse).not.toContain(draftResponse);
       expect(String(outbox.rows[0]?.body)).toBe(supportCase.finalResponse);
@@ -1242,6 +1256,13 @@ describe("support workflow HTTP context propagation", () => {
       object: {
         draftResponse: "Your order is fulfilled and no refund is needed.",
         citedSources: ["Duplicate Charge Policy"],
+        selectedPolicyExcerpts: [
+          {
+            source: "Duplicate Charge Policy",
+            excerpt:
+              "Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.",
+          },
+        ],
         recommendRefund: false,
         requiresEscalation: false,
       },
@@ -1264,7 +1285,7 @@ describe("support workflow HTTP context propagation", () => {
     );
     const supportCase = (await runtimeCaseStore.get(caseId))!;
     expect(supportCase.finalResponse).toBe(
-      "We reviewed your order ORD-1001. Its current status is fulfilled.",
+      "The published Duplicate Charge Policy says: “Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.” Your order ORD-1001 is currently recorded as fulfilled. Your Pro Plan - Monthly subscription is currently recorded as active.",
     );
   });
 
@@ -1702,6 +1723,13 @@ describe("support workflow HTTP context propagation", () => {
       object: {
         draftResponse: "Your order is fulfilled and no refund is needed.",
         citedSources: ["duplicate-charge-policy"],
+        selectedPolicyExcerpts: [
+          {
+            source: "duplicate-charge-policy",
+            excerpt:
+              "Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.",
+          },
+        ],
         recommendRefund: false,
         requiresEscalation: false,
       },
@@ -1727,7 +1755,7 @@ describe("support workflow HTTP context propagation", () => {
       state: "resolved",
       outcome: {
         finalResponse:
-          "We reviewed your order ORD-1001. Its current status is fulfilled.",
+          "The published Duplicate Charge Policy says: “Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.” Your order ORD-1001 is currently recorded as fulfilled. Your Pro Plan - Monthly subscription is currently recorded as active.",
       },
     });
     const secondTraceId = (await runtimeCaseStore.get(caseId))?.traceId;
@@ -1838,6 +1866,13 @@ describe("support workflow HTTP context propagation", () => {
       object: {
         draftResponse: "Your order is fulfilled.",
         citedSources: ["duplicate-charge-policy"],
+        selectedPolicyExcerpts: [
+          {
+            source: "duplicate-charge-policy",
+            excerpt:
+              "Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.",
+          },
+        ],
         recommendRefund: false,
         requiresEscalation: false,
       },

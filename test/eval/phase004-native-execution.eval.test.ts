@@ -576,6 +576,13 @@ async function observedFinancialEvidence(
         deterministicJsonModel({
           draftResponse: "The duplicate charge can be reviewed for a refund.",
           citedSources: ["duplicate-charge-policy"],
+          selectedPolicyExcerpts: [
+            {
+              source: "duplicate-charge-policy",
+              excerpt:
+                "If a customer's order or subscription shows more than one charge for the same billing period, the duplicate charge is eligible for a **full refund of the extra charge only**.",
+            },
+          ],
           recommendRefund: true,
           refundAmount: 49,
           refundCurrency: "USD",
