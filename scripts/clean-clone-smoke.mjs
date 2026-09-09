@@ -147,14 +147,6 @@ async function runStudioJourney(port) {
       /^\/api\/memory\/threads\/[^/]+\/working-memory$/.test(path));
   const isInitialMissingThreadInspection = (path, method) =>
     method === "GET" && /^\/api\/memory\/threads\/[^/]+$/.test(path);
-  page.on("request", (request) => {
-    const url = new URL(request.url());
-    if (
-      (request.method() === "POST" && url.pathname === "/api/memory/threads") ||
-      isSupervisorExecution(url.pathname, request.method())
-    )
-      initialThreadInspectionAvailable = false;
-  });
   page.on("response", (response) => {
     const url = new URL(response.url());
     const path = url.pathname;
@@ -213,6 +205,10 @@ async function runStudioJourney(port) {
     await composer.fill(firstPrompt);
     await composer.press("Enter");
     await waitForCompletedRun(page, firstAnswer);
+    // Studio can prefetch a just-created thread before its first turn is
+    // durable. Once the first answer has rendered, all memory responses must
+    // remain successful for the persisted-history journey below.
+    initialThreadInspectionAvailable = false;
     await page.getByText("Lookup order", { exact: true }).waitFor({
       timeout: 10_000,
     });
