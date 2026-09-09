@@ -184,7 +184,9 @@ async function runStudioJourney(port) {
       timeout: 10_000,
     });
 
-    await page.reload({ waitUntil: "networkidle" });
+    // The Studio keeps long-lived traffic open; the persisted-answer assertion
+    // below is the journey-specific readiness signal after this reload.
+    await page.reload({ waitUntil: "domcontentloaded" });
     await waitForCompletedRun(page, firstAnswer);
     await composer.fill(followUpPrompt);
     await composer.press("Enter");
@@ -196,7 +198,7 @@ async function runStudioJourney(port) {
       .getByRole("button", { name: "Sign in", exact: true })
       .waitFor({ timeout: 10_000 });
     authenticatedStudioSession = false;
-    await page.reload({ waitUntil: "networkidle" });
+    await page.reload({ waitUntil: "domcontentloaded" });
     await page
       .getByRole("button", { name: "Sign in", exact: true })
       .waitFor({ timeout: 10_000 });
