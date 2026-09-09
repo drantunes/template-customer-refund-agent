@@ -1,12 +1,7 @@
 # Contributing
 
-This repository is auto-generated from the [Mastra monorepo](https://github.com/mastra-ai/mastra). Pull requests opened here will be ignored.
+This is the standalone repository for the Customer support resolution and refund agent template. Please open issues and pull requests in this repository.
 
-To contribute:
+Before opening a pull request, use Node.js 24.20.0 and npm 11.19.0, install with `npm ci`, and run the checks listed in the [README](README.md#local-verification). Do not commit `.env`, provider credentials, real customer data, or sandbox receipts containing identifiers that have not been redacted.
 
-1. Fork the [Mastra monorepo](https://github.com/mastra-ai/mastra)
-2. Find this template in `templates/TEMPLATE_NAME`
-3. Make your changes
-4. Open a pull request against the monorepo
-
-A bot syncs accepted changes to this repository.
+Changes to provider adapters must remain opt-in and must not make remote provider calls in the ordinary test suite. Keep fixture cases synthetic, preserve the authenticated approval boundary, and document any user-visible operational change.
