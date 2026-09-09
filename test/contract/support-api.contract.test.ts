@@ -393,7 +393,7 @@ describe("support API contract", () => {
       ],
       "/support/knowledge/reindex": ["200", "400", "401", "403", "500"],
       "/support/monitoring/summary": ["200", "401", "403"],
-      "/support/openapi.json": ["200"],
+      "/support/openapi.json": ["200", "401"],
     } as const;
     for (const [path, expected] of Object.entries(expectedStatuses)) {
       const operation =
@@ -424,7 +424,6 @@ describe("support API contract", () => {
       "/support/auth/login",
       "/support/webhooks/intercom",
       "/support/webhooks/stripe",
-      "/support/openapi.json",
     ]) {
       const operation =
         supportOpenApiDocument.paths[
@@ -439,7 +438,6 @@ describe("support API contract", () => {
           "/support/auth/login",
           "/support/webhooks/intercom",
           "/support/webhooks/stripe",
-          "/support/openapi.json",
         ].includes(path)
       )
         continue;

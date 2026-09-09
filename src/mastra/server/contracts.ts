@@ -613,13 +613,15 @@ export const supportOpenApiDocument = {
     },
     "/support/openapi.json": {
       get: {
-        security: [],
         responses: {
           "200": {
             description: "OpenAPI document",
             content: {
               "application/json": { schema: jsonSchema(z.unknown()) },
             },
+          },
+          "401": {
+            ...errorResponse("Authentication required"),
           },
         },
       },

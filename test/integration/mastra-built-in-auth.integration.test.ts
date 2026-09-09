@@ -4,6 +4,7 @@ import { createHonoServer } from "@mastra/deployer/server";
 import { SpanType } from "@mastra/core/observability";
 import { TestExporter } from "@mastra/observability";
 import { issueLocalSession } from "../../src/mastra/server/auth";
+import { supportOpenApiDocument } from "../../src/mastra/server/contracts";
 import { deterministicJsonModel } from "../fixtures/deterministic-language-model";
 import type { ProviderRegistry } from "../../src/mastra/providers/contracts";
 import { temporaryDatabasePath } from "../support/temp-path";
@@ -49,6 +50,25 @@ afterEach(async () => {
 });
 
 describe("configured Mastra built-in API authorization", () => {
+  it("requires bearer authentication for the OpenAPI contract it returns", async () => {
+    const { server } = await configuredServer();
+
+    expect(
+      (await server.request("http://support.test/support/openapi.json")).status,
+    ).toBe(401);
+
+    const authenticated = await server.request(
+      "http://support.test/support/openapi.json",
+      {
+        headers: {
+          authorization: `Bearer ${issueLocalSession({ id: "admin-demo" })}`,
+        },
+      },
+    );
+    expect(authenticated.status).toBe(200);
+    expect(await authenticated.json()).toEqual(supportOpenApiDocument);
+  });
+
   it("gives local staff and admins a credential-backed read-only Studio registry scope", async () => {
     const { server } = await configuredServer();
     const unauthenticated = await server.request(
