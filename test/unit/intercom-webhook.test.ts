@@ -9,7 +9,7 @@ import {
   MAX_INTERCOM_WEBHOOK_BYTES,
   verifyIntercomWebhook,
 } from "../../src/mastra/providers/intercom/webhook";
-import { readIntercomWebhookBody } from "../../src/mastra/server/routes";
+import { readWebhookBody } from "../../src/mastra/server/webhook-routes";
 
 const saved = { ...process.env };
 const config: IntercomDevelopmentConfig = {
@@ -254,12 +254,13 @@ describe("Intercom webhook verification", () => {
       },
     });
     await expect(
-      readIntercomWebhookBody(
+      readWebhookBody(
         new Request("http://support.test/webhook", {
           method: "POST",
           body: oversized,
           duplex: "half",
         }),
+        MAX_INTERCOM_WEBHOOK_BYTES,
       ),
     ).rejects.toThrow();
     const broken = new ReadableStream<Uint8Array>({
@@ -268,12 +269,13 @@ describe("Intercom webhook verification", () => {
       },
     });
     await expect(
-      readIntercomWebhookBody(
+      readWebhookBody(
         new Request("http://support.test/webhook", {
           method: "POST",
           body: broken,
           duplex: "half",
         }),
+        MAX_INTERCOM_WEBHOOK_BYTES,
       ),
     ).rejects.toThrow("could not be read");
   });
