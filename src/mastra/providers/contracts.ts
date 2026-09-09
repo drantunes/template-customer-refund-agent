@@ -61,13 +61,10 @@ export interface SupportChannelProvider {
   /** Provider-owned follow-up operations for a terminal case. The workflow
    * persists this normalized plan atomically with its canonical reply. */
   planFinalizationOutbox?(input: {
-    caseId: string;
-    turnId: string;
     status: "resolved" | "escalated";
     subject: string;
     escalationReason?: string;
   }): Array<{
-    suffix: "note" | "status" | "ticket";
     operation: "note" | "status" | "ticket";
     body: string;
     status: string;

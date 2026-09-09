@@ -22,7 +22,7 @@ import {
   createValidationBudgetExecution,
   validationBudgetRequestContextKey,
 } from "../lib/eval-budget";
-import type { CaseFeedback, SupportCase } from "../domain/support-case";
+import type { CaseFeedback } from "../domain/support-case";
 import {
   approvalRequestSchema,
   caseListResponseSchema,
@@ -42,9 +42,7 @@ import {
   authenticateSeededCredentials,
   canAccessCase,
   hasRole,
-  principalFromHeaders,
   verifyLocalSession,
-  type SupportPrincipal,
 } from "./auth";
 import { loginRequestSchema, loginResponseSchema } from "./contracts";
 import {
@@ -63,34 +61,12 @@ import {
 } from "../providers/stripe/webhook";
 import { providerRegistry } from "../providers/registry";
 import { StripeProviderRegistry } from "../providers/stripe/registry";
-
-function principal(c: ContextWithMastra): SupportPrincipal | undefined {
-  return c.req.raw?.headers
-    ? principalFromHeaders(c.req.raw.headers)
-    : undefined;
-}
-function requirePrincipal(c: ContextWithMastra): SupportPrincipal | Response {
-  return (
-    principal(c) ??
-    c.json(
-      errorResponseSchema.parse({ error: "Authentication required." }),
-      401,
-    )
-  );
-}
-function requireRole(
-  c: ContextWithMastra,
-  role: "customer" | "support-agent" | "approver" | "admin",
-) {
-  const current = requirePrincipal(c);
-  if (current instanceof Response) return current;
-  return hasRole(current, role)
-    ? current
-    : c.json(
-        errorResponseSchema.parse({ error: "Insufficient authority." }),
-        403,
-      );
-}
+import {
+  caseScope,
+  requirePrincipal,
+  requireRole,
+  scopedCaseDto,
+} from "./route-context";
 
 /** Follow-up execution is an operational entrypoint, not merely an HTTP
  * response. Classify its failure and leave a bounded durable retry or a human
@@ -119,17 +95,6 @@ async function recoverFollowUpFailure(
       ),
   });
 }
-function caseScope(
-  c: ContextWithMastra,
-  supportCase: Parameters<typeof canAccessCase>[1],
-) {
-  const current = requirePrincipal(c);
-  if (current instanceof Response) return current;
-  return canAccessCase(current, supportCase)
-    ? current
-    : c.json(errorResponseSchema.parse({ error: "Case access denied." }), 403);
-}
-
 function correlationIdFromError(
   error: unknown,
   seen = new Set<object>(),
@@ -149,48 +114,6 @@ function correlationIdFromError(
       if (traceId) return traceId;
     }
   return undefined;
-}
-
-/**
- * The durable case is an internal operational record.  Each API response is a
- * role-scoped projection so customers never receive provider payloads,
- * execution bindings, internal messages, traces, or staff reasoning. Staff
- * get the immutable command hash required to review the exact displayed
- * approval, never the native approval handle or idempotency material.
- */
-function scopedCaseDto(
-  supportCase: SupportCase,
-  current: SupportPrincipal,
-): SupportCase {
-  const metadata = supportCase.metadata as Record<string, unknown>;
-  if (hasRole(current, "customer")) {
-    // This is an allowlist. New internal SupportCase fields cannot become a
-    // customer API leak merely because a destructuring denylist was missed.
-    return {
-      id: supportCase.id,
-      externalId: supportCase.externalId,
-      source: supportCase.source,
-      customer: { email: current.email, name: supportCase.customer.name },
-      subject: supportCase.subject,
-      messages: supportCase.messages.filter(
-        (message) => message.author !== "internal",
-      ),
-      status: supportCase.status,
-      createdAt: supportCase.createdAt,
-      updatedAt: supportCase.updatedAt,
-      feedback: supportCase.feedback,
-      metadata: {},
-    };
-  }
-  const command = metadata.refundCommand as
-    { fingerprint?: unknown } | undefined;
-  return {
-    ...supportCase,
-    metadata:
-      typeof command?.fingerprint === "string"
-        ? { refundCommand: { fingerprint: command.fingerprint } }
-        : {},
-  };
 }
 
 export const supportLoginRoute = registerApiRoute("/support/auth/login", {

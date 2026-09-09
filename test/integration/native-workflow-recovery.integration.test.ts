@@ -133,6 +133,13 @@ function responseLookupModel(
             text: JSON.stringify({
               draftResponse: "Verified lookup response.",
               citedSources: ["duplicate-charge-policy"],
+              selectedPolicyExcerpts: [
+                {
+                  source: "duplicate-charge-policy",
+                  excerpt:
+                    "If a customer's order or subscription shows more than one charge for the same billing period, the duplicate charge is eligible for a **full refund of the extra charge only**.",
+                },
+              ],
               recommendRefund: false,
               requiresEscalation: false,
             }),
@@ -1770,6 +1777,13 @@ describe("native approval workflow recovery", () => {
       model: jsonModel({
         draftResponse: "We will process the duplicate-charge refund.",
         citedSources: ["duplicate-charge-policy"],
+        selectedPolicyExcerpts: [
+          {
+            source: "duplicate-charge-policy",
+            excerpt:
+              "If a customer's order or subscription shows more than one charge for the same billing period, the duplicate charge is eligible for a **full refund of the extra charge only**.",
+          },
+        ],
         recommendRefund: true,
         refundAmount: 20,
         refundCurrency: "USD",

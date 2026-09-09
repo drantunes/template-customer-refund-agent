@@ -10,8 +10,6 @@ import {
   resourceIdForOwner,
   subscriptionLookupSchema,
   threadIdForCase,
-  triageResultSchema,
-  type PolicyMatch,
   type SupportCase,
 } from "../domain/support-case";
 import { refundExecutionInputSchema } from "../tools/issue-refund";
@@ -37,13 +35,15 @@ import {
   resolveConfiguredBinding,
 } from "../providers/registry";
 import { knowledgePublicationStore } from "../lib/knowledge-publications";
-import { withTrustedCaseReadScope } from "../lib/trusted-run-scope";
-import { publishKnowledge } from "../lib/publish-knowledge";
 import { traceOperationalPort } from "../lib/operational-spans";
 import { withTrustedCancellationScope } from "../providers/cancellation-execution";
 import { cancellationFingerprint } from "../tools/schedule-subscription-cancellation";
-
-const caseIdSchema = z.object({ caseId: z.string(), turnId: z.string() });
+import {
+  getActiveCaseOrThrow,
+  resolveSupportCaseInputSchema,
+} from "./resolve-support-case-context";
+import { classifyStep } from "./resolve-support-case-classify";
+import { retrievePolicyStep } from "./resolve-support-case-retrieve-policy";
 
 /** Serialize only the authoritative identities already selected by the
  * grounded draft. This durable action is later read by the provider write
@@ -211,209 +211,14 @@ async function completedRefundResponse(
   return `Your refund of ${result.amount} ${result.currency} has been issued.`;
 }
 
-async function getCaseOrThrow(caseId: string, turnId: string) {
-  const supportCase = await caseStore.get(caseId);
-  if (!supportCase) throw new Error(`Support case not found: ${caseId}`);
-  if ((supportCase.metadata as Record<string, unknown>).activeTurnId !== turnId)
-    throw new Error(
-      "Workflow turn is no longer the active durable projection.",
-    );
-  const turn = await caseStore.turn(caseId, turnId);
-  if (!turn?.message)
-    throw new Error("Workflow turn is missing its immutable customer message.");
-  const ownerId = (supportCase.metadata as Record<string, unknown>).ownerId;
-  if (typeof ownerId !== "string" || !ownerId)
-    throw new Error("Workflow case has no verified owner binding.");
-  return { supportCase, turn, ownerId };
-}
-
-const classifyStep = createStep({
-  id: "classify",
-  description: "Runs the triage agent on the customer's message.",
-  inputSchema: caseIdSchema,
-  outputSchema: caseIdSchema,
-  execute: async ({ inputData, mastra, requestContext, tracingContext }) => {
-    const { supportCase, turn, ownerId } = await getCaseOrThrow(
-      inputData.caseId,
-      inputData.turnId,
-    );
-    const latestMessage = turn.message!;
-    if (!mastra)
-      throw new Error(
-        "The resolve workflow must run through a registered Mastra instance.",
-      );
-
-    // Capture the run's trace id once, up front, so the monitoring dashboard can pull
-    // token usage and tool-call stats for this case straight from observability storage.
-    const traceId = tracingContext?.currentSpan?.traceId;
-    if (traceId) {
-      await caseStore.update(supportCase.id, { traceId });
-      await caseStore.recordTurnTelemetry(supportCase.id, inputData.turnId, {
-        traceId,
-        workflowRunId: supportCase.workflowRunId,
-      });
-    }
-
-    const result = await mastra.getAgent("triageAgent").generate(
-      [
-        {
-          role: "user",
-          content: `Subject: ${supportCase.subject}\n\nMessage:\n${latestMessage.body}`,
-        },
-      ],
-      {
-        structuredOutput: { schema: triageResultSchema },
-        memory: {
-          thread: threadIdForCase(
-            supportCase.id,
-            bindingsForPersistedCase(supportCase).support.tenantId,
-          ),
-          resource: resourceIdForOwner(
-            ownerId,
-            bindingsForPersistedCase(supportCase).support.tenantId,
-          ),
-        },
-        requestContext,
-        tracingContext,
-      },
-    );
-
-    const triageUsage = result.usage;
-    await caseStore.update(supportCase.id, {
-      triage: triageResultSchema.parse(result.object),
-      status: "processing",
-      agentUsage: {
-        inputTokens: triageUsage.inputTokens ?? 0,
-        outputTokens: triageUsage.outputTokens ?? 0,
-        model: (result as { response?: { modelId?: string } }).response
-          ?.modelId,
-      },
-    });
-    return { caseId: supportCase.id, turnId: inputData.turnId };
-  },
-});
-
-const retrievePolicyStep = createStep({
-  id: "retrieve-policy",
-  description:
-    "Searches the indexed policy knowledge base for context relevant to this case.",
-  inputSchema: caseIdSchema,
-  outputSchema: caseIdSchema,
-  execute: async ({ inputData, mastra, requestContext, tracingContext }) => {
-    const { supportCase, turn } = await getCaseOrThrow(
-      inputData.caseId,
-      inputData.turnId,
-    );
-    const bindings = bindingsForPersistedCase(supportCase);
-    const latestMessage = turn.message!;
-    const queryText =
-      `${supportCase.triage?.intent ?? ""} ${supportCase.subject} ${latestMessage.body}`.trim();
-    if (!mastra)
-      throw new Error(
-        "The resolve workflow must run through a registered Mastra instance.",
-      );
-    const searchTool = mastra.getTool("searchSupportKnowledgeTool");
-    if (!searchTool.execute)
-      throw new Error(
-        "Registered search_support_knowledge tool has no execute function.",
-      );
-    // The operational workflow is a trusted publication boundary. It may
-    // establish the initial local generation; the read tool below never can.
-    await publishKnowledge(bindings.knowledge, {
-      onlyIfMissing: true,
-      mastra,
-      tracingContext,
-    });
-
-    const result = await withTrustedCaseReadScope(
-      {
-        caseId: supportCase.id,
-        ownerId: (supportCase.metadata as Record<string, unknown>)
-          .ownerId as string,
-        tenantId: bindings.knowledge.tenantId,
-      },
-      () =>
-        traceOperationalPort({
-          mastra,
-          tracingContext,
-          kind: "tool",
-          operation: "tool.search_support_knowledge",
-          run: () =>
-            searchTool.execute!(
-              {
-                queryText,
-                topK: 5,
-                binding: resolveConfiguredBinding(bindings.knowledge),
-              },
-              { mastra, requestContext, tracingContext },
-            ),
-        }),
-    );
-    const sources: Array<{
-      metadata?: Record<string, unknown>;
-      document?: string;
-      score?: number;
-    }> =
-      result && "sources" in result && Array.isArray(result.sources)
-        ? (result.sources as Array<{
-            metadata?: Record<string, unknown>;
-            document?: string;
-            score?: number;
-          }>)
-        : [];
-
-    const policyMatches: PolicyMatch[] = (sources ?? []).map((source) => ({
-      title: String(source.metadata?.title ?? "Untitled policy"),
-      text: String(source.metadata?.text ?? source.document ?? ""),
-      source: String(source.metadata?.source ?? "unknown"),
-      score: source.score ?? 0,
-      version:
-        typeof source.metadata?.version === "string"
-          ? source.metadata.version
-          : undefined,
-      documentHash:
-        typeof source.metadata?.documentHash === "string"
-          ? source.metadata.documentHash
-          : undefined,
-      generationId:
-        typeof source.metadata?.generationId === "string"
-          ? source.metadata.generationId
-          : undefined,
-      effectiveAt:
-        typeof source.metadata?.effectiveAt === "string"
-          ? source.metadata.effectiveAt
-          : undefined,
-      indexedAt:
-        typeof source.metadata?.indexedAt === "string"
-          ? source.metadata.indexedAt
-          : undefined,
-      expiresAt:
-        typeof source.metadata?.expiresAt === "string"
-          ? source.metadata.expiresAt
-          : undefined,
-      providerKind:
-        typeof source.metadata?.providerKind === "string"
-          ? source.metadata.providerKind
-          : undefined,
-      providerAccountId:
-        typeof source.metadata?.providerAccountId === "string"
-          ? source.metadata.providerAccountId
-          : undefined,
-    }));
-
-    await caseStore.update(supportCase.id, { policyMatches });
-    return { caseId: supportCase.id, turnId: inputData.turnId };
-  },
-});
-
 const inspectOrderStep = createStep({
   id: "inspect-order",
   description:
     "Looks up the customer's order, subscription, and prior refunds.",
-  inputSchema: caseIdSchema,
-  outputSchema: caseIdSchema,
+  inputSchema: resolveSupportCaseInputSchema,
+  outputSchema: resolveSupportCaseInputSchema,
   execute: async ({ inputData, mastra, requestContext, tracingContext }) => {
-    const { supportCase, ownerId } = await getCaseOrThrow(
+    const { supportCase, ownerId } = await getActiveCaseOrThrow(
       inputData.caseId,
       inputData.turnId,
     );
@@ -531,10 +336,10 @@ const draftResponseStep = createStep({
   id: "draft-response",
   description:
     "Runs the response agent to draft a grounded reply and refund recommendation.",
-  inputSchema: caseIdSchema,
-  outputSchema: caseIdSchema,
+  inputSchema: resolveSupportCaseInputSchema,
+  outputSchema: resolveSupportCaseInputSchema,
   execute: async ({ inputData, mastra, requestContext, tracingContext }) => {
-    const { supportCase, turn, ownerId } = await getCaseOrThrow(
+    const { supportCase, turn, ownerId } = await getActiveCaseOrThrow(
       inputData.caseId,
       inputData.turnId,
     );
@@ -668,6 +473,7 @@ const draftResponseStep = createStep({
     const staleOrUnauthoritativeEvidence =
       requiresSupportingCitation && !applicableEvidence.every(Boolean);
     const invalidPolicySelection =
+      !hasNoRefundCancellationAuthority &&
       !parsedDraft.requiresEscalation &&
       (parsedDraft.selectedPolicyExcerpts.length === 0 ||
         parsedDraft.selectedPolicyExcerpts.some((selection) => {
@@ -759,7 +565,7 @@ const draftResponseStep = createStep({
   },
 });
 
-const approvalInputSchema = caseIdSchema;
+const approvalInputSchema = resolveSupportCaseInputSchema;
 const approvalOutputSchema = z.object({
   caseId: z.string(),
   turnId: z.string(),
@@ -837,10 +643,10 @@ const scheduleCancellationStep = createStep({
   id: "schedule-subscription-cancellation",
   description:
     "Schedules only an explicit verified-owner no-refund cancellation at period end.",
-  inputSchema: caseIdSchema,
-  outputSchema: caseIdSchema,
+  inputSchema: resolveSupportCaseInputSchema,
+  outputSchema: resolveSupportCaseInputSchema,
   execute: async ({ inputData, mastra, requestContext, tracingContext }) => {
-    const { supportCase, turn, ownerId } = await getCaseOrThrow(
+    const { supportCase, turn, ownerId } = await getActiveCaseOrThrow(
       inputData.caseId,
       inputData.turnId,
     );
@@ -962,7 +768,7 @@ const requestApprovalStep = createStep({
     requestContext,
     tracingContext,
   }) => {
-    const { supportCase } = await getCaseOrThrow(
+    const { supportCase } = await getActiveCaseOrThrow(
       inputData.caseId,
       inputData.turnId,
     );
@@ -1209,7 +1015,7 @@ const resolveCaseStep = createStep({
     status: z.enum(["resolved", "escalated"]),
   }),
   execute: async ({ inputData, mastra }) => {
-    const { supportCase } = await getCaseOrThrow(
+    const { supportCase } = await getActiveCaseOrThrow(
       inputData.caseId,
       inputData.turnId,
     );
@@ -1319,8 +1125,6 @@ const resolveCaseStep = createStep({
     const providerPlan = providerRegistry(supportBinding)
       .support(supportBinding)
       .planFinalizationOutbox?.({
-        caseId: supportCase.id,
-        turnId: inputData.turnId,
         status,
         subject: supportCase.subject,
         escalationReason,
@@ -1340,7 +1144,7 @@ const resolveCaseStep = createStep({
         status,
       },
       additionalOutbox: providerPlan?.map((operation) => ({
-        id: `outbox_${supportCase.id}_${inputData.turnId}_${operation.suffix}`,
+        id: `outbox_${supportCase.id}_${inputData.turnId}_${operation.operation}`,
         caseId: supportCase.id,
         binding: supportBinding,
         body: operation.body,
@@ -1365,7 +1169,7 @@ export const resolveSupportCaseWorkflow = createWorkflow({
   id: "resolve-support-case",
   description:
     "The core resolution pipeline: classify -> retrieve policy -> inspect order -> draft response -> human refund approval -> finalize an executed effect or escalate.",
-  inputSchema: caseIdSchema,
+  inputSchema: resolveSupportCaseInputSchema,
   outputSchema: z.object({
     caseId: z.string(),
     turnId: z.string(),
