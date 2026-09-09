@@ -57,7 +57,7 @@ try {
   run("npm", ["ci"], destination, env);
   for (const command of [
     ["run", "check:runtime"],
-    ["run", "check:env", "--", "--profile=local"],
+    ["run", "check:env", "--", "--profile=local", "--mode=deterministic"],
     ["run", "local:seed"],
     ["run", "build"],
     ["run", "build:web"],

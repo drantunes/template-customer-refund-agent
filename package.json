@@ -29,7 +29,7 @@
     "test:eval": "node scripts/require-eval-baseline.mjs && vitest run --project eval",
     "eval:candidate-report": "node scripts/eval-candidate-report.mjs",
     "test:e2e": "playwright test",
-    "test": "npm run test:unit && npm run test:integration && npm run test:contract && npm run test:eval"
+    "test": "npm run test:unit && npm run --workspace support-refund-agent-web test:unit && npm run test:integration && npm run --workspace support-refund-agent-web test:integration && npm run test:contract && npm run --workspace support-refund-agent-web test:contract && npm run test:eval && npm run --workspace support-refund-agent-web test:eval"
   },
   "keywords": [],
   "author": "",
@@ -53,7 +53,7 @@
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",
-    "@types/node": "26.2.0",
+    "@types/node": "24.13.3",
     "mastra": "1.27.2",
     "oxlint": "1.81.0",
     "prettier": "3.9.6",

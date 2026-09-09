@@ -550,10 +550,10 @@ function PortalSession({
             </DialogDescription>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
-            Curious what that looks like from the other side? Open the admin
-            dashboard to review this case. Mastra Studio lists the registered
-            agents, workflows, and tools, while case work and approval stay in
-            the local portal and admin dashboard.
+            Open the admin dashboard to review this case. Mastra Studio shows
+            the registered agent, workflows, and tools; it does not process this
+            case or record an approval. Case work and approval stay in the local
+            portal and admin dashboard.
           </p>
           <DialogFooter>
             <a

@@ -1,31 +1,26 @@
-# Customer support resolution and refund agent
+# Customer support and refund review
 
-This template accepts a signed-in customer's support message, gathers local policy and order evidence, and prepares a response or a human-reviewed refund decision. It includes a deterministic local demo with a customer portal and support queue, built with [Mastra](https://mastra.ai).
+Turn a customer's support message into an answer backed by policy and order records, or a refund proposal for a person to review. Customers can follow their case in a portal, while staff investigate the evidence and approve or reject the proposed refund. Built with [Mastra](https://mastra.ai), with synthetic local orders and policies to try the complete flow.
 
 ## Why we built this
 
-Support teams need to resolve routine questions quickly without turning a language model into a payment authority. A duplicate charge can require policy evidence, order context, a clear customer response, and a financial decision that remains accountable to a person.
+A duplicate-charge complaint looks simple until someone has to connect the customer's message, payment history, refund policy, and final response. Support teams need that context in one place, with a clear decision when money is involved.
 
-This template keeps that boundary visible. The local mock workflow lets a team evaluate the full support experience while a refund remains a single authenticated approval tied to an immutable command.
+This template gathers the evidence and prepares the next step. A person reviews each refund before it is executed, and uncertain cases go to a support specialist.
 
 ## Features
 
-- Accepts a customer message and keeps later follow-ups in the same tenant-scoped case.
-- Finds local policy and order evidence before drafting a resolution.
-- Shows customers their own cases and gives staff an operational review queue.
-- Requires an authenticated approver to accept or reject each proposed refund.
-- Runs with synthetic local fixtures; Intercom and Stripe stay explicit development/sandbox opt-ins.
-
-## Prerequisites
-
-- Node.js 24.20.0 and npm 11.19.0, as pinned in `.nvmrc`, `package.json`, and the lockfile.
-- An `OPENAI_API_KEY` for an interactive local agent run. Deterministic tests and the local mock browser test replace model calls and do not need one.
+- Answers support questions using published policies and the customer's order records.
+- Lets staff investigate a sample order in Mastra Studio.
+- Keeps customer messages and follow-ups together in a support case.
+- Presents proposed refunds for authenticated approval or rejection.
+- Includes synthetic local data and optional Intercom development and Stripe sandbox adapters.
 
 ## Quick start
 
-### 1. Clone the template
+Use Node.js 24.20.0 and npm 11.19.0, as pinned in the repository. Interactive responses require an OpenAI API key.
 
-Run:
+### 1. Clone the template
 
 ```bash
 git clone https://github.com/drantunes/template-customer-refund-agent.git
@@ -35,18 +30,12 @@ npm ci
 
 ### 2. Add your API keys
 
-Copy the example file and set a unique `LOCAL_AUTH_SIGNING_KEY` with at least 32 characters. Set `OPENAI_API_KEY` before starting the interactive local agent; it is optional only for deterministic tests and smoke paths that replace model calls.
-
 ```bash
 cp .env.example .env
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
 ```
 
-Put that generated value after `LOCAL_AUTH_SIGNING_KEY=` in `.env`, keep `SUPPORT_SOURCE=mock` and `COMMERCE_SOURCE=mock`, then validate the local profile:
-
-```bash
-npm run check:env -- --profile=local
-```
+Set `OPENAI_API_KEY` in `.env`. Put the generated value in `LOCAL_AUTH_SIGNING_KEY` to sign local demo sessions. Keep `SUPPORT_SOURCE=mock` and `COMMERCE_SOURCE=mock` for the included data, then run `npm run check:env -- --profile=local`.
 
 ### 3. Start the dev server
 
@@ -55,40 +44,29 @@ npm run local:seed
 npm run dev
 ```
 
-In another terminal, run `npm run --workspace support-refund-agent-web dev`, then open [the local portal](http://localhost:5173). Sign in as `alex@example.com` with `local-customer-alex`, send “I was charged twice,” and open the admin queue as `approver@local.test` / `local-approver` to review the synthetic case. The case reaches a pending refund decision; approving it records the local mock result.
+Open [Mastra Studio](http://localhost:4111), sign in as `agent@local.test` with password `local-support-agent`, select **Support Supervisor**, and send: `Check ORD-1001 and summarize the evidence.` The supervisor reads Alex's sample order and reports recorded evidence without changing the case or issuing a refund.
 
-Mastra Studio is available at [localhost:4111](http://localhost:4111) for its read-only registry. Use the portal and admin queue for case work, approvals, and monitoring.
+## Try a refund review
 
-## Provider setup and operational notes
+Keep the server running and start the portal in another terminal:
 
-The [external adapter guide](docs/external-adapters.md) describes the isolated Intercom development and Stripe test-sandbox profiles. It does not authorize or perform provider calls. The [security and privacy notes](docs/security-privacy.md) describe the local demo identities, approval boundary, redaction, retention, and secret handling. [Local troubleshooting](docs/troubleshooting.md) covers fixture safety and ports. [Synthetic example cases and tested screenshots](docs/examples.md) show the local mock flow.
+```bash
+npm run --workspace support-refund-agent-web dev
+```
+
+Open [the portal](http://localhost:5173/portal) and sign in as `alex@example.com` / `local-customer-alex`. Under **Or choose a template**, choose **I was charged twice** and click **Send message**. That selected sample names `ORD-1001` and two $49 charges.
+
+Use **Admin dashboard**, then **Switch account**, to sign in as `approver@local.test` / `local-approver`. Review the policy and order evidence, then approve or reject the proposed refund. Approval records a local mock refund; the customer sees the outcome in the same case. Interactive model decisions can vary; the automated checks use deterministic models and synthetic data.
 
 ## Making it yours
 
-- Replace the mock support or commerce selection only after configuring the matching development/sandbox profile and its least-privilege credentials. Keep each persisted case bound to its original provider account.
-- Adapt the local policy documents, approval policy, and evaluation datasets to the rules your support team needs to enforce.
+- Change the policies and review limits to match your support process.
+- Connect the optional [Intercom development or Stripe sandbox adapter](docs/external-adapters.md) to try the same flow with a representative integration.
+
+See [local troubleshooting](docs/troubleshooting.md) for setup help, [synthetic examples](docs/examples.md) for the local flow, and [CONTRIBUTING.md](CONTRIBUTING.md) for verification commands.
 
 ## About Mastra templates
 
 Mastra templates are ready-to-use projects that show what you can build with Mastra. Clone one, try it in Studio, and adapt it to your use case.
 
 Want to contribute? See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Local verification
-
-Run the check-only commands from the repository root:
-
-```bash
-npm run check:runtime
-npm run check:env -- --profile=local
-npm run check:docs
-npm run format:check
-npm run lint && npm run lint:web
-npm run typecheck && npm run typecheck:web
-npm run test
-npm run build && npm run build:web
-```
-
-`npm run test:e2e` uses only deterministic models, synthetic identities, a temporary SQLite file, and mock provider selection. `npm run smoke:clean` performs the reproducible clean-clone command for the checked-out commit; it needs the package registry and the Playwright browser already available to the environment. It never calls Intercom, Stripe, or a paid model.
-
-`CAPTURE_LOCAL_DEMO_SCREENSHOTS=1 npm run test:e2e` refreshes the two committed synthetic screenshots from that same mock-flow test. Ordinary E2E runs do not write documentation assets.

@@ -2,10 +2,19 @@ const profile = process.argv
   .slice(2)
   .find((argument) => argument.startsWith("--profile="))
   ?.slice("--profile=".length);
+const mode =
+  process.argv
+    .slice(2)
+    .find((argument) => argument.startsWith("--mode="))
+    ?.slice("--mode=".length) || "interactive";
 
 if (profile && !["local", "intercom", "stripe", "auto"].includes(profile))
   throw new Error(
     "Unknown environment profile. Use local, intercom, stripe, or auto.",
+  );
+if (!["interactive", "deterministic"].includes(mode))
+  throw new Error(
+    "Unknown environment mode. Use interactive or deterministic.",
   );
 
 const errors = [];
@@ -53,6 +62,12 @@ if (
 const databaseUrl = value("TURSO_DATABASE_URL");
 if (databaseUrl && !databaseUrl.startsWith("file:"))
   errors.push("TURSO_DATABASE_URL must use a file: URL for the local profile.");
+
+requireValue(
+  "OPENAI_API_KEY",
+  mode === "interactive",
+  "OPENAI_API_KEY is required for interactive mode.",
+);
 
 for (const [name, maximum] of [
   ["SUPPORT_RETENTION_RAW_PAYLOAD_DAYS", 7],
@@ -135,4 +150,6 @@ if (selected.stripe) {
 
 if (errors.length)
   throw new Error(`Environment validation failed:\n- ${errors.join("\n- ")}`);
-console.log(`Environment profile ${profile || "auto"} is valid.`);
+console.log(
+  `Environment profile ${profile || "auto"} is valid in ${mode} mode.`,
+);
