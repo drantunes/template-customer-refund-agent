@@ -139,6 +139,13 @@ async function runStudioJourney(port) {
       path,
     );
   const isScopedMemory = (path) => path.startsWith("/api/memory/");
+  const isExpectedStudioAncillaryDenial = (path, method) =>
+    method === "GET" &&
+    (expectedDeniedStudioPaths.has(path) ||
+      path === "/api/agents/support-supervisor/voice/speakers" ||
+      /^\/api\/memory\/threads\/[^/]+\/working-memory$/.test(path));
+  const isExpectedMissingThreadInspection = (path, method) =>
+    method === "GET" && /^\/api\/memory\/threads\/[^/]+$/.test(path);
   page.on("response", (response) => {
     const url = new URL(response.url());
     const path = url.pathname;
@@ -146,21 +153,37 @@ async function runStudioJourney(port) {
     const failure = { status: response.status(), method, url: response.url() };
     const isSignIn =
       method === "POST" && path === "/api/auth/credentials/sign-in";
+    const isLogout = method === "POST" && path === "/api/auth/logout";
     if (isSignIn) {
       if (response.status() !== 200) unexpectedFailures.push(failure);
       else authenticatedStudioSession = true;
       return;
     }
+    if (isLogout) {
+      if (response.status() !== 200) unexpectedFailures.push(failure);
+      else authenticatedStudioSession = false;
+      return;
+    }
     if (!authenticatedStudioSession) return;
+    if (
+      response.status() === 403 &&
+      isExpectedStudioAncillaryDenial(path, method)
+    ) {
+      expectedAncillaryDenials.push(failure);
+      return;
+    }
+    if (
+      response.status() === 404 &&
+      isExpectedMissingThreadInspection(path, method)
+    ) {
+      expectedAncillaryDenials.push(failure);
+      return;
+    }
     if (isSupervisorExecution(path, method) || isScopedMemory(path)) {
       if (response.status() !== 200) unexpectedFailures.push(failure);
       return;
     }
     if (response.status() < 400) return;
-    if (response.status() === 403 && expectedDeniedStudioPaths.has(path)) {
-      expectedAncillaryDenials.push(failure);
-      return;
-    }
     unexpectedFailures.push(failure);
   });
   try {
@@ -193,11 +216,17 @@ async function runStudioJourney(port) {
     await waitForCompletedRun(page, followUpAnswer);
 
     await page.getByRole("button", { name: "A", exact: true }).click();
+    const logoutResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/auth/logout",
+    );
     await page.getByRole("button", { name: "Sign out", exact: true }).click();
+    if ((await logoutResponse).status() !== 200)
+      throw new Error("Studio sign-out did not return HTTP 200.");
     await page
       .getByRole("button", { name: "Sign in", exact: true })
       .waitFor({ timeout: 10_000 });
-    authenticatedStudioSession = false;
     await page.reload({ waitUntil: "domcontentloaded" });
     await page
       .getByRole("button", { name: "Sign in", exact: true })
