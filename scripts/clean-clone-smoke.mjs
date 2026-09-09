@@ -1,14 +1,34 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  copyFile,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+import { chromium } from "playwright";
 
 const source = resolve(process.argv[2] || process.cwd());
 const destination = await mkdtemp(
   join(tmpdir(), "support-refund-clean-clone-"),
 );
-const run = (command, args, cwd, env = process.env) => {
+const localSigningKey = "clean-clone-smoke-signing-key-at-least-32-characters";
+const firstPrompt = "Check ORD-1001 and summarize the evidence.";
+const firstAnswer =
+  "ORD-1001 is fulfilled. This was a read-only investigation.";
+const followUpPrompt = "Confirm the safe outcome.";
+const followUpAnswer = "Follow-up completed with the same read-only case.";
+const childDatabaseCandidates = [
+  "src/mastra/public/mastra.db",
+  ".mastra/output/mastra.db",
+];
+
+const run = (command, args, cwd, env) => {
   const result = spawnSync(command, args, {
     cwd,
     env,
@@ -22,6 +42,139 @@ const run = (command, args, cwd, env = process.env) => {
     );
   return result.stdout.trim();
 };
+
+function syntheticEnvironment() {
+  // Do not inherit a developer's provider selection, .env credentials, or
+  // remote endpoints. PATH and npm's cache are the only host values needed by
+  // this disposable, deterministic qualification.
+  return {
+    PATH: process.env.PATH,
+    npm_config_cache: process.env.npm_config_cache,
+    LOCAL_AUTH_SIGNING_KEY: localSigningKey,
+    SUPPORT_SOURCE: "mock",
+    COMMERCE_SOURCE: "mock",
+    MASTRA_TELEMETRY_DISABLED: "1",
+    NO_COLOR: "1",
+  };
+}
+
+async function exists(path) {
+  return access(path)
+    .then(() => true)
+    .catch(() => false);
+}
+
+async function assertDefaultRootDatabase() {
+  const databasePath = join(destination, "mastra.db");
+  if (!(await exists(databasePath)))
+    throw new Error("local:seed did not create the default root mastra.db.");
+  for (const childPath of childDatabaseCandidates)
+    if (await exists(join(destination, childPath)))
+      throw new Error(`Unexpected child-cwd database: ${childPath}.`);
+
+  const { createClient } = await import("@libsql/client");
+  const client = createClient({ url: pathToFileURL(databasePath).href });
+  try {
+    const result = await client.execute({
+      sql: "SELECT order_id, status FROM local_orders WHERE order_id = 'ORD-1001'",
+      args: [],
+    });
+    const order = result.rows[0];
+    if (order?.order_id !== "ORD-1001" || order.status !== "fulfilled")
+      throw new Error(
+        "Root mastra.db does not contain the fulfilled ORD-1001 fixture.",
+      );
+  } finally {
+    client.close();
+  }
+}
+
+async function injectStudioFixture() {
+  const fixture = join(
+    destination,
+    "test/fixtures/native-studio-read-model.ts",
+  );
+  const injectedModel = join(destination, "src/mastra/studio-test-model.ts");
+  await copyFile(fixture, injectedModel);
+  const indexPath = join(destination, "src/mastra/index.ts");
+  const index = await readFile(indexPath, "utf8");
+  const injection = `\nimport { nativeStudioReadModel } from "./studio-test-model";\nmastra.getAgent("supportSupervisorAgent").__updateModel({\n  model: nativeStudioReadModel() as never,\n});\n`;
+  if (index.includes("nativeStudioReadModel"))
+    throw new Error(
+      "Clean-clone Studio fixture injection marker already exists.",
+    );
+  await writeFile(indexPath, `${index}${injection}`);
+}
+
+async function waitForCompletedRun(page, answer) {
+  await page.getByText(answer, { exact: true }).waitFor({ timeout: 20_000 });
+  await page
+    .getByPlaceholder("Enter your message...")
+    .waitFor({ state: "visible", timeout: 20_000 });
+  await page.waitForFunction(
+    (expected) =>
+      document.body.innerText.includes(expected) &&
+      [...document.querySelectorAll("button")].every(
+        (button) => button.textContent?.trim() !== "Stop",
+      ) &&
+      document.body.innerText.includes("Idle"),
+    answer,
+    { timeout: 20_000 },
+  );
+}
+
+async function runStudioJourney(port) {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const failures = [];
+  page.on("response", (response) => {
+    if (response.status() >= 400)
+      failures.push({ status: response.status(), url: response.url() });
+  });
+  try {
+    await page.goto(`http://127.0.0.1:${port}`, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await page.locator("input[type=email]").fill("agent@local.test");
+    await page.locator("input[type=password]").fill("local-support-agent");
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await page
+      .getByText("Agents", { exact: true })
+      .waitFor({ timeout: 10_000 });
+    failures.length = 0;
+
+    await page.getByText("Support Supervisor", { exact: true }).click();
+    const composer = page.getByPlaceholder("Enter your message...");
+    await composer.fill(firstPrompt);
+    await composer.press("Enter");
+    await waitForCompletedRun(page, firstAnswer);
+    await page.getByText("Lookup order", { exact: true }).waitFor({
+      timeout: 10_000,
+    });
+
+    await page.reload({ waitUntil: "networkidle" });
+    await waitForCompletedRun(page, firstAnswer);
+    await composer.fill(followUpPrompt);
+    await composer.press("Enter");
+    await waitForCompletedRun(page, followUpAnswer);
+
+    await page.getByRole("button", { name: "A", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Sign out", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Sign in", exact: true })
+      .waitFor({ timeout: 10_000 });
+    await page.reload({ waitUntil: "networkidle" });
+    await page
+      .getByRole("button", { name: "Sign in", exact: true })
+      .waitFor({ timeout: 10_000 });
+    if (failures.length)
+      throw new Error(
+        `Studio browser journey had failed responses: ${JSON.stringify(failures)}`,
+      );
+  } finally {
+    await browser.close();
+  }
+}
+
 let server;
 let serverOutput = "";
 try {
@@ -29,41 +182,44 @@ try {
     "git",
     ["clone", "--no-local", "--no-hardlinks", source, destination],
     source,
+    syntheticEnvironment(),
   );
-  const sha = run("git", ["rev-parse", "HEAD"], destination);
+  const sha = run(
+    "git",
+    ["rev-parse", "HEAD"],
+    destination,
+    syntheticEnvironment(),
+  );
   await writeFile(
     join(destination, ".env"),
     [
-      "LOCAL_AUTH_SIGNING_KEY=clean-clone-smoke-signing-key-at-least-32-characters",
-      "TURSO_DATABASE_URL=file:./support-local.db",
+      `LOCAL_AUTH_SIGNING_KEY=${localSigningKey}`,
       "SUPPORT_SOURCE=mock",
       "COMMERCE_SOURCE=mock",
     ].join("\n"),
   );
-  const env = {
-    PATH: process.env.PATH,
-    npm_config_cache: process.env.npm_config_cache,
-    SUPPORT_SOURCE: "mock",
-    COMMERCE_SOURCE: "mock",
-    TURSO_DATABASE_URL: `file:${join(destination, "support-local.db")}`,
-    LOCAL_AUTH_SIGNING_KEY:
-      "clean-clone-smoke-signing-key-at-least-32-characters",
-    NO_COLOR: "1",
-  };
+  const env = syntheticEnvironment();
   const e2eApiPort = await unusedPort();
   const e2ePort = await unusedPort();
   env.E2E_API_PORT = String(e2eApiPort);
   env.E2E_PORT = String(e2ePort);
   run("npm", ["ci"], destination, env);
+  await injectStudioFixture();
   for (const command of [
     ["run", "check:runtime"],
     ["run", "check:env", "--", "--profile=local", "--mode=deterministic"],
     ["run", "local:seed"],
+  ])
+    run("npm", command, destination, env);
+  await assertDefaultRootDatabase();
+  for (const command of [
     ["run", "build"],
     ["run", "build:web"],
     ["run", "test:e2e"],
   ])
     run("npm", command, destination, env);
+  await assertDefaultRootDatabase();
+
   const port = await unusedPort();
   env.PORT = String(port);
   server = spawn("npm", ["run", "dev"], {
@@ -94,6 +250,9 @@ try {
   }
   if (!ready)
     throw new Error(`Local server did not become ready.\n${serverOutput}`);
+  await runStudioJourney(port);
+  await assertDefaultRootDatabase();
+
   const login = await fetch(`http://127.0.0.1:${port}/support/auth/login`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -117,7 +276,21 @@ try {
   const openApi = await openApiResponse.json().catch(() => undefined);
   if (!openApiResponse.ok || openApi?.openapi !== "3.1.0")
     throw new Error("Authenticated OpenAPI check failed.");
-  console.log(`Clean-clone smoke passed for ${sha}.`);
+  console.log(
+    JSON.stringify({
+      status: "passed",
+      sha,
+      database: "mastra.db",
+      studio: {
+        firstPrompt,
+        tool: "lookup_order",
+        order: "ORD-1001 fulfilled",
+        reloadHistory: true,
+        followUpPrompt,
+        visualSignOut: true,
+      },
+    }),
+  );
 } finally {
   if (server?.exitCode === null) {
     try {

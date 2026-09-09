@@ -26,6 +26,24 @@ for (const name of [
   "STRIPE_API_BASE_URL",
 ])
   delete process.env[name];
+// Support composition is evaluated at import time as well. Clear every
+// Intercom selector/configuration value inherited from a developer shell so
+// ordinary tests cannot register an external adapter before a focused test
+// explicitly supplies its synthetic configuration.
+process.env.SUPPORT_SOURCE = "mock";
+for (const name of [
+  "INTERCOM_DEVELOPMENT_ENABLED",
+  "INTERCOM_TENANT_ID",
+  "INTERCOM_APP_ID",
+  "INTERCOM_ACCESS_TOKEN",
+  "INTERCOM_CLIENT_SECRET",
+  "INTERCOM_ADMIN_ID",
+  "INTERCOM_API_BASE_URL",
+  "INTERCOM_KNOWLEDGE_ENABLED",
+  "INTERCOM_TICKET_TYPE_ID",
+  "INTERCOM_TICKET_STATE_ID",
+])
+  delete process.env[name];
 const databaseDirectory = mkdtempSync(join(tmpdir(), "phase001-vitest-"));
 const databasePath = join(databaseDirectory, "support.db");
 

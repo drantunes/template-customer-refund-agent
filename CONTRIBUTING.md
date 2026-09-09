@@ -32,6 +32,6 @@ npm run test
 npm run build && npm run build:web
 ```
 
-`npm run test` runs unit, integration, contract, and eval suites in both workspaces. `npm run test:e2e` is a separate browser check using deterministic models, synthetic identities, a temporary SQLite file, and mock provider selection. `npm run smoke:clean` validates a clean clone with deterministic environment validation; it needs the package registry and Playwright browser already available and never calls Intercom, Stripe, or a paid model.
+`npm run test` runs unit, integration, contract, and eval suites in both workspaces. `npm run test:e2e` is a separate browser check using deterministic models, synthetic identities, a temporary SQLite file, and mock provider selection. `npm run smoke:clean` also seeds the default root `mastra.db` and runs the native Studio sign-in, read-only order lookup, persisted follow-up, and visual sign-out journey. It needs the package registry and Playwright browser already available and never calls Intercom, Stripe, or a paid model.
 
 `CAPTURE_LOCAL_DEMO_SCREENSHOTS=1 npm run test:e2e` refreshes the two committed synthetic screenshots. Ordinary E2E runs do not write documentation assets.

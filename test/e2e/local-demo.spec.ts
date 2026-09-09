@@ -37,10 +37,12 @@ async function loadDeterministicRuntime() {
   delete process.env.TURSO_AUTH_TOKEN;
   process.env.SUPPORT_SOURCE = "mock";
   process.env.COMMERCE_SOURCE = "mock";
-  process.env.DISABLE_RUNTIME_SCORERS = "1";
   process.env.LOCAL_AUTH_SIGNING_KEY =
     "phase003-playwright-signing-key-must-be-at-least-32-characters";
-  process.env.OPENAI_API_KEY = "phase003-playwright-placeholder";
+  // Every model used by this browser journey is replaced below. Do not let a
+  // developer shell redirect an otherwise deterministic check to a provider.
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_BASE_URL;
 
   const { mastra, shutdownLocalMastra } =
     await import("../../src/mastra/index");
@@ -706,6 +708,5 @@ test("runs customer follow-up, native approval, rejection, access denial, and se
         `${runtime.databasePath}-wal`,
       ].map((path) => rm(path, { force: true })),
     );
-    delete process.env.DISABLE_RUNTIME_SCORERS;
   }
 });
