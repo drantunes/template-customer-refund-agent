@@ -70,7 +70,15 @@ export function scopedCaseDto(
       status: supportCase.status,
       createdAt: supportCase.createdAt,
       updatedAt: supportCase.updatedAt,
-      feedback: supportCase.feedback,
+      feedback: supportCase.feedback
+        ? {
+            rating: supportCase.feedback.rating,
+            ...(supportCase.feedback.comment === undefined
+              ? {}
+              : { comment: supportCase.feedback.comment }),
+            submittedAt: supportCase.feedback.submittedAt,
+          }
+        : undefined,
       metadata: {},
     } as PublicSupportCase;
   const command = supportCase.metadata.refundCommand;

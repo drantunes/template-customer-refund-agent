@@ -12,9 +12,11 @@ import {
   intercomWebhookRoute,
   stripeWebhookRoute,
   supportCaseApproveRoute,
+  supportCaseDetailRoute,
   supportCaseFeedbackRoute,
   supportCaseFollowUpRoute,
   supportCaseRejectRoute,
+  supportCasesListRoute,
   supportLoginRoute,
   supportMonitoringSummaryRoute,
   supportRoutes,
@@ -202,6 +204,130 @@ describe("support API contract", () => {
         true,
       );
     }
+  });
+
+  it("keeps feedback correlation IDs on staff records but out of customer responses", async () => {
+    const submittedAt = "2026-09-09T19:00:00.000Z";
+    const feedback = {
+      rating: "up" as const,
+      comment: "The replacement arrived quickly.",
+      submittedAt,
+      actorId: "customer-alex",
+      turnId: "turn-feedback",
+      runId: "run-feedback",
+      traceId: "trace-feedback",
+    };
+    const supportCase = {
+      id: "feedback-case",
+      externalId: "feedback-external",
+      source: "mock-email" as const,
+      customer: { email: "alex@example.com", name: "Alex Kim" },
+      subject: "Feedback projection",
+      messages: [],
+      status: "resolved" as const,
+      createdAt: submittedAt,
+      updatedAt: submittedAt,
+      feedback,
+      metadata: {
+        ownerId: "customer-alex",
+        activeTurnId: "turn-feedback",
+        providerBinding: {
+          tenantId: "local-demo",
+          providerKind: "local" as const,
+          providerAccountId: "local-demo",
+          externalConversationId: "feedback-conversation",
+        },
+      },
+    };
+    vi.spyOn(caseStore, "list").mockResolvedValue([supportCase] as never);
+    vi.spyOn(caseStore, "get").mockResolvedValue(supportCase as never);
+    vi.spyOn(caseStore, "turns").mockResolvedValue([
+      {
+        id: "turn-feedback",
+        sequence: 1,
+        state: "resolved",
+        runId: "run-feedback",
+        outcome: { telemetry: { traceId: "trace-feedback" } },
+      },
+    ] as never);
+    vi.spyOn(caseStore, "recordFeedback").mockResolvedValue(feedback);
+    vi.spyOn(caseStore, "update").mockResolvedValue(supportCase as never);
+
+    const app = new Hono();
+    app.use("/support/*", async (c, next) => {
+      c.set("mastra", {
+        observability: {},
+        getLogger: () => undefined,
+      } as never);
+      await next();
+    });
+    app.get("/support/cases", supportCasesListRoute.handler);
+    app.get("/support/cases/:caseId", supportCaseDetailRoute.handler);
+    app.post(
+      "/support/cases/:caseId/feedback",
+      supportCaseFeedbackRoute.handler,
+    );
+    const customerHeaders = {
+      authorization: `Bearer ${issueLocalSession({ id: "customer-alex" })}`,
+      "content-type": "application/json",
+    };
+    const customerResponses = await Promise.all([
+      app.request("http://support.test/support/cases", {
+        headers: customerHeaders,
+      }),
+      app.request("http://support.test/support/cases/feedback-case", {
+        headers: customerHeaders,
+      }),
+      app.request("http://support.test/support/cases/feedback-case/feedback", {
+        method: "POST",
+        headers: customerHeaders,
+        body: JSON.stringify({
+          rating: "up",
+          comment: feedback.comment,
+          responseMessageId: "msg_feedback-case_turn-feedback_final",
+        }),
+      }),
+    ]);
+    const [list, detail, posted] = await Promise.all(
+      customerResponses.map((response) => response.json()),
+    );
+    expect(customerResponses.map((response) => response.status)).toEqual([
+      200, 200, 200,
+    ]);
+    const expectedCustomerFeedback = {
+      rating: feedback.rating,
+      comment: feedback.comment,
+      submittedAt,
+    };
+    expect(list.cases[0].feedback).toEqual(expectedCustomerFeedback);
+    expect(detail.feedback).toEqual(expectedCustomerFeedback);
+    expect(posted.feedback).toEqual(expectedCustomerFeedback);
+    for (const response of [list.cases[0], detail, posted]) {
+      expect(response.feedback).not.toHaveProperty("actorId");
+      expect(response.feedback).not.toHaveProperty("turnId");
+      expect(response.feedback).not.toHaveProperty("runId");
+      expect(response.feedback).not.toHaveProperty("traceId");
+    }
+    expect(caseStore.recordFeedback).toHaveBeenCalledWith(
+      expect.objectContaining({
+        feedback: expect.objectContaining({
+          actorId: "customer-alex",
+          turnId: "turn-feedback",
+          runId: "run-feedback",
+          traceId: "trace-feedback",
+        }),
+      }),
+    );
+
+    const staff = await app.request(
+      "http://support.test/support/cases/feedback-case",
+      {
+        headers: {
+          authorization: `Bearer ${issueLocalSession({ id: "support-agent-demo" })}`,
+        },
+      },
+    );
+    expect((await staff.json()).feedback).toEqual(feedback);
   });
 
   it("exercises disabled, malformed, oversized, and unsigned webhook responses", async () => {
