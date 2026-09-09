@@ -56,6 +56,13 @@ import {
   MAX_INTERCOM_WEBHOOK_BYTES,
   verifyIntercomWebhook,
 } from "../providers/intercom/webhook";
+import { stripeSandboxConfig } from "../providers/stripe/config";
+import {
+  MAX_STRIPE_WEBHOOK_BYTES,
+  verifyStripeWebhook,
+} from "../providers/stripe/webhook";
+import { providerRegistry } from "../providers/registry";
+import { StripeProviderRegistry } from "../providers/stripe/registry";
 
 function principal(c: ContextWithMastra): SupportPrincipal | undefined {
   return c.req.raw?.headers
@@ -441,6 +448,149 @@ export const intercomWebhookRoute = registerApiRoute(
     },
   },
 );
+
+/** Stripe events reconcile an already-approved durable attempt. They cannot
+ * create a command, choose an account, or turn an unrelated valid event into
+ * a financial effect. A fresh GET is the arbiter for reordered events. */
+export const stripeWebhookRoute = registerApiRoute("/support/webhooks/stripe", {
+  method: "POST",
+  handler: async (c) => {
+    const config = stripeSandboxConfig();
+    if (!config)
+      return c.json(
+        errorResponseSchema.parse({ error: "Stripe is not enabled." }),
+        404,
+      );
+    if (!c.req.raw)
+      return c.json(
+        errorResponseSchema.parse({ error: "Webhook transport unavailable." }),
+        500,
+      );
+    const contentLength = c.req.raw.headers.get("content-length");
+    const length = contentLength === null ? undefined : Number(contentLength);
+    if (
+      length !== undefined &&
+      Number.isFinite(length) &&
+      (length <= 0 || length > MAX_STRIPE_WEBHOOK_BYTES)
+    )
+      return c.json(
+        errorResponseSchema.parse({ error: "Invalid Stripe webhook." }),
+        413,
+      );
+    let raw: Uint8Array;
+    try {
+      raw = await readIntercomWebhookBody(c.req.raw);
+    } catch {
+      return c.json(
+        errorResponseSchema.parse({ error: "Invalid Stripe webhook." }),
+        400,
+      );
+    }
+    let event;
+    try {
+      event = verifyStripeWebhook(raw, c.req.raw.headers, config);
+    } catch {
+      return c.json(
+        errorResponseSchema.parse({ error: "Invalid Stripe webhook." }),
+        401,
+      );
+    }
+    if (
+      !["refund.created", "refund.updated", "refund.failed"].includes(
+        event.type,
+      )
+    )
+      return c.json({ accepted: true, ignored: true });
+    const object = event.data.object;
+    const refundId = typeof object.id === "string" ? object.id : undefined;
+    if (!refundId) return c.json({ accepted: true, ignored: true });
+    const claim = await caseStore.claimStripeWebhookEvent(event.id);
+    if (claim.state === "completed")
+      return c.json({ accepted: true, duplicate: true });
+    if (claim.state === "in-progress")
+      return c.json(
+        errorResponseSchema.parse({
+          error: "Stripe reconciliation is active.",
+        }),
+        503,
+      );
+    try {
+      const attempt = await caseStore.stripeRefundAttemptByRefundId(refundId);
+      if (
+        !attempt ||
+        attempt.tenantId !== config.tenantId ||
+        attempt.providerAccountId !== config.accountId
+      ) {
+        if (
+          !(await caseStore.completeStripeWebhookEvent(
+            event.id,
+            claim.leaseToken,
+          ))
+        )
+          throw new Error("Stripe webhook receipt completion was lost.");
+        return c.json({ accepted: true, ignored: true });
+      }
+      const supportCase = await caseStore.get(attempt.caseId);
+      if (!supportCase) {
+        if (
+          !(await caseStore.completeStripeWebhookEvent(
+            event.id,
+            claim.leaseToken,
+          ))
+        )
+          throw new Error("Stripe webhook receipt completion was lost.");
+        return c.json({ accepted: true, ignored: true });
+      }
+      const binding = bindingsForCase(supportCase).transactions;
+      const registry = providerRegistry(binding);
+      if (!(registry instanceof StripeProviderRegistry))
+        throw new Error("Stripe attempt is not routed to Stripe.");
+      const command = attempt.command as { orderId?: string } | undefined;
+      if (!command?.orderId)
+        throw new Error("Stripe attempt command is missing its order id.");
+      const effect = await registry.reconcileRefund(binding, {
+        refundId,
+        orderId: command.orderId,
+        idempotencyKey: attempt.idempotencyKey,
+      });
+      // This event's freshly retrieved provider state is authoritative for its
+      // immutable attempt. Do not hand it to a global due/limit poll, which
+      // could skip this row after a prior success scheduled its next audit.
+      if (effect.status === "pending" || effect.status === "unknown")
+        await caseStore.updateStripeRefundAttempt(attempt.idempotencyKey, {
+          status: effect.status === "unknown" ? "unknown" : "pending",
+          refundId: effect.refundId,
+          providerStatus: effect.providerStatus ?? effect.status,
+          nextAttemptAt: new Date(Date.now() + 30_000).toISOString(),
+        });
+      else
+        await caseStore.finalizeStripeRefundReconciliation({
+          idempotencyKey: attempt.idempotencyKey,
+          status: effect.status === "succeeded" ? "succeeded" : "failed",
+          refundId: effect.refundId,
+          providerStatus: effect.providerStatus ?? effect.status ?? "unknown",
+          effect,
+        });
+      if (
+        !(await caseStore.completeStripeWebhookEvent(
+          event.id,
+          claim.leaseToken,
+        ))
+      )
+        throw new Error("Stripe webhook receipt completion was lost.");
+    } catch {
+      // Signed provider delivery remains retryable when the local reconciliation
+      // boundary is unavailable. Do not retain raw provider error detail; a
+      // later signed delivery can claim the recoverable failed receipt.
+      await caseStore.failStripeWebhookEvent(event.id, claim.leaseToken);
+      return c.json(
+        errorResponseSchema.parse({ error: "Stripe reconciliation failed." }),
+        503,
+      );
+    }
+    return c.json({ accepted: true });
+  },
+});
 
 class IntercomWebhookTooLargeError extends Error {}
 /** Content-Length is only an early reject. This stream boundary limits chunked
@@ -1096,7 +1246,46 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
             }
           | undefined,
       });
-      if (!reconciled) {
+      const pendingStripeAttempt =
+        !reconciled &&
+        (await caseStore.stripeRefundAttempt(command.idempotencyKey));
+      const failedStripeAttempt =
+        !reconciled &&
+        pendingStripeAttempt &&
+        pendingStripeAttempt.caseId === caseId &&
+        pendingStripeAttempt.fingerprint === command.fingerprint &&
+        pendingStripeAttempt.refundId &&
+        pendingStripeAttempt.status === "failed";
+      // The authoritative failure finalizer has already closed the immutable
+      // turn and queued its one staff-review reply. An HTTP approval must not
+      // turn a superseded success effect into a second native continuation.
+      if (failedStripeAttempt) {
+        const completed = await caseStore.completeDispatch(
+          dispatch.id,
+          "completed",
+          undefined,
+          dispatch.leaseToken,
+        );
+        if (!completed)
+          return c.json(
+            {
+              error:
+                "Approval resume lost its dispatch lease; reload the case.",
+            },
+            409,
+          );
+        return c.json(scopedCaseDto((await caseStore.get(caseId))!, current));
+      }
+      if (
+        !reconciled &&
+        !(
+          pendingStripeAttempt &&
+          pendingStripeAttempt.caseId === caseId &&
+          pendingStripeAttempt.fingerprint === command.fingerprint &&
+          pendingStripeAttempt.refundId &&
+          pendingStripeAttempt.status === "pending"
+        )
+      ) {
         // A normally resolved native transition with no exact provider effect
         // is a completed tool failure. Transport/snapshot errors take the
         // earlier catch path and remain recoverable; do not loop forever on a
@@ -1456,6 +1645,7 @@ export const supportRoutes = [
   supportLoginRoute,
   supportInboundRoute,
   intercomWebhookRoute,
+  stripeWebhookRoute,
   supportCasesListRoute,
   supportCaseDetailRoute,
   supportCaseSupervisorRoute,

@@ -21,6 +21,7 @@ import {
 import { vectorStore } from "./lib/vector-store";
 import { supportRoutes } from "./server/routes";
 import { issueRefundTool } from "./tools/issue-refund";
+import { scheduleSubscriptionCancellationTool } from "./tools/schedule-subscription-cancellation";
 import {
   lookupCustomerRefundHistoryTool,
   lookupOrderTool,
@@ -35,13 +36,17 @@ import {
   ApplicationSpanRedactor,
   RedactingPinoLogger,
 } from "./lib/observability-redaction";
-import { registerConfiguredIntercomProvider } from "./providers/registry";
+import {
+  registerConfiguredIntercomProvider,
+  registerConfiguredStripeProvider,
+} from "./providers/registry";
 
 const retentionPolicy = retentionPolicyFromEnvironment();
 // This is deliberately evaluated during composition: an explicit external
 // opt-in with incomplete development configuration fails rather than routing
 // an Intercom case to local fixtures.
 registerConfiguredIntercomProvider();
+registerConfiguredStripeProvider();
 
 export const mastra = new Mastra({
   agents: {
@@ -61,6 +66,7 @@ export const mastra = new Mastra({
     lookupSubscriptionTool,
     lookupCustomerRefundHistoryTool,
     issueRefundTool,
+    scheduleSubscriptionCancellationTool,
   },
   scorers: process.env.PHASE003_DISABLE_EVALS ? {} : supportEvalScorerRegistry,
   vectors: {

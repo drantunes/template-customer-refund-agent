@@ -24,14 +24,39 @@ function exponent(currency: string) {
   return value;
 }
 
+/** Provider adapters receive already-minor-unit amounts.  They still need to
+ * reject a currency whose exponent this application does not understand: a
+ * syntactically valid three-letter code is not enough to make an amount safe. */
+export function assertSupportedCurrency(currency: string) {
+  exponent(currency);
+  return currency;
+}
+
 export function money(currency: string, minor: number): Money {
   if (!/^[A-Z]{3}$/.test(currency))
     throw new Error("Currency must be an ISO 4217 uppercase code.");
+  assertSupportedCurrency(currency);
   if (!Number.isSafeInteger(minor) || minor < 0)
     throw new Error(
       "Money must be a non-negative safe integer minor-unit value.",
     );
   return { currency, minor };
+}
+
+/** Immutable persisted commands are semantic values, not serialized JSON.
+ * Object key order is deliberately ignored while array order remains material. */
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+    .join(",")}}`;
+}
+
+export function structurallyEqual(left: unknown, right: unknown) {
+  return canonicalJson(left) === canonicalJson(right);
 }
 
 /** Compatibility conversion is allowed only at the existing agent/UI edge. */

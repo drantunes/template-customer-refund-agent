@@ -12,6 +12,10 @@ import { ownerIdForCustomer } from "../server/auth";
 import { withDispatchLeaseScope } from "../lib/dispatch-lease-scope";
 import { retryOrEscalateOperationalFailure } from "../lib/operational-alerts";
 import { bindingsForIntercomConversation } from "../providers/intercom/config";
+import {
+  stripeSandboxConfig,
+  withStripeCommerceBinding,
+} from "../providers/stripe/config";
 import type { VerifiedIntercomConversationWebhook } from "../providers/intercom/webhook";
 
 const ingressScopeSchema = z.object({
@@ -77,7 +81,7 @@ const normalizeAndPersistStep = createStep({
       throw new Error("Inbound customer does not match the verified owner.");
     // The support adapter owns the conversation reference; externalId is the
     // inbound event identity and may legitimately differ from it.
-    const bindings = verified
+    const selectedBindings = verified
       ? bindingsForIntercomConversation(
           // the registration check above proves this exact account; config
           // remains the composition-owned authority for companion ports.
@@ -92,6 +96,13 @@ const normalizeAndPersistStep = createStep({
           transactions: support,
           knowledge: support,
         };
+    // Commerce/transactions are selected once at acceptance. Switching an
+    // environment variable later cannot redirect an existing case or effect.
+    const bindings = withStripeCommerceBinding(
+      selectedBindings,
+      stripeSandboxConfig(),
+      support.externalConversationId,
+    );
     const portBinding = bindings.support;
     const resolveRun = await mastra
       .getWorkflow("resolveSupportCaseWorkflow")

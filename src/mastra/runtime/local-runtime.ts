@@ -3,17 +3,24 @@ import type { LanguageModelV2 } from "@ai-sdk/provider";
 import type { Mastra } from "@mastra/core/mastra";
 import type { TracingContext } from "@mastra/core/observability";
 import { createHash } from "node:crypto";
-import { caseStore, type CaseStore } from "../lib/case-store";
+import {
+  caseStore,
+  isFinancialRetentionTombstone,
+  type CaseStore,
+} from "../lib/case-store";
 import {
   renewDispatchLeaseWhileRunning,
   withDispatchLeaseScope,
+  activeDispatchLeaseScope,
 } from "../lib/dispatch-lease-scope";
+import { activeTrustedCancellationScope } from "../providers/cancellation-execution";
 import type { DispatchRecord } from "../lib/case-store";
 import type { SupportCase } from "../domain/support-case";
 import {
   legacyAmountToMoney,
   moneyToLegacyAmount,
   refundFingerprint,
+  structurallyEqual,
 } from "../lib/money";
 import { POLICY_DOCUMENTS } from "../knowledge/policy-docs";
 import type {
@@ -29,6 +36,8 @@ import type {
   ProviderRegistry,
   RefundCommand,
   RefundEffect,
+  SubscriptionCancellationCommand,
+  SubscriptionCancellationEffect,
   SupportChannelProvider,
   TransactionalActionProvider,
 } from "../providers/contracts";
@@ -105,7 +114,7 @@ function isRefundPolicyEvidence(value: unknown): value is RefundPolicyEvidence {
  * as its first possible provider effect. Idempotency replay happens before
  * this boundary so an already committed matching effect remains reconcilable
  * after a later policy expiry. */
-async function assertRefundPolicyEvidenceAtFirstEffect(
+export async function assertRefundPolicyEvidenceAtFirstEffect(
   tx: LocalTransaction,
   command: RefundCommand,
   nativeTurnId: string,
@@ -276,7 +285,10 @@ export class LocalRuntime
   private ready?: Promise<void>;
   private readonly seeded = new Map<string, Promise<void>>();
   private readonly fixtureQueues = new Map<string, Promise<void>>();
-  constructor(client: Client = caseStore.getClientForTests()) {
+  constructor(
+    client: Client = caseStore.getClientForTests(),
+    private readonly clock: () => Date = () => new Date(),
+  ) {
     this.client = client;
   }
   private async ensured() {
@@ -286,7 +298,7 @@ export class LocalRuntime
   private async init() {
     await this.client.executeMultiple(`
       CREATE TABLE IF NOT EXISTS local_orders (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, order_id TEXT NOT NULL, customer_email TEXT NOT NULL, product TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, charge_count INTEGER NOT NULL, placed_at TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, order_id));
-      CREATE TABLE IF NOT EXISTS local_subscriptions (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, subscription_id TEXT NOT NULL, customer_email TEXT NOT NULL, plan TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, renews_at TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, subscription_id));
+      CREATE TABLE IF NOT EXISTS local_subscriptions (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, subscription_id TEXT NOT NULL, customer_email TEXT NOT NULL, plan TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, renews_at TEXT NOT NULL, cancel_at_period_end INTEGER NOT NULL DEFAULT 0, cancels_at TEXT, PRIMARY KEY(tenant_id, provider_account_id, subscription_id));
       CREATE TABLE IF NOT EXISTS local_refunds (refund_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, order_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, reason TEXT NOT NULL, issued_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS local_knowledge (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, version TEXT NOT NULL, effective_at TEXT, expires_at TEXT, PRIMARY KEY(tenant_id, provider_account_id, source));
       CREATE TABLE IF NOT EXISTS local_deliveries (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, payload_fingerprint TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, idempotency_key));
@@ -301,6 +313,8 @@ export class LocalRuntime
     for (const sql of [
       "ALTER TABLE local_knowledge ADD COLUMN effective_at TEXT",
       "ALTER TABLE local_knowledge ADD COLUMN expires_at TEXT",
+      "ALTER TABLE local_subscriptions ADD COLUMN cancel_at_period_end INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE local_subscriptions ADD COLUMN cancels_at TEXT",
     ])
       try {
         await this.client.execute(sql);
@@ -406,11 +420,11 @@ export class LocalRuntime
           args,
         },
         {
-          sql: "INSERT OR IGNORE INTO local_subscriptions VALUES (?, ?, 'SUB-1001', 'alex@example.com', 'Pro Plan - Monthly', 4900, 'USD', 'active', '2026-09-01T00:00:00.000Z')",
+          sql: "INSERT OR IGNORE INTO local_subscriptions(tenant_id, provider_account_id, subscription_id, customer_email, plan, amount_minor, currency, status, renews_at) VALUES (?, ?, 'SUB-1001', 'alex@example.com', 'Pro Plan - Monthly', 4900, 'USD', 'active', '2026-09-01T00:00:00.000Z')",
           args,
         },
         {
-          sql: "INSERT OR IGNORE INTO local_subscriptions VALUES (?, ?, 'SUB-1004', 'riley@example.com', 'Team Plan - Annual', 58800, 'USD', 'active', '2027-05-02T00:00:00.000Z')",
+          sql: "INSERT OR IGNORE INTO local_subscriptions(tenant_id, provider_account_id, subscription_id, customer_email, plan, amount_minor, currency, status, renews_at) VALUES (?, ?, 'SUB-1004', 'riley@example.com', 'Team Plan - Annual', 58800, 'USD', 'active', '2027-05-02T00:00:00.000Z')",
           args,
         },
         ...POLICY_DOCUMENTS.map((document) => ({
@@ -514,6 +528,14 @@ export class LocalRuntime
   }
   async findSubscription(binding: ProviderBinding, email: string) {
     await this.ensured();
+    await this.client.execute({
+      sql: "UPDATE local_subscriptions SET status = 'cancelled' WHERE tenant_id = ? AND provider_account_id = ? AND status = 'active' AND cancel_at_period_end = 1 AND cancels_at IS NOT NULL AND cancels_at <= ?",
+      args: [
+        binding.tenantId,
+        binding.providerAccountId,
+        this.clock().toISOString(),
+      ],
+    });
     const result = await this.client.execute({
       sql: "SELECT * FROM local_subscriptions WHERE tenant_id = ? AND provider_account_id = ? AND lower(customer_email) = lower(?)",
       args: [binding.tenantId, binding.providerAccountId, email],
@@ -532,6 +554,12 @@ export class LocalRuntime
           },
           status: text(row.status) as CommerceSubscription["status"],
           renewsAt: text(row.renews_at),
+          ...(Number(row.cancel_at_period_end) === 1
+            ? {
+                cancelAtPeriodEnd: true as const,
+                cancelsAt: text(row.cancels_at),
+              }
+            : {}),
         }
       : undefined;
   }
@@ -679,6 +707,10 @@ export class LocalRuntime
             "Idempotency key was reused with a conflicting refund command.",
           );
         const effect = JSON.parse(text(replay.rows[0].effect)) as RefundEffect;
+        if (isFinancialRetentionTombstone(effect))
+          throw new Error(
+            "A retained terminal financial tombstone blocks replay or a new provider effect.",
+          );
         await tx.rollback();
         return { ...effect, replayed: true };
       }
@@ -767,6 +799,145 @@ export class LocalRuntime
       } catch {}
       throw error;
     }
+  }
+  async scheduleSubscriptionCancellation(
+    command: SubscriptionCancellationCommand,
+  ): Promise<SubscriptionCancellationEffect> {
+    await this.ensured();
+    const supportCase = await caseStore.get(command.caseId);
+    const owner = supportCase
+      ? ownerIdForCustomer(command.binding.tenantId, supportCase.customer.email)
+      : undefined;
+    if (
+      !supportCase ||
+      !owner ||
+      supportCase.metadata.ownerId !== owner ||
+      command.ownerId !== owner ||
+      command.cancellationMode !== "period_end" ||
+      !structurallyEqual(
+        bindingsForCase(supportCase).transactions,
+        command.binding,
+      )
+    )
+      throw new Error("Cancellation requires the verified case owner.");
+    const turn = await caseStore.turn(command.caseId, command.turnId);
+    if (
+      !turn?.message ||
+      turn.message.id !== command.sourceMessageId ||
+      createHash("sha256").update(turn.message.body).digest("hex") !==
+        command.sourceMessageHash
+    )
+      throw new Error("Cancellation requires its immutable source message.");
+    const trusted = activeTrustedCancellationScope();
+    const lease = activeDispatchLeaseScope();
+    const immutable = await caseStore.getAction(
+      command.caseId,
+      "subscription-cancellation-command",
+      command.fingerprint,
+    );
+    if (
+      !trusted ||
+      !lease ||
+      trusted.caseId !== command.caseId ||
+      trusted.turnId !== command.turnId ||
+      trusted.commandFingerprint !== command.fingerprint ||
+      lease.caseId !== command.caseId ||
+      lease.turnId !== trusted.turnId ||
+      !(await caseStore.hasDispatchLease(lease)) ||
+      !structurallyEqual(immutable, command)
+    )
+      throw new Error(
+        "Cancellation requires the trusted current workflow command and lease.",
+      );
+    const existing = await caseStore.idempotency(command.idempotencyKey);
+    if (existing) {
+      if (existing.fingerprint !== command.fingerprint)
+        throw new Error(
+          "Idempotency key was reused with another cancellation.",
+        );
+      return {
+        ...(existing.effect as SubscriptionCancellationEffect),
+        replayed: true,
+      };
+    }
+    const row = await this.client.execute({
+      sql: "SELECT * FROM local_subscriptions WHERE tenant_id = ? AND provider_account_id = ? AND subscription_id = ? AND lower(customer_email) = lower(?) AND status = 'active' AND cancel_at_period_end = 0",
+      args: [
+        command.binding.tenantId,
+        command.binding.providerAccountId,
+        command.subscriptionId,
+        supportCase.customer.email,
+      ],
+    });
+    const subscription = row.rows[0] as Record<string, unknown> | undefined;
+    if (!subscription)
+      throw new Error("Cancellation requires one owned active subscription.");
+    const effect: SubscriptionCancellationEffect = {
+      subscriptionId: command.subscriptionId,
+      cancelAtPeriodEnd: true,
+      cancelsAt: text(subscription.renews_at),
+      idempotencyKey: command.idempotencyKey,
+      replayed: false,
+    };
+    await this.client.execute({
+      sql: "UPDATE local_subscriptions SET cancel_at_period_end = 1, cancels_at = renews_at WHERE tenant_id = ? AND provider_account_id = ? AND subscription_id = ? AND status = 'active' AND cancel_at_period_end = 0",
+      args: [
+        command.binding.tenantId,
+        command.binding.providerAccountId,
+        command.subscriptionId,
+      ],
+    });
+    return effect;
+  }
+  async retrieveSubscriptionCancellation(
+    command: SubscriptionCancellationCommand,
+  ) {
+    await this.ensured();
+    const supportCase = await caseStore.get(command.caseId);
+    const owner = supportCase
+      ? ownerIdForCustomer(command.binding.tenantId, supportCase.customer.email)
+      : undefined;
+    const turn = await caseStore.turn(command.caseId, command.turnId);
+    const immutable = await caseStore.getAction(
+      command.caseId,
+      "subscription-cancellation-command",
+      command.fingerprint,
+    );
+    if (
+      !supportCase ||
+      !owner ||
+      owner !== command.ownerId ||
+      supportCase.metadata.ownerId !== command.ownerId ||
+      !turn?.message ||
+      turn.message.id !== command.sourceMessageId ||
+      createHash("sha256").update(turn.message.body).digest("hex") !==
+        command.sourceMessageHash ||
+      !structurallyEqual(
+        bindingsForCase(supportCase).transactions,
+        command.binding,
+      ) ||
+      !structurallyEqual(immutable, command)
+    )
+      throw new Error("Cancellation recovery command is no longer authorized.");
+    await this.findSubscription(command.binding, supportCase.customer.email);
+    const row = await this.client.execute({
+      sql: "SELECT renews_at, status, cancel_at_period_end, cancels_at FROM local_subscriptions WHERE tenant_id = ? AND provider_account_id = ? AND subscription_id = ?",
+      args: [
+        command.binding.tenantId,
+        command.binding.providerAccountId,
+        command.subscriptionId,
+      ],
+    });
+    const subscription = row.rows[0] as Record<string, unknown> | undefined;
+    if (!subscription || Number(subscription.cancel_at_period_end) !== 1)
+      return undefined;
+    return {
+      subscriptionId: command.subscriptionId,
+      cancelAtPeriodEnd: true as const,
+      cancelsAt: text(subscription.cancels_at ?? subscription.renews_at),
+      idempotencyKey: command.idempotencyKey,
+      replayed: true,
+    };
   }
   async quoteRefund(command: RefundCommand) {
     await this.ensured();
@@ -1507,6 +1678,47 @@ export async function reconcileApprovedRefundEffect(input: {
   return true;
 }
 
+/** A native tool can legitimately finish with a Stripe refund in `pending`.
+ * The approval snapshot has then been consumed, but settlement is still owned
+ * by the durable attempt/reconciliation worker. Treat it as a valid native
+ * outcome without projecting success or finalizing the customer response. */
+async function hasPendingStripeRefundAttempt(
+  store: CaseStore,
+  caseId: string,
+  fingerprint: string,
+  command: PersistedRefundCommand | undefined,
+) {
+  if (!command?.idempotencyKey) return false;
+  const attempt = await store.stripeRefundAttempt(command.idempotencyKey);
+  return Boolean(
+    attempt &&
+    attempt.caseId === caseId &&
+    attempt.fingerprint === fingerprint &&
+    attempt.refundId &&
+    attempt.status === "pending",
+  );
+}
+
+/** A confirmed terminal provider rejection is a real native outcome too. It
+ * has no successful idempotency effect by design, but the enclosing workflow
+ * must consume it once and produce its staff-review response. */
+async function hasFailedStripeRefundAttempt(
+  store: CaseStore,
+  caseId: string,
+  fingerprint: string,
+  command: PersistedRefundCommand | undefined,
+) {
+  if (!command?.idempotencyKey) return false;
+  const attempt = await store.stripeRefundAttempt(command.idempotencyKey);
+  return Boolean(
+    attempt &&
+    attempt.caseId === caseId &&
+    attempt.fingerprint === fingerprint &&
+    attempt.refundId &&
+    attempt.status === "failed",
+  );
+}
+
 export async function recoverApprovedNativeDecisions(
   mastra: NativeRecoveryMastra,
   store: CaseStore = caseStore,
@@ -1569,15 +1781,52 @@ export async function recoverApprovedNativeDecisions(
       // is durable and projected. A missing effect after that normal return
       // is an explicit failed tool result; thrown native/snapshot errors use
       // the recoverable catch path below.
+      // Stripe's failed terminalizer has already atomically closed the case,
+      // immutable originating turn, and one staff-review outbox item. Resuming
+      // the enclosing native workflow would create a second correction and
+      // can never legitimately emit an issued reply.
       if (
         item.approved &&
-        !(await reconcileApprovedRefundEffect({
+        (await hasFailedStripeRefundAttempt(
           store,
-          supportCase: (await store.get(item.caseId)) ?? item.supportCase,
-          dispatch,
-          fingerprint: item.fingerprint,
+          item.caseId,
+          item.fingerprint,
           command,
-        }))
+        ))
+      ) {
+        await store.completeDispatch(
+          dispatch.id,
+          "completed",
+          undefined,
+          dispatch.leaseToken,
+        );
+        recovered += 1;
+        continue;
+      }
+      const finalized = item.approved
+        ? await reconcileApprovedRefundEffect({
+            store,
+            supportCase: (await store.get(item.caseId)) ?? item.supportCase,
+            dispatch,
+            fingerprint: item.fingerprint,
+            command,
+          })
+        : false;
+      if (
+        item.approved &&
+        !finalized &&
+        !(await hasPendingStripeRefundAttempt(
+          store,
+          item.caseId,
+          item.fingerprint,
+          command,
+        )) &&
+        !(await hasFailedStripeRefundAttempt(
+          store,
+          item.caseId,
+          item.fingerprint,
+          command,
+        ))
       ) {
         // The official native transition returned normally and the exact
         // durable effect is still absent. This is a completed tool failure,
@@ -1712,6 +1961,23 @@ export function startLocalRuntimeWorkers(
         logger?.warn("Native approval recovery failed.", { error }),
       );
       await recoverLocalWorkflows(mastra);
+      // Stripe recovery is opt-in and reads only durable attempts. Dynamic
+      // loading avoids coupling the local runtime's composition cycle to an
+      // external provider that may not be configured.
+      await import("../providers/stripe/reconciliation")
+        .then(({ reconcileStripeRefundAttempts }) =>
+          reconcileStripeRefundAttempts(caseStore),
+        )
+        .catch((error) =>
+          logger?.warn("Stripe refund reconciliation failed.", { error }),
+        );
+      await import("../providers/stripe/cancellation-reconciliation")
+        .then(({ reconcileUnknownSubscriptionCancellations }) =>
+          reconcileUnknownSubscriptionCancellations(caseStore),
+        )
+        .catch((error) =>
+          logger?.warn("Stripe cancellation reconciliation failed.", { error }),
+        );
       await deliverOutbox(undefined, 10, caseStore, { mastra });
       if (Date.now() - lastRetentionSweep >= retentionInterval) {
         const caseRetention = await caseStore.enforceRetention();

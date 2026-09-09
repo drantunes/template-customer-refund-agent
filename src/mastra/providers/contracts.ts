@@ -5,7 +5,7 @@
  */
 export interface ProviderBinding {
   tenantId: string;
-  providerKind: "local" | "intercom";
+  providerKind: "local" | "intercom" | "stripe";
   providerAccountId: string;
   externalConversationId: string;
 }
@@ -88,6 +88,12 @@ export interface TransactionalActionProvider {
     command: RefundCommand,
     authorization?: import("./native-execution").NativeRefundExecutionAuthorization,
   ): Promise<RefundEffect>;
+  scheduleSubscriptionCancellation(
+    command: SubscriptionCancellationCommand,
+  ): Promise<SubscriptionCancellationEffect>;
+  retrieveSubscriptionCancellation(
+    command: SubscriptionCancellationCommand,
+  ): Promise<SubscriptionCancellationEffect | undefined>;
 }
 
 export interface KnowledgeProvider {
@@ -115,6 +121,10 @@ export interface CommerceOrder {
   status: "fulfilled" | "shipped" | "processing" | "cancelled" | "refunded";
   chargeCount: number;
   placedAt: string;
+  /** Provider-owned references are retained for audit/reconciliation without
+   * making Stripe concepts part of the workflow contract. */
+  providerRefs?: ProviderRef[];
+  providerStatus?: string;
 }
 export interface CommerceSubscription {
   subscriptionId: string;
@@ -123,6 +133,11 @@ export interface CommerceSubscription {
   amount: Money;
   status: "active" | "cancelled" | "past_due";
   renewsAt: string;
+  /** A period-end cancellation is a schedule, not an immediate termination. */
+  cancelAtPeriodEnd?: true;
+  cancelsAt?: string;
+  providerRefs?: ProviderRef[];
+  providerStatus?: string;
 }
 export interface CommerceRefund {
   refundId: string;
@@ -130,6 +145,14 @@ export interface CommerceRefund {
   amount: Money;
   reason: string;
   issuedAt: string;
+  providerStatus?: string;
+}
+export interface ProviderRef {
+  provider: "stripe";
+  type: string;
+  id: string;
+  apiVersion: string;
+  livemode: false;
 }
 export interface RefundCommand {
   /** Case whose persisted local approval authorizes this immutable command. */
@@ -148,11 +171,37 @@ export interface RefundEffect {
   idempotencyKey: string;
   executedAt: string;
   replayed: boolean;
+  /** A provider accepting a refund request is not proof of settlement. */
+  status?: "pending" | "succeeded" | "failed" | "unknown";
+  /** Provider state is retained separately from the conservative local state. */
+  providerStatus?: string;
+  providerRefs?: ProviderRef[];
 }
 export interface RefundQuote {
   approvedAmount: Money;
   remainingAmount: Money;
   commandFingerprint: string;
+}
+/** The only non-refund cancellation supported by Phase 006: a verified owner
+ * explicitly asks to cancel at period end and explicitly declines a refund. */
+export interface SubscriptionCancellationCommand {
+  caseId: string;
+  turnId: string;
+  ownerId: string;
+  binding: ProviderBinding;
+  subscriptionId: string;
+  cancellationMode: "period_end";
+  sourceMessageId: string;
+  sourceMessageHash: string;
+  idempotencyKey: string;
+  fingerprint: string;
+}
+export interface SubscriptionCancellationEffect {
+  subscriptionId: string;
+  cancelAtPeriodEnd: true;
+  cancelsAt: string;
+  idempotencyKey: string;
+  replayed: boolean;
 }
 export interface DeliveryReceipt {
   receiptId: string;

@@ -101,6 +101,8 @@ export const subscriptionLookupSchema = z.object({
       currency: z.string(),
       status: z.enum(["active", "cancelled", "past_due"]),
       renewsAt: z.string(),
+      /** The paid invoice is the only subscription refund target. */
+      refundOrderId: z.string().optional(),
     })
     .optional(),
 });
@@ -157,7 +159,7 @@ export const refundResultSchema = z.object({
   orderId: z.string(),
   amount: z.number(),
   currency: z.string(),
-  status: z.enum(["executed", "skipped"]),
+  status: z.enum(["executed", "skipped", "pending", "failed"]),
   idempotencyKey: z.string(),
   executedAt: z.string(),
 });

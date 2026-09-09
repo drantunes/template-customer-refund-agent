@@ -2,6 +2,8 @@ import type { ProviderBinding, ProviderRegistry } from "./contracts";
 import { defaultLocalBinding, localRuntime } from "../runtime/local-runtime";
 import { intercomDevelopmentConfig, intercomBinding } from "./intercom/config";
 import { IntercomProviderRegistry } from "./intercom/registry";
+import { stripeBinding, stripeSandboxConfig } from "./stripe/config";
+import { StripeProviderRegistry } from "./stripe/registry";
 
 const registryKey = (binding: ProviderBinding) =>
   `${binding.tenantId}\u0000${binding.providerKind}\u0000${binding.providerAccountId}`;
@@ -52,6 +54,17 @@ export function registerConfiguredIntercomProvider() {
   if (!config) return undefined;
   const binding = intercomBinding(config, "configured");
   registerProviderRegistry(new IntercomProviderRegistry(config), [binding]);
+  return config;
+}
+
+/** Stripe selection is independent from support selection and registers only
+ * the persisted tenant/account route configured at process composition. */
+export function registerConfiguredStripeProvider() {
+  const config = stripeSandboxConfig();
+  if (!config) return undefined;
+  registerProviderRegistry(new StripeProviderRegistry(config), [
+    stripeBinding(config, "configured"),
+  ]);
   return config;
 }
 

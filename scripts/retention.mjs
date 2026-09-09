@@ -7,6 +7,9 @@ const defaults = {
   traceDays: 30,
   financialAuditDays: 365,
 };
+const financialRetentionTombstone = {
+  retention: "terminal-financial-effect",
+};
 
 function bounded(name, fallback) {
   const raw = process.env[name];
@@ -62,6 +65,71 @@ async function tableExists(client, name) {
       })
     ).rows[0],
   );
+}
+
+async function minimizeExpiredTerminalFinancialAttempts(client, auditCutoff) {
+  const transaction = await client.transaction("write");
+  try {
+    const candidates = await Promise.all([
+      transaction.execute({
+        sql: "SELECT idempotency_key, command_fingerprint AS fingerprint, created_at FROM support_stripe_refund_attempts WHERE status IN ('succeeded', 'failed', 'quarantined') AND COALESCE(terminal_at, created_at) < ?",
+        args: [auditCutoff],
+      }),
+      transaction.execute({
+        sql: "SELECT idempotency_key, fingerprint, created_at FROM support_subscription_cancellation_attempts WHERE status IN ('scheduled', 'failed', 'quarantined') AND COALESCE(terminal_at, created_at) < ?",
+        args: [auditCutoff],
+      }),
+    ]);
+    for (const result of candidates)
+      for (const row of result.rows) {
+        const key = String(row.idempotency_key);
+        const fingerprint = String(row.fingerprint);
+        const existing = await transaction.execute({
+          sql: "SELECT fingerprint FROM support_idempotency WHERE idempotency_key = ?",
+          args: [key],
+        });
+        if (
+          existing.rows[0] &&
+          String(existing.rows[0].fingerprint) !== fingerprint
+        )
+          throw new Error(
+            "Terminal financial attempt conflicts with its idempotency fingerprint.",
+          );
+        if (existing.rows[0])
+          await transaction.execute({
+            sql: "UPDATE support_idempotency SET effect = ? WHERE idempotency_key = ? AND fingerprint = ?",
+            args: [
+              JSON.stringify(financialRetentionTombstone),
+              key,
+              fingerprint,
+            ],
+          });
+        else
+          await transaction.execute({
+            sql: "INSERT INTO support_idempotency(idempotency_key, fingerprint, effect, created_at) VALUES (?, ?, ?, ?)",
+            args: [
+              key,
+              fingerprint,
+              JSON.stringify(financialRetentionTombstone),
+              String(row.created_at),
+            ],
+          });
+      }
+    await transaction.execute({
+      sql: "DELETE FROM support_stripe_refund_attempts WHERE status IN ('succeeded', 'failed', 'quarantined') AND COALESCE(terminal_at, created_at) < ?",
+      args: [auditCutoff],
+    });
+    await transaction.execute({
+      sql: "DELETE FROM support_subscription_cancellation_attempts WHERE status IN ('scheduled', 'failed', 'quarantined') AND COALESCE(terminal_at, created_at) < ?",
+      args: [auditCutoff],
+    });
+    await transaction.commit();
+  } catch (error) {
+    try {
+      await transaction.rollback();
+    } catch {}
+    throw error;
+  }
 }
 
 async function sweepCases(client, policy, current = new Date()) {
@@ -306,6 +374,14 @@ async function sweepCases(client, policy, current = new Date()) {
     });
     result.financialReasonsRedacted = Number(reasons.rowsAffected ?? 0);
   }
+  await minimizeExpiredTerminalFinancialAttempts(client, auditCutoff);
+  // Completed and failed receipts retain only a provider event identifier, but
+  // still follow the seven-day inbound boundary. Never remove an active lease:
+  // its durable job may still finish or be recovered after expiry.
+  await client.execute({
+    sql: "DELETE FROM support_stripe_webhook_receipts WHERE created_at < ? AND state IN ('completed', 'failed')",
+    args: [rawCutoff],
+  });
   result.expiredCaseIds = [...new Set(result.expiredCaseIds)];
   result.expiredWorkflowRunIds = [...new Set(result.expiredWorkflowRunIds)];
   return result;
@@ -332,6 +408,10 @@ try {
     "support_feedback",
     "support_audit",
     "support_supervisor_executions",
+    "support_idempotency",
+    "support_stripe_refund_attempts",
+    "support_subscription_cancellation_attempts",
+    "support_stripe_webhook_receipts",
   ])
     if (!(await tableExists(client, table)))
       throw new Error(
