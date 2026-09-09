@@ -108,16 +108,38 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
             },
             "description": "Authenticated local session",
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Invalid JSON or credentials payload",
+          },
           "401": {
             "content": {
               "application/json": {
                 "schema": {
                   "$schema": "https://json-schema.org/draft/2020-12/schema",
-                  "additionalProperties": false,
+                  "additionalProperties": {},
                   "properties": {
                     "error": {
                       "type": "string",
                     },
+                    "result": {},
                   },
                   "required": [
                     "error",
@@ -704,6 +726,27 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
             },
             "description": "Case inbox",
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Authentication required",
+          },
         },
       },
     },
@@ -1277,16 +1320,17 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
             },
             "description": "Support case",
           },
-          "404": {
+          "401": {
             "content": {
               "application/json": {
                 "schema": {
                   "$schema": "https://json-schema.org/draft/2020-12/schema",
-                  "additionalProperties": false,
+                  "additionalProperties": {},
                   "properties": {
                     "error": {
                       "type": "string",
                     },
+                    "result": {},
                   },
                   "required": [
                     "error",
@@ -1295,7 +1339,49 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                 },
               },
             },
-            "description": "Case not found",
+            "description": "Authentication required",
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Caller cannot access this case",
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Case was not found",
           },
         },
       },
@@ -1335,7 +1421,7 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
               },
             },
           },
-          "required": false,
+          "required": true,
         },
         "responses": {
           "200": {
@@ -1894,6 +1980,132 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
               },
             },
             "description": "Updated support case",
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Invalid approval payload",
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Authentication required",
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Caller is not an authorized approver",
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Case was not found",
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Approval command or workflow state is stale",
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Approval resume failed",
           },
         },
       },
@@ -2500,6 +2712,111 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
             },
             "description": "Updated support case",
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Invalid feedback payload",
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Authentication required",
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Caller cannot access this case",
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Case or response message was not found",
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Expired case cannot accept new content",
+          },
         },
       },
     },
@@ -3095,6 +3412,153 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
             },
             "description": "Appended authorized customer follow-up",
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Invalid follow-up payload",
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Authentication required",
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Caller cannot append to this case",
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Case was not found",
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Follow-up dispatch lease was lost",
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Expired case cannot accept new content",
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Follow-up resolution failed",
+          },
         },
       },
     },
@@ -3133,7 +3597,7 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
               },
             },
           },
-          "required": false,
+          "required": true,
         },
         "responses": {
           "200": {
@@ -3693,6 +4157,132 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
             },
             "description": "Updated support case",
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Invalid approval payload",
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Authentication required",
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Caller is not an authorized approver",
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Case was not found",
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Approval command or workflow state is stale",
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Approval resume failed",
+          },
         },
       },
     },
@@ -3800,11 +4390,12 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
               "application/json": {
                 "schema": {
                   "$schema": "https://json-schema.org/draft/2020-12/schema",
-                  "additionalProperties": false,
+                  "additionalProperties": {},
                   "properties": {
                     "error": {
                       "type": "string",
                     },
+                    "result": {},
                   },
                   "required": [
                     "error",
@@ -3814,6 +4405,132 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
               },
             },
             "description": "Invalid supervisor request",
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Authentication required",
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Caller cannot run the supervisor for this case",
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Case was not found",
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Case is missing verified owner evidence",
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Validation budget blocked the supervisor run",
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Supervisor trace correlation was unavailable",
           },
         },
       },
@@ -3903,11 +4620,12 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
               "application/json": {
                 "schema": {
                   "$schema": "https://json-schema.org/draft/2020-12/schema",
-                  "additionalProperties": false,
+                  "additionalProperties": {},
                   "properties": {
                     "error": {
                       "type": "string",
                     },
+                    "result": {},
                   },
                   "required": [
                     "error",
@@ -3916,7 +4634,91 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                 },
               },
             },
-            "description": "Invalid payload",
+            "description": "Invalid inbound payload",
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Authentication required",
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Caller cannot create this case",
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Expired case cannot accept new content",
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Ingestion could not complete",
           },
         },
       },
@@ -3973,16 +4775,80 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
             },
             "description": "Knowledge indexed",
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Invalid reindex request",
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Authentication required",
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Caller is not an administrator",
+          },
           "500": {
             "content": {
               "application/json": {
                 "schema": {
                   "$schema": "https://json-schema.org/draft/2020-12/schema",
-                  "additionalProperties": false,
+                  "additionalProperties": {},
                   "properties": {
                     "error": {
                       "type": "string",
                     },
+                    "result": {},
                   },
                   "required": [
                     "error",
@@ -4531,6 +5397,48 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
             },
             "description": "Support monitoring summary",
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Authentication required",
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Caller is not an administrator",
+          },
         },
       },
     },
@@ -4548,6 +5456,7 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
             "description": "OpenAPI document",
           },
         },
+        "security": [],
       },
     },
     "/support/webhooks/intercom": {
@@ -4573,16 +5482,38 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
             },
             "description": "Verified provider event accepted or ignored",
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Malformed webhook body",
+          },
           "401": {
             "content": {
               "application/json": {
                 "schema": {
                   "$schema": "https://json-schema.org/draft/2020-12/schema",
-                  "additionalProperties": false,
+                  "additionalProperties": {},
                   "properties": {
                     "error": {
                       "type": "string",
                     },
+                    "result": {},
                   },
                   "required": [
                     "error",
@@ -4593,16 +5524,80 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
             },
             "description": "Invalid webhook signature or payload",
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Intercom adapter is not enabled",
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Webhook body exceeds the accepted size",
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Webhook transport is unavailable",
+          },
           "503": {
             "content": {
               "application/json": {
                 "schema": {
                   "$schema": "https://json-schema.org/draft/2020-12/schema",
-                  "additionalProperties": false,
+                  "additionalProperties": {},
                   "properties": {
                     "error": {
                       "type": "string",
                     },
+                    "result": {},
                   },
                   "required": [
                     "error",
@@ -4640,16 +5635,38 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
             },
             "description": "Verified Stripe event accepted or ignored",
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Malformed webhook body",
+          },
           "401": {
             "content": {
               "application/json": {
                 "schema": {
                   "$schema": "https://json-schema.org/draft/2020-12/schema",
-                  "additionalProperties": false,
+                  "additionalProperties": {},
                   "properties": {
                     "error": {
                       "type": "string",
                     },
+                    "result": {},
                   },
                   "required": [
                     "error",
@@ -4660,16 +5677,80 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
             },
             "description": "Invalid Stripe webhook signature or payload",
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Stripe adapter is not enabled",
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Webhook body exceeds the accepted size",
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Webhook transport is unavailable",
+          },
           "503": {
             "content": {
               "application/json": {
                 "schema": {
                   "$schema": "https://json-schema.org/draft/2020-12/schema",
-                  "additionalProperties": false,
+                  "additionalProperties": {},
                   "properties": {
                     "error": {
                       "type": "string",
                     },
+                    "result": {},
                   },
                   "required": [
                     "error",

@@ -17,8 +17,12 @@ jobs:
       E2E_API_PORT: "4111"
       E2E_PORT: "5173"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # v4 (verified upstream ref)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      # v4 (verified upstream ref)
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24.20.0
           cache: npm
