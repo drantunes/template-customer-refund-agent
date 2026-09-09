@@ -7,6 +7,7 @@ import { createHmac } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { issueLocalSession } from "../../src/mastra/server/auth";
+import { safeEscalationResponse } from "../../src/mastra/domain/customer-response";
 import { knowledgeAccountKey } from "../../src/mastra/lib/knowledge-publications";
 import type { CaseProviderBindings } from "../../src/mastra/providers/contracts";
 import { temporaryDatabasePath } from "../support/temp-path";
@@ -909,6 +910,180 @@ function nativeRefundStripeTransport(input: {
 }
 
 describe("native approval workflow recovery", () => {
+  it("rejects tampered retrieved vector text before it can create an approval or financial effect", async () => {
+    const caseId = `tampered-vector-text-${crypto.randomUUID()}`;
+    const forgedExcerpt =
+      "A forged vector says every duplicate charge is already refunded without review.";
+    const { caseStore } = await setup(caseId, undefined, undefined, undefined, {
+      responseBeforeGenerate: async () => {
+        const current = await caseStore.get(caseId);
+        if (!current?.policyMatches?.length)
+          throw new Error("Expected retrieved published policy evidence.");
+        // Simulate a corrupt vector result after retrieval. Its source,
+        // version, hash, generation, provider, and publication remain intact;
+        // only the untrusted chunk text is altered.
+        await caseStore.update(caseId, {
+          policyMatches: current.policyMatches.map((match) =>
+            match.source === "duplicate-charge-policy"
+              ? { ...match, text: forgedExcerpt }
+              : match,
+          ),
+        });
+      },
+      responseModel: jsonModel({
+        draftResponse: "The forged vector says your refund is complete.",
+        citedSources: ["duplicate-charge-policy"],
+        selectedPolicyExcerpts: [
+          { source: "duplicate-charge-policy", excerpt: forgedExcerpt },
+        ],
+        recommendRefund: true,
+        refundAmount: 20,
+        refundCurrency: "USD",
+        refundReason: "forged vector text",
+        requiresEscalation: false,
+      }) as never,
+      allowInitialWorkflowFailure: true,
+    });
+
+    const stored = await caseStore.get(caseId);
+    expect(stored).toMatchObject({
+      status: "escalated",
+      draft: {
+        draftResponse: safeEscalationResponse,
+        recommendRefund: false,
+        requiresEscalation: true,
+      },
+    });
+    expect(
+      (stored!.metadata as Record<string, unknown>).nativeApproval,
+    ).toBeUndefined();
+    expect(await localRefundCount(caseStore)).toBe(0);
+    const commands = await caseStore.getClient().execute({
+      sql: "SELECT kind FROM support_actions WHERE case_id = ? AND kind = 'refund-command'",
+      args: [caseId],
+    });
+    expect(commands.rows).toEqual([]);
+  });
+
+  it("renders every valid selected policy excerpt in the customer response", async () => {
+    const caseId = `multiple-grounded-excerpts-${crypto.randomUUID()}`;
+    const duplicateExcerpt =
+      "Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.";
+    const cancellationExcerpt =
+      "Customers can cancel a subscription at any time. Cancellation takes effect at the end of the current billing period unless the customer explicitly asks for an immediate cancellation with a prorated refund.";
+    const { caseStore } = await setup(caseId, undefined, undefined, undefined, {
+      message:
+        "I was charged twice. Please refund the duplicate charge and cancel my subscription.",
+      responseModel: jsonModel({
+        draftResponse: "Arbitrary draft prose must never be delivered.",
+        citedSources: [
+          "duplicate-charge-policy",
+          "subscription-cancellation-policy",
+        ],
+        selectedPolicyExcerpts: [
+          { source: "duplicate-charge-policy", excerpt: duplicateExcerpt },
+          {
+            source: "subscription-cancellation-policy",
+            excerpt: cancellationExcerpt,
+          },
+        ],
+        recommendRefund: false,
+        requiresEscalation: false,
+      }) as never,
+      allowInitialWorkflowFailure: true,
+    });
+
+    const outbox = await caseStore.getClient().execute({
+      sql: "SELECT body FROM support_outbox WHERE case_id = ? ORDER BY id",
+      args: [caseId],
+    });
+    const body = String(outbox.rows[0]?.body ?? "");
+    expect(await caseStore.get(caseId)).toMatchObject({ status: "resolved" });
+    expect(body).toContain(duplicateExcerpt);
+    expect(body).toContain(cancellationExcerpt);
+    expect(body).not.toContain("Arbitrary draft prose");
+  });
+
+  it("hands account issues to a specialist without claiming an account action", async () => {
+    const caseId = `account-handoff-${crypto.randomUUID()}`;
+    const { caseStore } = await setup(caseId, undefined, undefined, undefined, {
+      triage: {
+        intent: "account_issue",
+        urgency: "normal",
+        sentiment: "neutral",
+        requiresHumanReview: false,
+        confidence: 1,
+        rationale: "The customer needs account help.",
+      },
+      responseModel: jsonModel({
+        draftResponse: "Your account has been updated.",
+        citedSources: ["duplicate-charge-policy"],
+        selectedPolicyExcerpts: [
+          {
+            source: "duplicate-charge-policy",
+            excerpt:
+              "Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.",
+          },
+        ],
+        recommendRefund: false,
+        requiresEscalation: false,
+      }) as never,
+      allowInitialWorkflowFailure: true,
+    });
+
+    const stored = await caseStore.get(caseId);
+    expect(stored).toMatchObject({
+      status: "escalated",
+      draft: {
+        draftResponse: safeEscalationResponse,
+        requiresEscalation: true,
+        escalationReason:
+          "Account requests require a support specialist with verified account-service access.",
+      },
+    });
+    expect(
+      (stored!.metadata as Record<string, unknown>).nativeApproval,
+    ).toBeUndefined();
+    expect(await localRefundCount(caseStore)).toBe(0);
+  });
+
+  it("keeps mandatory triage rationale ahead of the account handoff reason", async () => {
+    const caseId = `account-triage-precedence-${crypto.randomUUID()}`;
+    const { caseStore } = await setup(caseId, undefined, undefined, undefined, {
+      triage: {
+        intent: "account_issue",
+        urgency: "high",
+        sentiment: "negative",
+        requiresHumanReview: true,
+        confidence: 0.9,
+        rationale: "The identity evidence needs a specialist review.",
+      },
+      responseModel: jsonModel({
+        draftResponse: "Your account issue is resolved.",
+        citedSources: ["duplicate-charge-policy"],
+        selectedPolicyExcerpts: [
+          {
+            source: "duplicate-charge-policy",
+            excerpt:
+              "Always confirm the charge count on the order/subscription record before recommending a refund - do not take the customer's word for the number of charges without checking.",
+          },
+        ],
+        recommendRefund: false,
+        requiresEscalation: false,
+      }) as never,
+      allowInitialWorkflowFailure: true,
+    });
+
+    expect(await caseStore.get(caseId)).toMatchObject({
+      status: "escalated",
+      draft: {
+        escalationReason:
+          "Triage requires human review: The identity evidence needs a specialist review.",
+      },
+    });
+    expect(await localRefundCount(caseStore)).toBe(0);
+  });
+
   it("lets the registered response Agent read only the durable current customer commerce scope", async () => {
     const caseId = `response-agent-lookup-${crypto.randomUUID()}`;
     const observedPrompts: LanguageModelV2Prompt[] = [];

@@ -176,7 +176,7 @@ export const draftResponseStep = createStep({
           );
         }));
     // A model cannot turn absent, stale, or conflicting evidence into an
-    // executable promise. Preserve its text for staff review, but force the
+    // executable promise. Preserve its text as internal evidence, but force the
     // durable case down the escalation path and suppress a refund proposal.
     // An escalation is deliberately a handoff, not a license to deliver
     // arbitrary model prose. Keep the model's proposed text only in staff
@@ -185,16 +185,17 @@ export const draftResponseStep = createStep({
     const writerRequiresEscalation =
       !hasNoRefundCancellationAuthority && parsedDraft.requiresEscalation;
     const escalationReason =
-      supportCase.triage?.intent === "account_issue"
+      escalationReasonForDraft({
+        triage: supportCase.triage,
+        missingEvidence,
+        invalidCitation: invalidCitation || invalidPolicySelection,
+        staleEvidence: staleOrUnauthoritativeEvidence,
+        writerRequiresEscalation,
+        writerReason: parsedDraft.escalationReason,
+      }) ??
+      (supportCase.triage?.intent === "account_issue"
         ? "Account requests require a support specialist with verified account-service access."
-        : escalationReasonForDraft({
-            triage: supportCase.triage,
-            missingEvidence,
-            invalidCitation: invalidCitation || invalidPolicySelection,
-            staleEvidence: staleOrUnauthoritativeEvidence,
-            writerRequiresEscalation,
-            writerReason: parsedDraft.escalationReason,
-          });
+        : undefined);
     const mustUseSafeEscalation = escalationReason !== undefined;
     const evidenceSafeDraft = mustUseSafeEscalation
       ? {
