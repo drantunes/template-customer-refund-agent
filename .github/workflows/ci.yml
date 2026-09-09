@@ -75,7 +75,7 @@ jobs:
       - name: Environment and documentation checks
         run: |
           export LOCAL_AUTH_SIGNING_KEY=ci-local-signing-key-at-least-32-characters
-          npm run check:env -- --profile=local
+          npm run check:env -- --profile=local --mode=deterministic
           npm run check:docs
       - name: Local mock end-to-end test
         run: npm run test:e2e

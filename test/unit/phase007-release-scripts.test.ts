@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { cp, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -44,6 +44,34 @@ function localEnvironment(overrides: Record<string, string> = {}) {
 }
 
 describe("PHASE-007 environment validation", () => {
+  it("keeps the CI preflight deterministic without an OpenAI key", async () => {
+    const workflow = await readFile(
+      resolve(root, ".github/workflows/ci.yml"),
+      "utf8",
+    );
+    const preflight = workflow.match(
+      /- name: Environment and documentation checks\n        run: \|\n          export LOCAL_AUTH_SIGNING_KEY=ci-local-signing-key-at-least-32-characters\n          npm run check:env -- (?<arguments>.+)\n/,
+    );
+
+    expect(preflight?.groups?.arguments).toBe(
+      "--profile=local --mode=deterministic",
+    );
+
+    const keyFreeEnvironment = localEnvironment();
+    expect(keyFreeEnvironment).not.toHaveProperty("OPENAI_API_KEY");
+
+    const result = run(
+      checkEnv,
+      preflight!.groups!.arguments.split(" "),
+      keyFreeEnvironment,
+    );
+
+    expect(result).toMatchObject({ status: 0 });
+    expect(result.output).toContain(
+      "Environment profile local is valid in deterministic mode.",
+    );
+  });
+
   it("accepts the explicit deterministic local mock profile without creating its database", async () => {
     const directory = await temporaryDirectory();
     const database = join(directory, "must-not-exist.db");
