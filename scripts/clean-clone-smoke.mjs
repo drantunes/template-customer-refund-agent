@@ -126,21 +126,54 @@ async function waitForCompletedRun(page, answer) {
 async function runStudioJourney(port) {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
-  const failures = [];
+  const unexpectedFailures = [];
+  const expectedAncillaryDenials = [];
+  let authenticatedStudioSession = false;
+  const expectedDeniedStudioPaths = new Set([
+    "/api/processors",
+    "/api/mcp/v0/servers",
+  ]);
+  const isSupervisorExecution = (path, method) =>
+    method === "POST" &&
+    /^\/api\/agents\/support-supervisor\/(?:generate|stream|send-message|signals|threads\/subscribe)$/.test(
+      path,
+    );
+  const isScopedMemory = (path) => path.startsWith("/api/memory/");
   page.on("response", (response) => {
-    if (response.status() >= 400)
-      failures.push({ status: response.status(), url: response.url() });
+    const url = new URL(response.url());
+    const path = url.pathname;
+    const method = response.request().method();
+    const failure = { status: response.status(), method, url: response.url() };
+    const isSignIn =
+      method === "POST" && path === "/api/auth/credentials/sign-in";
+    if (isSignIn) {
+      if (response.status() !== 200) unexpectedFailures.push(failure);
+      else authenticatedStudioSession = true;
+      return;
+    }
+    if (!authenticatedStudioSession) return;
+    if (isSupervisorExecution(path, method) || isScopedMemory(path)) {
+      if (response.status() !== 200) unexpectedFailures.push(failure);
+      return;
+    }
+    if (response.status() < 400) return;
+    if (response.status() === 403 && expectedDeniedStudioPaths.has(path)) {
+      expectedAncillaryDenials.push(failure);
+      return;
+    }
+    unexpectedFailures.push(failure);
   });
   try {
-    await page.goto(`http://127.0.0.1:${port}`, { waitUntil: "networkidle" });
+    // Studio configures its API host as localhost. Keeping the browser origin
+    // identical lets its HttpOnly same-site session cookie reach that API.
+    await page.goto(`http://localhost:${port}`, { waitUntil: "networkidle" });
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page.locator("input[type=email]").fill("agent@local.test");
     await page.locator("input[type=password]").fill("local-support-agent");
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page
-      .getByText("Agents", { exact: true })
+      .getByRole("link", { name: "Agents", exact: true })
       .waitFor({ timeout: 10_000 });
-    failures.length = 0;
 
     await page.getByText("Support Supervisor", { exact: true }).click();
     const composer = page.getByPlaceholder("Enter your message...");
@@ -162,13 +195,18 @@ async function runStudioJourney(port) {
     await page
       .getByRole("button", { name: "Sign in", exact: true })
       .waitFor({ timeout: 10_000 });
+    authenticatedStudioSession = false;
     await page.reload({ waitUntil: "networkidle" });
     await page
       .getByRole("button", { name: "Sign in", exact: true })
       .waitFor({ timeout: 10_000 });
-    if (failures.length)
+    if (unexpectedFailures.length)
       throw new Error(
-        `Studio browser journey had failed responses: ${JSON.stringify(failures)}`,
+        `Studio browser journey had unexpected failed responses: ${JSON.stringify(unexpectedFailures)}`,
+      );
+    if (!expectedAncillaryDenials.length)
+      throw new Error(
+        "Studio browser journey did not observe the expected ancillary authorization denials.",
       );
   } finally {
     await browser.close();
