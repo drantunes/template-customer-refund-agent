@@ -14,6 +14,10 @@ afterEach(() => {
 });
 
 describe("support API contract", () => {
+  it("matches the complete normalized Zod-derived OpenAPI document", () => {
+    expect(supportOpenApiDocument).toMatchSnapshot();
+  });
+
   it("rejects an invalid inbound DTO without accepting a partial payload", () => {
     const result = mockEmailPayloadSchema.safeParse({
       externalId: "only-an-id",
@@ -63,7 +67,50 @@ describe("support API contract", () => {
             status.startsWith("2") && response.content !== undefined,
         ),
       ).toBe(true);
+      expect(operationForMethod).toHaveProperty("responses");
     }
+  });
+
+  it("documents the local bearer boundary and explicit public exceptions", () => {
+    expect(supportOpenApiDocument.components.securitySchemes).toEqual({
+      bearerAuth: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "Local session",
+      },
+    });
+    for (const path of [
+      "/support/auth/login",
+      "/support/webhooks/intercom",
+      "/support/webhooks/stripe",
+    ]) {
+      const operation =
+        supportOpenApiDocument.paths[
+          path as keyof typeof supportOpenApiDocument.paths
+        ];
+      const method = "get" in operation ? operation.get : operation.post;
+      expect(method.security).toEqual([]);
+    }
+    for (const { path } of supportRoutes) {
+      if (
+        [
+          "/support/auth/login",
+          "/support/webhooks/intercom",
+          "/support/webhooks/stripe",
+        ].includes(path)
+      )
+        continue;
+      const documentedPath = path.replace(
+        /:([^/]+)/g,
+        "{$1}",
+      ) as keyof typeof supportOpenApiDocument.paths;
+      const operation = supportOpenApiDocument.paths[documentedPath];
+      const method = "get" in operation ? operation.get : operation.post;
+      expect(method.security).toBeUndefined();
+      expect(supportOpenApiDocument.security).toEqual([{ bearerAuth: [] }]);
+    }
+    const openApi = supportOpenApiDocument.paths["/support/openapi.json"].get;
+    expect(openApi.security).toBeUndefined();
   });
 
   it("reports unsupported providers instead of silently using mock", () => {

@@ -6,12 +6,13 @@ import { TestExporter } from "@mastra/observability";
 import { issueLocalSession } from "../../src/mastra/server/auth";
 import { deterministicJsonModel } from "../fixtures/deterministic-language-model";
 import type { ProviderRegistry } from "../../src/mastra/providers/contracts";
+import { temporaryDatabasePath } from "../support/temp-path";
 
 const databases: string[] = [];
 const shutdowns: Array<() => Promise<void>> = [];
 
 async function configuredServer() {
-  const path = `/private/tmp/phase003-built-in-auth-${crypto.randomUUID()}.db`;
+  const path = temporaryDatabasePath("phase003-built-in-auth");
   databases.push(path, `${path}-shm`, `${path}-wal`);
   process.env.TURSO_DATABASE_URL = `file:${path}`;
   process.env.SUPPORT_SOURCE = "mock";

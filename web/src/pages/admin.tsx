@@ -350,8 +350,8 @@ function AdminSession({
           <CardHeader>
             <CardTitle>Case detail</CardTitle>
             <CardDescription>
-              Review the selected case, then inspect the run in Mastra Studio
-              when it is running.
+              Review the selected case, including its customer conversation,
+              evidence, and pending approval decision.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -378,7 +378,9 @@ function AdminSession({
 
       <Separator />
 
-      <MonitoringSection session={session} />
+      {session.principal.roles.includes("admin") && (
+        <MonitoringSection session={session} />
+      )}
     </div>
   );
 }

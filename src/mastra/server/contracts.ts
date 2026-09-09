@@ -185,9 +185,20 @@ const jsonSchema = (schema: z.core.$ZodType) => z.toJSONSchema(schema);
 export const supportOpenApiDocument = {
   openapi: "3.1.0",
   info: { title: "Support demo API", version: "0.1.0" },
+  components: {
+    securitySchemes: {
+      bearerAuth: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "Local session",
+      },
+    },
+  },
+  security: [{ bearerAuth: [] }],
   paths: {
     "/support/auth/login": {
       post: {
+        security: [],
         requestBody: {
           required: true,
           content: {
@@ -238,6 +249,7 @@ export const supportOpenApiDocument = {
     },
     "/support/webhooks/intercom": {
       post: {
+        security: [],
         requestBody: {
           required: true,
           content: { "application/json": { schema: { type: "object" } } },
@@ -264,6 +276,7 @@ export const supportOpenApiDocument = {
     },
     "/support/webhooks/stripe": {
       post: {
+        security: [],
         requestBody: {
           required: true,
           content: { "application/json": { schema: { type: "object" } } },

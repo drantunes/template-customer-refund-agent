@@ -8,6 +8,7 @@ import {
 } from "../../src/mastra/server/auth";
 import { CaseStore } from "../../src/mastra/lib/case-store";
 import { rm } from "node:fs/promises";
+import { temporaryDatabasePath } from "../support/temp-path";
 
 const previous = process.env.LOCAL_AUTH_SIGNING_KEY;
 const key = "phase003-test-signing-key-must-be-at-least-32-chars";
@@ -78,7 +79,7 @@ describe("local support auth", () => {
 
 describe("durable follow-up turns", () => {
   it("appends one event/turn and invalidates a waiting approval", async () => {
-    const path = `/private/tmp/phase003-turn-${crypto.randomUUID()}.db`;
+    const path = temporaryDatabasePath("phase003-turn");
     const store = new CaseStore({ url: `file:${path}` });
     const createdAt = "2026-09-05T00:00:00.000Z";
     try {

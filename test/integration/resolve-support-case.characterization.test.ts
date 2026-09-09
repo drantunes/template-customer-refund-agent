@@ -9,6 +9,7 @@ import {
   deterministicJsonModel,
   deterministicRefundModel,
 } from "../fixtures/deterministic-language-model";
+import { temporaryDatabasePath } from "../support/temp-path";
 
 const databaseFiles: string[] = [];
 const mastraRuntimes: Array<{ shutdown(): Promise<void> }> = [];
@@ -18,7 +19,7 @@ async function loadCharacterizationRuntime(draft: {
   requiresEscalation: boolean;
   refundAmount?: number;
 }) {
-  const databasePath = `/private/tmp/phase001-characterization-${crypto.randomUUID()}.db`;
+  const databasePath = temporaryDatabasePath("phase001-characterization");
   databaseFiles.push(
     databasePath,
     `${databasePath}-shm`,

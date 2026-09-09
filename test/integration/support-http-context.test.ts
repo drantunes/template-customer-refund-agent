@@ -14,6 +14,7 @@ import {
   deterministicRefundModel,
   type DeterministicRefundModel,
 } from "../fixtures/deterministic-language-model";
+import { temporaryDatabasePath } from "../support/temp-path";
 
 const databaseFiles: string[] = [];
 const mastraRuntimes: Array<{ shutdown(): Promise<void> }> = [];
@@ -81,7 +82,7 @@ function approvalApp(mastra: unknown) {
 }
 
 async function loadDeterministicRuntime() {
-  const databasePath = `/private/tmp/phase001-http-context-${crypto.randomUUID()}.db`;
+  const databasePath = temporaryDatabasePath("phase001-http-context");
   databaseFiles.push(
     databasePath,
     `${databasePath}-shm`,

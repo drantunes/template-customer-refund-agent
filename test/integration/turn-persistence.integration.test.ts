@@ -4,6 +4,7 @@ import { CaseStore } from "../../src/mastra/lib/case-store";
 import { defaultLocalBinding } from "../../src/mastra/runtime/local-runtime";
 import type { SupportCase } from "../../src/mastra/domain/support-case";
 import { withDispatchLeaseScope } from "../../src/mastra/lib/dispatch-lease-scope";
+import { temporaryDatabasePath } from "../support/temp-path";
 
 const files: string[] = [];
 const stores: CaseStore[] = [];
@@ -14,7 +15,7 @@ afterEach(async () => {
 });
 
 async function createConversation() {
-  const path = `/private/tmp/phase003-turn-${crypto.randomUUID()}.db`;
+  const path = temporaryDatabasePath("phase003-turn");
   files.push(path, `${path}-shm`, `${path}-wal`);
   const store = new CaseStore({ url: `file:${path}` });
   stores.push(store);

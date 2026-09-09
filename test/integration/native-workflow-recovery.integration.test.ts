@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { issueLocalSession } from "../../src/mastra/server/auth";
 import { knowledgeAccountKey } from "../../src/mastra/lib/knowledge-publications";
 import type { CaseProviderBindings } from "../../src/mastra/providers/contracts";
+import { temporaryDatabasePath } from "../support/temp-path";
 
 const files: string[] = [];
 const runtimes: Array<{ shutdown(): Promise<void> }> = [];
@@ -198,8 +199,7 @@ async function setup(
   },
 ) {
   const path =
-    options?.databasePath ??
-    `/private/tmp/phase003-native-workflow-${crypto.randomUUID()}.db`;
+    options?.databasePath ?? temporaryDatabasePath("phase003-native-workflow");
   if (!files.includes(path)) files.push(path, `${path}-shm`, `${path}-wal`);
   process.env.TURSO_DATABASE_URL = `file:${path}`;
   process.env.SUPPORT_SOURCE = "mock";

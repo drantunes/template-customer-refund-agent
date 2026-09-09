@@ -482,8 +482,9 @@ function PortalSession({
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
             Curious what that looks like from the other side? Open the admin
-            dashboard to watch this case get handled, or open Mastra Studio to
-            inspect the agents, workflows, and traces behind the demo.
+            dashboard to review this case. Mastra Studio lists the registered
+            agents, workflows, and tools, while case work and approval stay in
+            the local portal and admin dashboard.
           </p>
           <DialogFooter>
             <Button

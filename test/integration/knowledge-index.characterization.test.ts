@@ -1,5 +1,6 @@
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { temporaryDatabasePath } from "../support/temp-path";
 
 const databaseFiles: string[] = [];
 let invalidEmbedding = false;
@@ -17,7 +18,7 @@ afterEach(async () => {
 
 describe("support knowledge index", () => {
   it("publishes and searches an authoritative generation without model credentials", async () => {
-    const databasePath = `/private/tmp/phase001-rag-${crypto.randomUUID()}.db`;
+    const databasePath = temporaryDatabasePath("phase001-rag");
     databaseFiles.push(
       databasePath,
       `${databasePath}-shm`,
