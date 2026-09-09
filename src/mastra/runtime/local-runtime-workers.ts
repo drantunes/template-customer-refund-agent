@@ -92,19 +92,23 @@ export function startLocalRuntimeWorkers(
   // Let Mastra finish initializing its own LibSQL tables before this app-owned
   // client touches the same file. Starting both schema writers concurrently
   // produces SQLITE_BUSY on a pristine local database.
-  let activeSweep = Promise.resolve();
+  let activeSweep: Promise<void> | undefined;
   const runSweep = options?.runSweep ?? sweep;
-  const queueSweep = () => {
-    if (stopped) return activeSweep;
-    activeSweep = activeSweep.then(runSweep, runSweep);
+  const startSweep = () => {
+    if (stopped || activeSweep) return activeSweep;
+    activeSweep = Promise.resolve()
+      .then(runSweep)
+      .finally(() => {
+        activeSweep = undefined;
+      });
     return activeSweep;
   };
   const initial = setTimeout(
-    () => void queueSweep(),
+    () => void startSweep(),
     options?.initialDelayMs ?? 1_000,
   );
   const timer = setInterval(
-    () => void queueSweep(),
+    () => void startSweep(),
     options?.intervalMs ?? 5_000,
   );
   timer.unref();
