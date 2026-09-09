@@ -129,6 +129,7 @@ async function runStudioJourney(port) {
   const unexpectedFailures = [];
   const expectedAncillaryDenials = [];
   let authenticatedStudioSession = false;
+  let initialThreadInspectionAvailable = true;
   const expectedDeniedStudioPaths = new Set([
     "/api/processors",
     "/api/mcp/v0/servers",
@@ -144,8 +145,16 @@ async function runStudioJourney(port) {
     (expectedDeniedStudioPaths.has(path) ||
       path === "/api/agents/support-supervisor/voice/speakers" ||
       /^\/api\/memory\/threads\/[^/]+\/working-memory$/.test(path));
-  const isExpectedMissingThreadInspection = (path, method) =>
+  const isInitialMissingThreadInspection = (path, method) =>
     method === "GET" && /^\/api\/memory\/threads\/[^/]+$/.test(path);
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (
+      (request.method() === "POST" && url.pathname === "/api/memory/threads") ||
+      isSupervisorExecution(url.pathname, request.method())
+    )
+      initialThreadInspectionAvailable = false;
+  });
   page.on("response", (response) => {
     const url = new URL(response.url());
     const path = url.pathname;
@@ -174,7 +183,8 @@ async function runStudioJourney(port) {
     }
     if (
       response.status() === 404 &&
-      isExpectedMissingThreadInspection(path, method)
+      initialThreadInspectionAvailable &&
+      isInitialMissingThreadInspection(path, method)
     ) {
       expectedAncillaryDenials.push(failure);
       return;
