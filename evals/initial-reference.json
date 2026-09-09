@@ -2,7 +2,7 @@
   "kind": "support-eval-initial-reference",
   "runner": "deterministic-native-observed-runtime-v4",
   "executionMode": "deterministic-scripted-transport-no-paid-routes",
-  "implementationSha": "15d5002fc375ae7d886d56dceb29c9d63f1aec40",
+  "implementationSha": "d3b4cf983e3e6ce5d66affb2fc3a0c514ffde130",
   "runnerSourceHash": "8d179fbbeffbccadc700dc44e446599b5b66dbcb67fa50a6b38ae7d1fa412f95",
   "scorerSourceHashes": {
     "test/eval/support/dataset-scorers.ts": "3d212d35c4701029c6363a98ad7d5115a70a9d3a0da73ff37a4419255ef5667c",
@@ -1342,7 +1342,7 @@
   "pricing": "not-applicable-deterministic-transport",
   "evidenceHash": "5208a921e0add12801b7714069f26e8a809b54e65283b9988fec81a8cdfe7642",
   "regression": "compare-against-fixed-initial-reference",
-  "reportHash": "e8b07d1ec9131307353cd9d1dc875b545e5c0e3672d9c5a8c0a13b09ed25808a",
+  "reportHash": "9a0791cf78c576d150413ea7f0cb770f993e14b09d08cc8a7104943ca6eb9f66",
   "initialReference": true,
   "historicalComparison": null
 }
