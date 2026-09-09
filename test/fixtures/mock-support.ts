@@ -1,5 +1,8 @@
-import type { CaseMessage, SupportCase } from "../domain/support-case";
-import type { SupportSourceAdapter } from "./support-source";
+import type {
+  CaseMessage,
+  SupportCase,
+} from "../../src/mastra/domain/support-case";
+import type { SupportSourceAdapter } from "../../src/mastra/integrations/support-source";
 
 export interface MockEmailPayload {
   externalId: string;
@@ -63,21 +66,15 @@ export class MockSupportAdapter implements SupportSourceAdapter {
 
   async normalizeInbound(rawPayload: unknown) {
     const payload = rawPayload as MockEmailPayload;
-    if (!payload?.externalId || !payload?.from || !payload?.body) {
+    if (!payload?.externalId || !payload?.from || !payload?.body)
       throw new Error(
         "Invalid mock email payload: externalId, from, and body are required.",
       );
-    }
-
     const message = messageFromPayload(payload);
-
     return {
       externalId: payload.externalId,
       source: this.source,
-      customer: {
-        email: payload.from,
-        name: payload.fromName,
-      },
+      customer: { email: payload.from, name: payload.fromName },
       subject: payload.subject || "(no subject)",
       messages: [message],
       createdAt: message.createdAt,
@@ -89,16 +86,13 @@ export class MockSupportAdapter implements SupportSourceAdapter {
   }
 
   async sendReply(caseId: string, body: string): Promise<void> {
-    // A later external adapter would deliver this reply to its provider.
     void caseId;
     void body;
   }
-
   async addInternalNote(caseId: string, body: string): Promise<void> {
     void caseId;
     void body;
   }
-
   async updateStatus(caseId: string, status: string): Promise<void> {
     void caseId;
     void status;

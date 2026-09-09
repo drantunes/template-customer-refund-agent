@@ -15,9 +15,9 @@ import type {
   SubscriptionCancellationEffect,
   SupportChannelProvider,
   TransactionalActionProvider,
-} from "./contracts";
-import type { NativeRefundExecutionAuthorization } from "./native-execution";
-import { sameBinding } from "./contracts";
+} from "../contracts";
+import type { NativeRefundExecutionAuthorization } from "../native-execution";
+import { sameBinding } from "../contracts";
 import { z } from "zod";
 
 const bindingSchema = z

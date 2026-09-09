@@ -1,25 +1,21 @@
 import { createScorer, type MastraScorers } from "@mastra/core/evals";
 import { getAssistantMessageFromRunOutput } from "@mastra/evals/scorers/utils";
 import {
-  canonicalScorerRecord,
-  isPlainJsonRecord,
-  scoreAxis,
-} from "./deterministic-semantics.js";
+  draftResolutionSchema,
+  triageResultSchema,
+} from "../domain/support-case";
 
-/**
- * CI evaluates executable, deterministic safety behavior. These registered
- * scorers deliberately make no model calls; a paid judge must be separately
- * budgeted before it can be enabled for a non-deterministic experiment.
- */
 type EvalOutput = Record<string, unknown>;
 
-function plainRecord(value: unknown): EvalOutput {
-  if (isPlainJsonRecord(value)) return value as EvalOutput;
-  return {};
+export function plainEvalRecord(value: unknown): EvalOutput {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null
+    ? (value as EvalOutput)
+    : {};
 }
 
-/** Parse only Mastra's explicit top-level model-output text boundary. */
-function topLevelModelOutput(value: unknown): unknown {
+export function topLevelModelOutput(value: unknown): unknown {
   if (typeof value !== "string") return value;
   try {
     return JSON.parse(value);
@@ -27,159 +23,11 @@ function topLevelModelOutput(value: unknown): unknown {
     return value;
   }
 }
-function deterministicScorer(
-  id: string,
-  name: string,
-  score?: (output: unknown, truth: unknown) => number,
-) {
-  return createScorer({
-    id,
-    name,
-    description: `Deterministic ${name} scorer for versioned support-eval evidence.`,
-    type: "agent",
-  })
-    .preprocess(({ run }) => {
-      // Parse only the explicit top-level output text boundary, then snapshot
-      // both inputs before any scorer callback can inspect hostile evidence.
-      const output = canonicalScorerRecord(topLevelModelOutput(run.output));
-      const truth = canonicalScorerRecord(run.groundTruth);
-      return { output, truth };
-    })
-    .generateScore(({ results }) =>
-      score
-        ? score(
-            results.preprocessStepResult?.output,
-            results.preprocessStepResult?.truth,
-          )
-        : scoreAxis(
-            id,
-            results.preprocessStepResult?.output as Parameters<
-              typeof scoreAxis
-            >[1],
-            results.preprocessStepResult?.truth as Parameters<
-              typeof scoreAxis
-            >[2],
-          ),
-    )
-    .generateReason(
-      ({ score }) =>
-        `${id}=${Number.isFinite(score) ? score.toFixed(2) : "0.00"} from deterministic canonical evidence`,
-    );
-}
 
-export const routingAccuracyScorer = deterministicScorer(
-  "routing-accuracy",
-  "Routing Accuracy",
-);
-export const groundednessScorer = deterministicScorer(
-  "groundedness",
-  "Groundedness",
-);
-export const policyComplianceScorer = deterministicScorer(
-  "policy-compliance",
-  "Policy Compliance",
-);
-export const toolCallCorrectnessScorer = deterministicScorer(
-  "tool-call-correctness",
-  "Tool Call Correctness",
-);
-export const resolutionQualityScorer = deterministicScorer(
-  "resolution-quality",
-  "Resolution Quality",
-);
-export const multiTurnConsistencyScorer = deterministicScorer(
-  "multi-turn-consistency",
-  "Multi-turn Consistency",
-);
-
-export const responseAgentScorers: MastraScorers = {
-  groundedness: { scorer: groundednessScorer },
-  policyCompliance: { scorer: policyComplianceScorer },
-  toolCallCorrectness: { scorer: toolCallCorrectnessScorer },
-  resolutionQuality: { scorer: resolutionQualityScorer },
-  multiTurnConsistency: { scorer: multiTurnConsistencyScorer },
-};
-export const triageAgentScorers: MastraScorers = {
-  routingAccuracy: { scorer: routingAccuracyScorer },
-  multiTurnConsistency: { scorer: multiTurnConsistencyScorer },
-};
-export const supportEvalScorers: MastraScorers = {
-  ...responseAgentScorers,
-  routingAccuracy: { scorer: routingAccuracyScorer },
-};
-
-export function scoreDraftResolutionFields(output: unknown) {
-  const parsed = plainRecord(
-      canonicalScorerRecord(topLevelModelOutput(output)),
-    ),
-    citedSources = Array.isArray(parsed.citedSources)
-      ? parsed.citedSources.filter(
-          (source): source is string => typeof source === "string",
-        )
-      : [];
-  return {
-    hasDraftResponse:
-      typeof parsed.draftResponse === "string" &&
-      parsed.draftResponse.trim().length > 0,
-    hasSources: citedSources.length > 0,
-    recommendsRefund: parsed.recommendRefund === true,
-    requiresEscalation: parsed.requiresEscalation === true,
-    citedSources,
-  };
-}
-export const responseStructureSanityScorer = deterministicScorer(
-  "response-structure-sanity",
-  "Response Structure Sanity",
-  (output) => (scoreDraftResolutionFields(output).hasDraftResponse ? 1 : 0),
-);
-export const conversationCoverageScorer = deterministicScorer(
-  "conversation-coverage",
-  "Conversation Coverage",
-  (output) => {
-    const answers = plainRecord(canonicalScorerRecord(output)).answers;
-    return (Array.isArray(answers) ? answers : []).filter(
-      (answer) => typeof answer === "string",
-    ).length > 1
-      ? 1
-      : 0;
-  },
-);
-responseAgentScorers.responseStructureSanity = {
-  scorer: responseStructureSanityScorer,
-};
-responseAgentScorers.conversationCoverage = {
-  scorer: conversationCoverageScorer,
-};
-triageAgentScorers.conversationCoverage = {
-  scorer: conversationCoverageScorer,
-};
-supportEvalScorers.responseStructureSanity = {
-  scorer: responseStructureSanityScorer,
-};
-supportEvalScorers.conversationCoverage = {
-  scorer: conversationCoverageScorer,
-};
-export const supportEvalScorerRegistry = {
-  routingAccuracy: routingAccuracyScorer,
-  groundedness: groundednessScorer,
-  policyCompliance: policyComplianceScorer,
-  toolCallCorrectness: toolCallCorrectnessScorer,
-  resolutionQuality: resolutionQualityScorer,
-  multiTurnConsistency: multiTurnConsistencyScorer,
-  responseStructureSanity: responseStructureSanityScorer,
-  conversationCoverage: conversationCoverageScorer,
-};
-
-/**
- * Runtime scorers are intentionally contract checks only. Dataset quality
- * axes below require versioned ground truth and are consumed solely by the
- * deterministic experiment harness; attaching those axes to a live agent run
- * made an ordinary run look like a failed quality measurement.
- */
 function liveOutputContractScorer(
   id: string,
   name: string,
-  accepts: (output: Record<string, unknown>) => boolean,
+  accepts: (output: EvalOutput) => boolean,
 ) {
   return createScorer({
     id,
@@ -189,8 +37,7 @@ function liveOutputContractScorer(
   })
     .preprocess(({ run }) => {
       const text = getAssistantMessageFromRunOutput(run.output);
-      if (!text) return {};
-      return plainRecord(topLevelModelOutput(text));
+      return text ? plainEvalRecord(topLevelModelOutput(text)) : {};
     })
     .generateScore(({ results }) =>
       accepts(results.preprocessStepResult ?? {}) ? 1 : 0,
@@ -205,20 +52,13 @@ function liveOutputContractScorer(
 export const liveTriageOutputScorer = liveOutputContractScorer(
   "live-triage-output-contract",
   "Triage Output Contract",
-  (output) =>
-    typeof output.intent === "string" &&
-    typeof output.requiresHumanReview === "boolean" &&
-    typeof output.confidence === "number",
+  (output) => triageResultSchema.safeParse(output).success,
 );
 export const liveResponseOutputScorer = liveOutputContractScorer(
   "live-response-output-contract",
   "Response Output Contract",
-  (output) =>
-    typeof output.draftResponse === "string" &&
-    typeof output.recommendRefund === "boolean" &&
-    typeof output.requiresEscalation === "boolean",
+  (output) => draftResolutionSchema.safeParse(output).success,
 );
-
 export const liveTriageAgentScorers: MastraScorers = {
   outputContract: { scorer: liveTriageOutputScorer },
 };

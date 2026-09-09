@@ -8,7 +8,7 @@ vi.mock("@mastra/core/llm", async (importOriginal) => {
   };
 });
 
-import { scoreDraftResolutionFields } from "../../src/mastra/evals";
+import { scoreDraftResolutionFields } from "./support/dataset-scorers";
 
 describe("phase-scoped deterministic eval compatibility", () => {
   it("recognizes a grounded structured response without invoking a model", () => {

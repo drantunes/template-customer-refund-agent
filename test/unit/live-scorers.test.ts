@@ -27,8 +27,11 @@ describe("live native scorer contracts", () => {
         role: "assistant",
         content: JSON.stringify({
           intent: "order_status",
+          urgency: "normal",
+          sentiment: "neutral",
           requiresHumanReview: false,
           confidence: 0.9,
+          rationale: "Synthetic output contract.",
         }),
       },
     ];

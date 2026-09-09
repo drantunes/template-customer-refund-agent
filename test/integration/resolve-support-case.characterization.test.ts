@@ -48,8 +48,7 @@ async function loadCharacterizationRuntime(draft: {
   // initialized local-runtime export to a concurrent dynamic import.
   const { mastra } = await import("../../src/mastra/index");
   const { caseStore } = await import("../../src/mastra/lib/case-store");
-  const { mockSupportAdapter } =
-    await import("../../src/mastra/integrations/mock-support");
+  const { mockSupportAdapter } = await import("../fixtures/mock-support");
   const { triageAgent } = await import("../../src/mastra/agents/triage-agent");
   const { responseAgent } =
     await import("../../src/mastra/agents/response-agent");

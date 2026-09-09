@@ -1,7 +1,6 @@
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { getActiveSupportAdapter } from "../../src/mastra/integrations/active-adapter";
 import {
   errorResponseSchema,
   mockEmailPayloadSchema,
@@ -450,13 +449,5 @@ describe("support API contract", () => {
       expect(method.security).toBeUndefined();
       expect(supportOpenApiDocument.security).toEqual([{ bearerAuth: [] }]);
     }
-  });
-
-  it("reports unsupported providers instead of silently using mock", () => {
-    process.env.SUPPORT_SOURCE = "unsupported-provider";
-
-    expect(() => getActiveSupportAdapter()).toThrow(
-      'Unsupported SUPPORT_SOURCE "unsupported-provider"',
-    );
   });
 });

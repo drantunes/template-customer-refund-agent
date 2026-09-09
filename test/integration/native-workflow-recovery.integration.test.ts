@@ -339,7 +339,7 @@ async function setup(
     const { registerProviderRegistry } =
       await import("../../src/mastra/providers/registry");
     const { createLocalLoopbackFacade, LoopbackHttpProviderRegistry } =
-      await import("../../src/mastra/providers/loopback-http");
+      await import("../../src/mastra/providers/advanced/loopback-http");
     registerProviderRegistry(
       new LoopbackHttpProviderRegistry(
         createLocalLoopbackFacade(localRuntime, loopbackFailure),
@@ -3142,7 +3142,7 @@ describe("native approval workflow recovery", () => {
     };
     const { caseStore, mastra, native } = await setup(caseId, binding);
     const { createLocalLoopbackFacade, LoopbackHttpProviderRegistry } =
-      await import("../../src/mastra/providers/loopback-http");
+      await import("../../src/mastra/providers/advanced/loopback-http");
     const { localRuntime } =
       await import("../../src/mastra/runtime/local-runtime");
     const { issueRefundTool } =

@@ -22,12 +22,13 @@ import {
   recoverLocalWorkflows,
 } from "../../src/mastra/runtime/local-runtime";
 import { serializeSqliteClient } from "../../src/mastra/lib/sqlite-client";
+import { resolveDatabaseUrl } from "../../src/mastra/lib/database-url";
 import {
   createLocalLoopbackFacade,
   type LoopbackFetch,
   LoopbackHttpCommerceProvider,
   LoopbackHttpProviderRegistry,
-} from "../../src/mastra/providers/loopback-http";
+} from "../../src/mastra/providers/advanced/loopback-http";
 import {
   registerProviderRegistry,
   resetProviderRegistryForTests,
@@ -655,6 +656,42 @@ describe("Phase 002 persistent local runtime", () => {
       { cwd: process.cwd() },
     );
     expect(JSON.parse(verification.stdout)).toEqual({ orders: 1, receipts: 1 });
+  });
+
+  it("uses one default relative database identity across the CLI and runtime cwd", async () => {
+    const relative = `file:./phase002-cwd-${crypto.randomUUID()}.db`;
+    const expected = resolveDatabaseUrl(relative, process.cwd());
+    files.push(
+      expected.replace("file://", ""),
+      `${expected.replace("file://", "")}-shm`,
+      `${expected.replace("file://", "")}-wal`,
+    );
+    expect(
+      resolveDatabaseUrl(expected, join(process.cwd(), "src/mastra/public")),
+    ).toBe(expected);
+    await execFileAsync("npm", ["run", "local:seed"], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        TURSO_DATABASE_URL: relative,
+        LOCAL_FIXTURE_TENANT: binding.tenantId,
+        LOCAL_FIXTURE_ACCOUNT: binding.providerAccountId,
+      },
+    });
+    const previous = process.env.TURSO_DATABASE_URL;
+    process.env.TURSO_DATABASE_URL = relative;
+    try {
+      const store = new CaseStore({ url: expected });
+      const local = new LocalRuntime(store.getClientForTests());
+      await local.seed(binding);
+      expect(
+        await local.findOrder(binding, "alex@example.com", "ORD-1001"),
+      ).toMatchObject({ orderId: "ORD-1001" });
+      await store.close();
+    } finally {
+      if (previous === undefined) delete process.env.TURSO_DATABASE_URL;
+      else process.env.TURSO_DATABASE_URL = previous;
+    }
   });
 
   it("shares local commerce conformance through the optional loopback HTTP boundary", async () => {

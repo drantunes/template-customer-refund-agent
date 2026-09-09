@@ -1,5 +1,6 @@
 import { createClient } from "@libsql/client";
 import { LibSQLStore } from "@mastra/libsql";
+import { requireLocalDatabaseUrl } from "../src/mastra/lib/database-url.ts";
 
 const defaults = {
   rawPayloadDays: 7,
@@ -387,12 +388,7 @@ async function sweepCases(client, policy, current = new Date()) {
   return result;
 }
 
-const url = process.env.TURSO_DATABASE_URL || "file:./mastra.db";
-// Validate every input before opening a connection or changing a database.
-if (!url.startsWith("file:"))
-  throw new Error(
-    "Refusing retention cleanup: TURSO_DATABASE_URL must be a local file: URL. Remote databases are never cleaned by this command.",
-  );
+const url = requireLocalDatabaseUrl();
 const policy = policyFromEnvironment();
 const client = createClient({ url, timeout: 0 });
 

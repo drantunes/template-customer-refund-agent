@@ -29,7 +29,10 @@ import {
 } from "./tools/lookup-order";
 import { searchSupportKnowledgeTool } from "./tools/search-support-knowledge";
 import { startLocalRuntimeWorkers } from "./runtime/local-runtime";
-import { setMastraStorageReady } from "./runtime/storage-lifecycle";
+import {
+  setMastraStorageReady,
+  startAfterStorageReady,
+} from "./runtime/storage-lifecycle";
 import { LocalSupportAuthProvider } from "./server/auth";
 import { studioSupervisorMiddleware } from "./server/studio-supervisor";
 import { retentionPolicyFromEnvironment } from "./lib/case-store";
@@ -43,6 +46,9 @@ import {
 } from "./providers/registry";
 
 const retentionPolicy = retentionPolicyFromEnvironment();
+let localRuntimeWorkers: Promise<undefined | (() => Promise<void>)> =
+  Promise.resolve(undefined);
+
 // This is deliberately evaluated during composition: an explicit external
 // opt-in with incomplete development configuration fails rather than routing
 // an Intercom case to local fixtures.
@@ -100,6 +106,10 @@ export const mastra = new Mastra({
     // This protects the configured server's built-in agent/tool/workflow,
     // approval, memory and storage routes as well as our custom API routes.
     auth: new LocalSupportAuthProvider(),
+    // This module owns SIGINT/SIGTERM so it can stop local recovery before
+    // Mastra and the shared SQLite client close. The generated CLI cannot
+    // drain HTTP connections while custom signal handling is enabled.
+    handleShutdownSignals: false,
   },
   logger: new RedactingPinoLogger({
     name: "support-refund-agent",
@@ -123,19 +133,43 @@ export const mastra = new Mastra({
 // case migrations wait on it, preventing concurrent schema DDL on one file.
 const storageReady = mastra.getStorage()?.init() ?? Promise.resolve();
 setMastraStorageReady(storageReady);
-void storageReady.catch((error) =>
-  mastra.getLogger().error("Mastra storage initialization failed.", { error }),
-);
-
 // Mastra loads this module for both `npm run dev` and `npm run start`; recovery
 // starts after Mastra storage is ready so it cannot race its schema initialization.
-if (!process.env.VITEST)
-  void storageReady.then(() =>
-    startLocalRuntimeWorkers(mastra, mastra.getLogger()),
-  );
+localRuntimeWorkers = startAfterStorageReady(
+  storageReady,
+  () =>
+    process.env.VITEST
+      ? undefined
+      : startLocalRuntimeWorkers(mastra, mastra.getLogger()),
+  (error) =>
+    mastra
+      .getLogger()
+      .error("Mastra storage initialization failed.", { error }),
+);
 
 /** The supported orderly local shutdown: flush Mastra before releasing SQLite. */
 export async function shutdownLocalMastra() {
+  const stopWorkers = await localRuntimeWorkers.catch(() => undefined);
+  await stopWorkers?.();
   await mastra.shutdown();
   await closeSharedLocalSqliteClient();
+}
+
+let signalShutdown: Promise<never> | undefined;
+function shutdownFromSignal(signal: "SIGINT" | "SIGTERM") {
+  signalShutdown ??= shutdownLocalMastra().then(
+    () => process.exit(0),
+    (error) => {
+      mastra.getLogger().error("Local runtime shutdown failed.", {
+        error,
+        signal,
+      });
+      process.exit(1);
+    },
+  );
+  return signalShutdown;
+}
+if (!process.env.VITEST) {
+  process.once("SIGINT", () => void shutdownFromSignal("SIGINT"));
+  process.once("SIGTERM", () => void shutdownFromSignal("SIGTERM"));
 }

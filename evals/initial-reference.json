@@ -5,8 +5,8 @@
   "implementationSha": "fe78accd3bae14ddb012e65bce670cd02105f646",
   "runnerSourceHash": "7b53636c691b3f982d50d3a500d0041c536c6cd1a454061a99d587d6ac3a38af",
   "scorerSourceHashes": {
-    "src/mastra/evals/index.ts": "e4fd82f8cb0db282c446080890c81786c6786f85ce644b917af2e24ba9267207",
-    "src/mastra/evals/deterministic-semantics.js": "0608fd88d0ffc8069ccaf40ba1a781e0647640317a8eb61b0ede67c47411dae5"
+    "test/eval/support/dataset-scorers.ts": "3d212d35c4701029c6363a98ad7d5115a70a9d3a0da73ff37a4419255ef5667c",
+    "test/eval/support/deterministic-semantics.js": "0608fd88d0ffc8069ccaf40ba1a781e0647640317a8eb61b0ede67c47411dae5"
   },
   "datasetHashes": {
     "groundedness.v1.json": "204385f1588c7846c631afd6233400950a632cb0f285d21562e564249d6d1dfc",
@@ -1328,7 +1328,7 @@
   "pricing": "not-applicable-deterministic-transport",
   "evidenceHash": "8b870c610ce42892c84570110d89dacf24ae4b639025b48fee3fcf7aa1adf1a1",
   "regression": "compare-against-fixed-initial-reference",
-  "reportHash": "1b30ab277ffb2464579a2a70772a85e15808db2e2edd4979d1623edfa1250a08",
+  "reportHash": "3ee709f626be4d78f090439d9f44cf1bdc19d79fc1d7ef720c1b40764a6497d8",
   "initialReference": true,
   "historicalComparison": null
 }

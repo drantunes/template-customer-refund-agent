@@ -1,4 +1,4 @@
-import type { PolicyDocument } from "../types";
+import type { PolicyDocument } from "../types.ts";
 
 export const duplicateChargePolicy: PolicyDocument = {
   title: "Duplicate Charge Policy",

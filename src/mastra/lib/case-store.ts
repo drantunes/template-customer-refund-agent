@@ -19,6 +19,7 @@ import {
   getSharedLocalSqliteClient,
   serializeSqliteClient,
 } from "./sqlite-client";
+import { resolveDatabaseUrl } from "./database-url";
 import { activeDispatchLeaseScope } from "./dispatch-lease-scope";
 import type { DispatchLeaseScope } from "./dispatch-lease-scope";
 
@@ -170,7 +171,7 @@ export class StaleCaseWriteError extends Error {
   }
 }
 
-function config(url = process.env.TURSO_DATABASE_URL || "file:./mastra.db") {
+function config(url = resolveDatabaseUrl()) {
   return {
     url,
     authToken: process.env.TURSO_AUTH_TOKEN || undefined,

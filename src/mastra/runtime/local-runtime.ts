@@ -22,7 +22,12 @@ import {
   refundFingerprint,
   structurallyEqual,
 } from "../lib/money";
-import { POLICY_DOCUMENTS } from "../knowledge/policy-docs";
+import {
+  initializeLocalFixtures,
+  resetLocalFixtures,
+  seedLocalFixtures,
+} from "./local-fixtures";
+import { requireLocalDatabaseUrl } from "../lib/database-url";
 import type {
   CommerceOrder,
   CommerceProvider,
@@ -296,41 +301,7 @@ export class LocalRuntime
     await this.ready;
   }
   private async init() {
-    await this.client.executeMultiple(`
-      CREATE TABLE IF NOT EXISTS local_orders (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, order_id TEXT NOT NULL, customer_email TEXT NOT NULL, product TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, charge_count INTEGER NOT NULL, placed_at TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, order_id));
-      CREATE TABLE IF NOT EXISTS local_subscriptions (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, subscription_id TEXT NOT NULL, customer_email TEXT NOT NULL, plan TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, renews_at TEXT NOT NULL, cancel_at_period_end INTEGER NOT NULL DEFAULT 0, cancels_at TEXT, PRIMARY KEY(tenant_id, provider_account_id, subscription_id));
-      CREATE TABLE IF NOT EXISTS local_refunds (refund_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, order_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, reason TEXT NOT NULL, issued_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS local_knowledge (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, version TEXT NOT NULL, effective_at TEXT, expires_at TEXT, PRIMARY KEY(tenant_id, provider_account_id, source));
-      CREATE TABLE IF NOT EXISTS local_deliveries (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, payload_fingerprint TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, idempotency_key));
-    `);
-    try {
-      await this.client.execute(
-        "ALTER TABLE local_deliveries ADD COLUMN payload_fingerprint TEXT NOT NULL DEFAULT ''",
-      );
-    } catch (error) {
-      if (!String(error).includes("duplicate column")) throw error;
-    }
-    for (const sql of [
-      "ALTER TABLE local_knowledge ADD COLUMN effective_at TEXT",
-      "ALTER TABLE local_knowledge ADD COLUMN expires_at TEXT",
-      "ALTER TABLE local_subscriptions ADD COLUMN cancel_at_period_end INTEGER NOT NULL DEFAULT 0",
-      "ALTER TABLE local_subscriptions ADD COLUMN cancels_at TEXT",
-    ])
-      try {
-        await this.client.execute(sql);
-      } catch (error) {
-        if (!String(error).includes("duplicate column")) throw error;
-      }
-    // Phase 003 fixture rows predate applicability metadata. Only the known,
-    // versioned local fixture identities are migrated; unknown imported rows
-    // deliberately remain unpublished rather than receiving invented dates.
-    await this.client.batch(
-      POLICY_DOCUMENTS.map((document) => ({
-        sql: "UPDATE local_knowledge SET effective_at = '2026-01-01T00:00:00.000Z' WHERE source = ? AND title = ? AND text = ? AND version = 'local-v1' AND effective_at IS NULL",
-        args: [document.source, document.title, document.text],
-      })),
-      "write",
-    );
+    await initializeLocalFixtures(this.client);
   }
   private assertLocalBinding(binding: ProviderBinding) {
     if (
@@ -394,101 +365,19 @@ export class LocalRuntime
     }
   }
   private async seedOnce(binding: ProviderBinding) {
-    const url = process.env.TURSO_DATABASE_URL || "file:./mastra.db";
-    if (!url.startsWith("file:"))
-      throw new Error(
-        "Refusing local fixture seed: TURSO_DATABASE_URL must use a file: URL.",
-      );
     await this.ensured();
-    const args = [binding.tenantId, binding.providerAccountId];
-    await this.client.batch(
-      [
-        {
-          sql: "INSERT OR IGNORE INTO local_orders VALUES (?, ?, 'ORD-1001', 'alex@example.com', 'Pro Plan - Monthly', 4900, 'USD', 'fulfilled', 2, '2026-08-01T14:00:00.000Z')",
-          args,
-        },
-        {
-          sql: "INSERT OR IGNORE INTO local_orders VALUES (?, ?, 'ORD-1002', 'jordan@example.com', 'Wireless Headphones', 12999, 'USD', 'shipped', 1, '2026-08-10T09:30:00.000Z')",
-          args,
-        },
-        {
-          sql: "INSERT OR IGNORE INTO local_orders VALUES (?, ?, 'ORD-1003', 'sam@example.com', 'Standing Desk', 34900, 'USD', 'fulfilled', 1, '2026-07-20T11:15:00.000Z')",
-          args,
-        },
-        {
-          sql: "INSERT OR IGNORE INTO local_orders VALUES (?, ?, 'ORD-1004', 'riley@example.com', 'Team Plan - Annual', 58800, 'USD', 'fulfilled', 1, '2026-05-02T08:00:00.000Z')",
-          args,
-        },
-        {
-          sql: "INSERT OR IGNORE INTO local_subscriptions(tenant_id, provider_account_id, subscription_id, customer_email, plan, amount_minor, currency, status, renews_at) VALUES (?, ?, 'SUB-1001', 'alex@example.com', 'Pro Plan - Monthly', 4900, 'USD', 'active', '2026-09-01T00:00:00.000Z')",
-          args,
-        },
-        {
-          sql: "INSERT OR IGNORE INTO local_subscriptions(tenant_id, provider_account_id, subscription_id, customer_email, plan, amount_minor, currency, status, renews_at) VALUES (?, ?, 'SUB-1004', 'riley@example.com', 'Team Plan - Annual', 58800, 'USD', 'active', '2027-05-02T00:00:00.000Z')",
-          args,
-        },
-        ...POLICY_DOCUMENTS.map((document) => ({
-          sql: "INSERT OR IGNORE INTO local_knowledge(tenant_id, provider_account_id, source, title, text, version, effective_at, expires_at) VALUES (?, ?, ?, ?, ?, 'local-v1', '2026-01-01T00:00:00.000Z', NULL)",
-          args: [...args, document.source, document.title, document.text],
-        })),
-      ],
-      "write",
-    );
+    await seedLocalFixtures(this.client, binding);
   }
   /** Deletes only this fixture binding, leaving other tenant/account data untouched. */
   async reset(binding: ProviderBinding = defaultLocalBinding()) {
-    const url = process.env.TURSO_DATABASE_URL || "file:./mastra.db";
-    if (!url.startsWith("file:"))
-      throw new Error(
-        "Refusing local fixture reset: TURSO_DATABASE_URL must use a file: URL.",
-      );
     this.assertLocalBinding(binding);
     const key = `${binding.tenantId}\u0000${binding.providerAccountId}`;
     await this.queueFixtureOperation(key, async () => {
       await this.ensured();
-      const args = [binding.tenantId, binding.providerAccountId];
-      const tx = await this.client.transaction("write");
-      try {
-        const effects = await tx.execute({
-          sql: "SELECT (SELECT COUNT(*) FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?) + (SELECT COUNT(*) FROM local_deliveries WHERE tenant_id = ? AND provider_account_id = ?) AS total",
-          args: [...args, ...args],
-        });
-        if (Number(effects.rows[0]?.total ?? 0) > 0)
-          throw new Error(
-            "Refusing fixture reset: durable refund/idempotency or delivery effects exist for this binding. Use a new local database rather than deleting history.",
-          );
-        await tx.batch([
-          {
-            sql: "DELETE FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?",
-            args,
-          },
-          {
-            sql: "DELETE FROM local_orders WHERE tenant_id = ? AND provider_account_id = ?",
-            args,
-          },
-          {
-            sql: "DELETE FROM local_subscriptions WHERE tenant_id = ? AND provider_account_id = ?",
-            args,
-          },
-          {
-            sql: "DELETE FROM local_knowledge WHERE tenant_id = ? AND provider_account_id = ?",
-            args,
-          },
-          {
-            sql: "DELETE FROM local_deliveries WHERE tenant_id = ? AND provider_account_id = ?",
-            args,
-          },
-        ]);
-        await tx.commit();
-        // Only invalidate after a committed reset.  A refused reset preserves
-        // both durable history and the existing fixture memo.
-        this.seeded.delete(key);
-      } catch (error) {
-        try {
-          await tx.rollback();
-        } catch {}
-        throw error;
-      }
+      await resetLocalFixtures(this.client, binding);
+      // Only invalidate after a committed reset. A refused reset preserves
+      // both durable history and the existing fixture memo.
+      this.seeded.delete(key);
     });
   }
   private order(row: Record<string, unknown>): CommerceOrder {
@@ -1933,7 +1822,13 @@ export function startLocalRuntimeWorkers(
     warn(message: string, meta?: Record<string, unknown>): void;
     info?(message: string, meta?: Record<string, unknown>): void;
   },
+  options?: {
+    initialDelayMs?: number;
+    intervalMs?: number;
+    runSweep?: () => Promise<void>;
+  },
 ) {
+  let stopped = false;
   let running = false;
   let lastRetentionSweep = 0;
   const retentionInterval = Number(
@@ -1951,11 +1846,7 @@ export function startLocalRuntimeWorkers(
     if (running) return;
     running = true;
     try {
-      const url = process.env.TURSO_DATABASE_URL || "file:./mastra.db";
-      if (!url.startsWith("file:"))
-        throw new Error(
-          "Refusing local runtime worker: TURSO_DATABASE_URL must use a file: URL.",
-        );
+      requireLocalDatabaseUrl();
       await localRuntime.seed(defaultLocalBinding());
       await import("./studio-seed").then(({ ensureStudioSupervisorDemoCase }) =>
         ensureStudioSupervisorDemoCase(),
@@ -2005,11 +1896,26 @@ export function startLocalRuntimeWorkers(
   // Let Mastra finish initializing its own LibSQL tables before this app-owned
   // client touches the same file. Starting both schema writers concurrently
   // produces SQLITE_BUSY on a pristine local database.
-  const initial = setTimeout(() => void sweep(), 1_000);
-  const timer = setInterval(() => void sweep(), 5_000);
+  let activeSweep = Promise.resolve();
+  const runSweep = options?.runSweep ?? sweep;
+  const queueSweep = () => {
+    if (stopped) return activeSweep;
+    activeSweep = activeSweep.then(runSweep, runSweep);
+    return activeSweep;
+  };
+  const initial = setTimeout(
+    () => void queueSweep(),
+    options?.initialDelayMs ?? 1_000,
+  );
+  const timer = setInterval(
+    () => void queueSweep(),
+    options?.intervalMs ?? 5_000,
+  );
   timer.unref();
-  return () => {
+  return async () => {
+    stopped = true;
     clearTimeout(initial);
     clearInterval(timer);
+    await activeSweep;
   };
 }

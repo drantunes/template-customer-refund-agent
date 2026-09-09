@@ -258,10 +258,35 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                               "requiresEscalation": {
                                 "type": "boolean",
                               },
+                              "selectedPolicyExcerpts": {
+                                "default": [],
+                                "description": "Exact, relevant excerpts from cited policy documents. These are rendered as policy guidance, never as a completed account effect.",
+                                "items": {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "excerpt": {
+                                      "maxLength": 600,
+                                      "minLength": 1,
+                                      "type": "string",
+                                    },
+                                    "source": {
+                                      "type": "string",
+                                    },
+                                  },
+                                  "required": [
+                                    "source",
+                                    "excerpt",
+                                  ],
+                                  "type": "object",
+                                },
+                                "maxItems": 3,
+                                "type": "array",
+                              },
                             },
                             "required": [
                               "draftResponse",
                               "citedSources",
+                              "selectedPolicyExcerpts",
                               "recommendRefund",
                               "requiresEscalation",
                             ],
@@ -860,10 +885,35 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                         "requiresEscalation": {
                           "type": "boolean",
                         },
+                        "selectedPolicyExcerpts": {
+                          "default": [],
+                          "description": "Exact, relevant excerpts from cited policy documents. These are rendered as policy guidance, never as a completed account effect.",
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "excerpt": {
+                                "maxLength": 600,
+                                "minLength": 1,
+                                "type": "string",
+                              },
+                              "source": {
+                                "type": "string",
+                              },
+                            },
+                            "required": [
+                              "source",
+                              "excerpt",
+                            ],
+                            "type": "object",
+                          },
+                          "maxItems": 3,
+                          "type": "array",
+                        },
                       },
                       "required": [
                         "draftResponse",
                         "citedSources",
+                        "selectedPolicyExcerpts",
                         "recommendRefund",
                         "requiresEscalation",
                       ],
@@ -1521,10 +1571,35 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                         "requiresEscalation": {
                           "type": "boolean",
                         },
+                        "selectedPolicyExcerpts": {
+                          "default": [],
+                          "description": "Exact, relevant excerpts from cited policy documents. These are rendered as policy guidance, never as a completed account effect.",
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "excerpt": {
+                                "maxLength": 600,
+                                "minLength": 1,
+                                "type": "string",
+                              },
+                              "source": {
+                                "type": "string",
+                              },
+                            },
+                            "required": [
+                              "source",
+                              "excerpt",
+                            ],
+                            "type": "object",
+                          },
+                          "maxItems": 3,
+                          "type": "array",
+                        },
                       },
                       "required": [
                         "draftResponse",
                         "citedSources",
+                        "selectedPolicyExcerpts",
                         "recommendRefund",
                         "requiresEscalation",
                       ],
@@ -2252,10 +2327,35 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                         "requiresEscalation": {
                           "type": "boolean",
                         },
+                        "selectedPolicyExcerpts": {
+                          "default": [],
+                          "description": "Exact, relevant excerpts from cited policy documents. These are rendered as policy guidance, never as a completed account effect.",
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "excerpt": {
+                                "maxLength": 600,
+                                "minLength": 1,
+                                "type": "string",
+                              },
+                              "source": {
+                                "type": "string",
+                              },
+                            },
+                            "required": [
+                              "source",
+                              "excerpt",
+                            ],
+                            "type": "object",
+                          },
+                          "maxItems": 3,
+                          "type": "array",
+                        },
                       },
                       "required": [
                         "draftResponse",
                         "citedSources",
+                        "selectedPolicyExcerpts",
                         "recommendRefund",
                         "requiresEscalation",
                       ],
@@ -2952,10 +3052,35 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                         "requiresEscalation": {
                           "type": "boolean",
                         },
+                        "selectedPolicyExcerpts": {
+                          "default": [],
+                          "description": "Exact, relevant excerpts from cited policy documents. These are rendered as policy guidance, never as a completed account effect.",
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "excerpt": {
+                                "maxLength": 600,
+                                "minLength": 1,
+                                "type": "string",
+                              },
+                              "source": {
+                                "type": "string",
+                              },
+                            },
+                            "required": [
+                              "source",
+                              "excerpt",
+                            ],
+                            "type": "object",
+                          },
+                          "maxItems": 3,
+                          "type": "array",
+                        },
                       },
                       "required": [
                         "draftResponse",
                         "citedSources",
+                        "selectedPolicyExcerpts",
                         "recommendRefund",
                         "requiresEscalation",
                       ],
@@ -3697,10 +3822,35 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                         "requiresEscalation": {
                           "type": "boolean",
                         },
+                        "selectedPolicyExcerpts": {
+                          "default": [],
+                          "description": "Exact, relevant excerpts from cited policy documents. These are rendered as policy guidance, never as a completed account effect.",
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "excerpt": {
+                                "maxLength": 600,
+                                "minLength": 1,
+                                "type": "string",
+                              },
+                              "source": {
+                                "type": "string",
+                              },
+                            },
+                            "required": [
+                              "source",
+                              "excerpt",
+                            ],
+                            "type": "object",
+                          },
+                          "maxItems": 3,
+                          "type": "array",
+                        },
                       },
                       "required": [
                         "draftResponse",
                         "citedSources",
+                        "selectedPolicyExcerpts",
                         "recommendRefund",
                         "requiresEscalation",
                       ],

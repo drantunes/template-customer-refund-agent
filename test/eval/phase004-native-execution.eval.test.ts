@@ -12,7 +12,7 @@ import {
   scorerInputFromObservation,
   trajectoryAuthorityForDatasetCase,
   truthForDatasetCase,
-} from "../../src/mastra/evals/deterministic-semantics.js";
+} from "./support/deterministic-semantics.js";
 import { deterministicJsonModel } from "../fixtures/deterministic-language-model";
 
 type DatasetCase = {
@@ -888,7 +888,7 @@ describe("Phase 004 deterministic native evaluation", () => {
         JSON.parse(await readFile(new URL(file, directory), "utf8")) as Dataset,
       );
     const { supportEvalScorerRegistry } =
-      await import("../../src/mastra/evals");
+      await import("./support/dataset-scorers");
     for (const dataset of datasets)
       for (const item of dataset.cases) {
         const read = await observedReadTrajectory(item.input, {
@@ -1029,7 +1029,7 @@ describe("Phase 004 deterministic native evaluation", () => {
 
   it("makes registered scorers reject mutated observed arguments, results, and answers", async () => {
     const { supportEvalScorerRegistry } =
-      await import("../../src/mastra/evals");
+      await import("./support/dataset-scorers");
     const toolTruth = truthForDatasetCase("tool-call-correctness", {
       readOnlyToolsFirst: true,
     });
@@ -1574,7 +1574,7 @@ describe("Phase 004 deterministic native evaluation", () => {
 
   it("fails multi-turn scoring when native received history is absent or contradicted", async () => {
     const { supportEvalScorerRegistry } =
-      await import("../../src/mastra/evals");
+      await import("./support/dataset-scorers");
     const absent = await observedReadTrajectory("same conversation follow-up", {
       includeMemory: false,
     });
@@ -1665,20 +1665,17 @@ afterAll(async () => {
       .update(await readFile(new URL(import.meta.url)))
       .digest("hex"),
     scorerSourceHashes: {
-      "src/mastra/evals/index.ts": createHash("sha256")
+      "test/eval/support/dataset-scorers.ts": createHash("sha256")
         .update(
           await readFile(
-            new URL("../../src/mastra/evals/index.ts", import.meta.url),
+            new URL("./support/dataset-scorers.ts", import.meta.url),
           ),
         )
         .digest("hex"),
-      "src/mastra/evals/deterministic-semantics.js": createHash("sha256")
+      "test/eval/support/deterministic-semantics.js": createHash("sha256")
         .update(
           await readFile(
-            new URL(
-              "../../src/mastra/evals/deterministic-semantics.js",
-              import.meta.url,
-            ),
+            new URL("./support/deterministic-semantics.js", import.meta.url),
           ),
         )
         .digest("hex"),
