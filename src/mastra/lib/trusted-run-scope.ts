@@ -40,6 +40,16 @@ export function withTrustedCaseReadScope<T>(
   return commerceScope.run(Object.freeze({ ...scope }), operation);
 }
 
+/**
+ * Server middleware uses this only to map the authenticated Studio request to
+ * the durable case owner.  Tools still call requireTrustedCaseReadScope(), so
+ * a model-authored request context can never manufacture this authority.
+ */
+export function currentTrustedCaseReadScope():
+  TrustedCaseReadScope | undefined {
+  return commerceScope.getStore();
+}
+
 export function requireTrustedCaseReadScope(): TrustedCaseReadScope {
   return requireTrustedCommerceScope();
 }

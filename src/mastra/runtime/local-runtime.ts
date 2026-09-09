@@ -1957,6 +1957,9 @@ export function startLocalRuntimeWorkers(
           "Refusing local runtime worker: TURSO_DATABASE_URL must use a file: URL.",
         );
       await localRuntime.seed(defaultLocalBinding());
+      await import("./studio-seed").then(({ ensureStudioSupervisorDemoCase }) =>
+        ensureStudioSupervisorDemoCase(),
+      );
       await recoverApprovedNativeDecisions(mastra).catch((error) =>
         logger?.warn("Native approval recovery failed.", { error }),
       );

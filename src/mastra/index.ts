@@ -31,6 +31,7 @@ import { searchSupportKnowledgeTool } from "./tools/search-support-knowledge";
 import { startLocalRuntimeWorkers } from "./runtime/local-runtime";
 import { setMastraStorageReady } from "./runtime/storage-lifecycle";
 import { LocalSupportAuthProvider } from "./server/auth";
+import { studioSupervisorMiddleware } from "./server/studio-supervisor";
 import { retentionPolicyFromEnvironment } from "./lib/case-store";
 import {
   ApplicationSpanRedactor,
@@ -95,6 +96,7 @@ export const mastra = new Mastra({
   }),
   server: {
     apiRoutes: supportRoutes,
+    middleware: studioSupervisorMiddleware,
     // This protects the configured server's built-in agent/tool/workflow,
     // approval, memory and storage routes as well as our custom API routes.
     auth: new LocalSupportAuthProvider(),

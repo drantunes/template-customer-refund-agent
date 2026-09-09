@@ -1,5 +1,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { MastraAuthProvider } from "@mastra/core/server";
+import { resourceIdForOwner } from "../domain/support-case";
+import { currentTrustedCaseReadScope } from "../lib/trusted-run-scope";
 
 /** The local mode intentionally has only synthetic identities.  Passwords are
  * accepted only by the login route; every subsequent request uses a signed,
@@ -214,10 +216,11 @@ export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipa
         ? String(rawRequest.url)
         : "/";
     const path = new URL(requestUrl, "http://local").pathname;
-    // Custom support routes enforce their own tenant/owner checks. Studio has
-    // one explicit local, staff-only metadata scope. Every data-bearing or
-    // executable built-in route remains denied because it has no tenant-safe
-    // generic scoping contract in this phase.
+    // Custom support routes enforce their own tenant/owner checks. The native
+    // supervisor execution itself receives a tenant/case scope from server
+    // middleware; registry and memory configuration are the only unaffiliated
+    // Studio reads exposed to local staff. Other built-in data and mutation
+    // routes remain denied because they have no tenant-safe contract here.
     if (path.startsWith("/support/")) return true;
     const method =
       typeof rawRequest === "object" &&
@@ -225,6 +228,29 @@ export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipa
       "method" in rawRequest
         ? String(rawRequest.method).toUpperCase()
         : "GET";
+    const isNativeSupervisorExecution =
+      method === "POST" &&
+      /^\/(?:api\/)?agents\/support-supervisor\/(?:generate|stream|send-message|signals)$/.test(
+        path,
+      );
+    if (
+      isNativeSupervisorExecution &&
+      user.tenantId === "local-demo" &&
+      user.roles.some((role) => role === "support-agent" || role === "admin")
+    )
+      return true;
+    const isScopedStudioMemory =
+      (method === "GET" &&
+        /^\/(?:api\/)?memory\/(?:status|config|threads(?:\/[^/]+(?:\/messages)?)?)$/.test(
+          path,
+        )) ||
+      (method === "POST" && /^\/(?:api\/)?memory\/threads$/.test(path));
+    if (
+      isScopedStudioMemory &&
+      user.tenantId === "local-demo" &&
+      user.roles.some((role) => role === "support-agent" || role === "admin")
+    )
+      return true;
     const studioRegistryIds = {
       agents: new Set([
         "triage-agent",
@@ -238,6 +264,7 @@ export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipa
         "lookup_subscription",
         "lookup_customer_refund_history",
         "issue_refund",
+        "schedule_subscription_cancellation",
       ]),
       workflows: new Set([
         "ingest-support-case",
@@ -264,6 +291,9 @@ export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipa
     return false;
   }
   mapUserToResourceId(user: SupportPrincipal) {
-    return `tenant:${user.tenantId}:owner:${user.id}`;
+    const studioScope = currentTrustedCaseReadScope();
+    if (studioScope && studioScope.tenantId === user.tenantId)
+      return resourceIdForOwner(studioScope.ownerId, studioScope.tenantId);
+    return resourceIdForOwner(user.id, user.tenantId);
   }
 }

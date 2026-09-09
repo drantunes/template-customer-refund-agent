@@ -1,10 +1,24 @@
-import { describe, expect, it } from "vitest";
-import { Agent } from "@mastra/core/agent";
+import { rm } from "node:fs/promises";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   liveResponseOutputScorer,
   liveTriageOutputScorer,
 } from "../../src/mastra/evals";
 import { deterministicJsonModel } from "../fixtures/deterministic-language-model";
+import { temporaryDatabasePath } from "../support/temp-path";
+
+const databases: string[] = [];
+const shutdowns: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+  await Promise.allSettled(shutdowns.splice(0).map((shutdown) => shutdown()));
+  vi.restoreAllMocks();
+  vi.doUnmock("@mastra/core/llm");
+  delete process.env.DISABLE_RUNTIME_SCORERS;
+  await Promise.all(
+    databases.splice(0).map((path) => rm(path, { force: true })),
+  );
+});
 
 describe("live native scorer contracts", () => {
   it("extracts Mastra assistant-message output without ground truth", async () => {
@@ -26,33 +40,63 @@ describe("live native scorer contracts", () => {
     ).resolves.toMatchObject({ score: 0 });
   });
 
-  it("runs a registered scorer during native Agent.generate with its run data", async () => {
-    const agent = new Agent({
-      id: "native-live-scorer-test",
-      name: "Native live scorer test",
-      instructions: "Return the structured result.",
+  it("persists an automatic native score from the configured Mastra agent run", async () => {
+    const path = temporaryDatabasePath("phase007-live-scorer");
+    databases.push(path, `${path}-shm`, `${path}-wal`);
+    process.env.TURSO_DATABASE_URL = `file:${path}`;
+    process.env.SUPPORT_SOURCE = "mock";
+    delete process.env.DISABLE_RUNTIME_SCORERS;
+    vi.resetModules();
+    vi.doMock("@mastra/core/llm", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("@mastra/core/llm")>();
+      return {
+        ...actual,
+        ModelRouterEmbeddingModel: class DeterministicEmbeddingModel {},
+      };
+    });
+    const { mastra, shutdownLocalMastra } =
+      await import("../../src/mastra/index");
+    shutdowns.push(shutdownLocalMastra);
+    const triage = mastra.getAgent("triageAgent");
+    triage.__updateModel({
       model: deterministicJsonModel({
         intent: "order_status",
+        urgency: "normal",
+        sentiment: "neutral",
         requiresHumanReview: false,
         confidence: 0.9,
+        rationale: "The synthetic request asks about an order status.",
       }) as never,
-      scorers: { outputContract: { scorer: liveTriageOutputScorer } },
     });
-    const result = await agent.generate(
+    const runId = "phase007-native-live-scorer";
+    const result = await triage.generate(
       [{ role: "user", content: "where is my order?" }],
       {
-        scorers: { outputContract: { scorer: liveTriageOutputScorer } },
-        returnScorerData: true,
-        runId: "native-live-scorer-run",
+        runId,
       },
     );
-    const scoringData = (result as Record<string, unknown>).scoringData as {
-      output: unknown;
+    expect(result.runId).toBe(runId);
+    const scoresStore = (await mastra.getStorage()!.getStore("scores")) as {
+      listScoresByRunId(input: {
+        runId: string;
+        pagination: { page: number; perPage: false };
+      }): Promise<{ scores: Array<Record<string, unknown>> }>;
     };
-    expect(result.runId).toBe("native-live-scorer-run");
-    expect(scoringData.output).toEqual(expect.any(Array));
-    await expect(
-      liveTriageOutputScorer.run({ output: scoringData.output }),
-    ).resolves.toMatchObject({ score: 1 });
+    await vi.waitFor(async () => {
+      const stored = await scoresStore.listScoresByRunId({
+        runId,
+        pagination: { page: 0, perPage: false },
+      });
+      expect(stored.scores).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            scorerId: "live-triage-output-contract",
+            entityId: "triage-agent",
+            runId,
+            score: 1,
+          }),
+        ]),
+      );
+    });
   });
 });
