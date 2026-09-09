@@ -16,6 +16,7 @@ export interface SupportPrincipal {
 }
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const SESSION_COOKIE_NAME = "mastra-token";
 const signingKey = () => {
   const value = process.env.LOCAL_AUTH_SIGNING_KEY;
   if (!value || value.length < 32)
@@ -151,6 +152,72 @@ export function principalFromHeaders(
   if (!value?.startsWith("Bearer ")) return undefined;
   return verifyLocalSession(value.slice("Bearer ".length));
 }
+
+function sessionFromCookie(headers: Headers) {
+  const cookie = headers.get("cookie");
+  if (!cookie) return undefined;
+  const token = cookie
+    .split(";")
+    .map((value) => value.trim())
+    .find((value) => value.startsWith(`${SESSION_COOKIE_NAME}=`))
+    ?.slice(`${SESSION_COOKIE_NAME}=`.length);
+  return token ? verifyLocalSession(token) : undefined;
+}
+
+/**
+ * Built-in Studio sends credentials with cookies. Custom support routes keep
+ * using principalFromHeaders(), so they remain explicit-Bearer APIs.
+ * An Authorization header always wins, including when it is invalid: callers
+ * cannot turn a bad Bearer credential into a cookie fallback.
+ */
+export function studioPrincipalFromHeaders(
+  headers: Headers,
+  token?: string,
+): SupportPrincipal | undefined {
+  if (headers.has("authorization")) return principalFromHeaders(headers);
+  if (token?.trim())
+    return verifyLocalSession(token.replace(/^Bearer\s+/i, ""));
+  return sessionFromCookie(headers);
+}
+
+function hasSessionCookie(headers: Headers) {
+  return headers
+    .get("cookie")
+    ?.split(";")
+    .some((value) => value.trim().startsWith(`${SESSION_COOKIE_NAME}=`));
+}
+
+/** Reject a supplied foreign Origin for cookie-backed mutations. Missing
+ * Origin remains usable for non-browser local tooling; Bearer requests retain
+ * their existing API semantics. Credential login/logout receive the same
+ * browser protection even before a session cookie exists. */
+export function isForeignCookieMutation(request: Request) {
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method.toUpperCase()))
+    return false;
+  if (request.headers.has("authorization")) return false;
+  const path = new URL(request.url).pathname;
+  const isCredentialEndpoint =
+    path === "/api/auth/credentials/sign-in" || path === "/api/auth/logout";
+  if (!hasSessionCookie(request.headers) && !isCredentialEndpoint) return false;
+  const origin = request.headers.get("origin");
+  if (!origin) return false;
+  try {
+    return new URL(origin).origin !== new URL(request.url).origin;
+  } catch {
+    return true;
+  }
+}
+
+function sessionCookie(token: string, request: Request) {
+  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  return `${SESSION_COOKIE_NAME}=${token}; HttpOnly; SameSite=Strict; Path=/api; Max-Age=${SESSION_TTL_MS / 1000}${secure}`;
+}
+
+function foreignOriginError() {
+  return Object.assign(new Error("Cross-origin cookie mutation denied."), {
+    status: 403,
+  });
+}
 export function canAccessCase(
   principal: SupportPrincipal,
   supportCase: {
@@ -187,17 +254,31 @@ export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipa
       ],
     });
   }
-  async authenticateToken(token: string) {
-    return verifyLocalSession(token) ?? null;
+  async authenticateToken(token: string, request: { headers: Headers }) {
+    return studioPrincipalFromHeaders(request.headers, token) ?? null;
   }
-  async signIn(email: string, password: string, _request: Request) {
+  async signIn(email: string, password: string, request: Request) {
+    // Framework-public credential routes intentionally bypass server middleware,
+    // so this provider performs the same Origin check before issuing a cookie.
+    if (isForeignCookieMutation(request)) throw foreignOriginError();
     const token = authenticateSeededCredentials(email, password);
     const user = token ? verifyLocalSession(token) : undefined;
     if (!token || !user) throw new Error("Invalid local credentials.");
-    return { user, token };
+    return { user, token, cookies: [sessionCookie(token, request)] };
   }
   async getCurrentUser(request: Request) {
-    return principalFromHeaders(request.headers) ?? null;
+    return studioPrincipalFromHeaders(request.headers) ?? null;
+  }
+  getClearSessionHeaders() {
+    return {
+      "Set-Cookie": `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/api; Max-Age=0`,
+    };
+  }
+  getLogoutUrl(_redirectUri: string, request?: Request) {
+    // Logout is also framework-public. Throwing a status-bearing error prevents
+    // its handler from clearing a same-site session after a foreign POST.
+    if (request && isForeignCookieMutation(request)) throw foreignOriginError();
+    return null;
   }
   isSignUpEnabled() {
     return false;
@@ -216,12 +297,25 @@ export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipa
         ? String(rawRequest.url)
         : "/";
     const path = new URL(requestUrl, "http://local").pathname;
-    // Custom support routes enforce their own tenant/owner checks. The native
-    // supervisor execution itself receives a tenant/case scope from server
+    // Custom support routes enforce their own tenant/owner checks and remain
+    // explicit-Bearer APIs; Studio's cookie session has no authority there.
+    const requestHeaders =
+      typeof rawRequest === "object" &&
+      rawRequest !== null &&
+      "headers" in rawRequest &&
+      rawRequest.headers instanceof Headers
+        ? rawRequest.headers
+        : undefined;
+    if (path.startsWith("/support/")) {
+      const bearerPrincipal = requestHeaders
+        ? principalFromHeaders(requestHeaders)
+        : undefined;
+      return bearerPrincipal?.id === user.id;
+    }
+    // The native supervisor execution receives a tenant/case scope from server
     // middleware; registry and memory configuration are the only unaffiliated
     // Studio reads exposed to local staff. Other built-in data and mutation
     // routes remain denied because they have no tenant-safe contract here.
-    if (path.startsWith("/support/")) return true;
     const method =
       typeof rawRequest === "object" &&
       rawRequest !== null &&
@@ -230,7 +324,7 @@ export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipa
         : "GET";
     const isNativeSupervisorExecution =
       method === "POST" &&
-      /^\/(?:api\/)?agents\/support-supervisor\/(?:generate|stream|send-message|signals)$/.test(
+      /^\/(?:api\/)?agents\/support-supervisor\/(?:generate|stream|send-message|signals|threads\/subscribe)$/.test(
         path,
       );
     if (
@@ -249,6 +343,20 @@ export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipa
       isScopedStudioMemory &&
       user.tenantId === "local-demo" &&
       user.roles.some((role) => role === "support-agent" || role === "admin")
+    )
+      return true;
+    const studioChromeMetadata = new Set([
+      "/api/agents/providers",
+      "/api/editor/builder/settings",
+      "/api/editor/builder/models/available",
+      "/api/system/packages",
+      "/api/scores/scorers",
+    ]);
+    if (
+      method === "GET" &&
+      user.tenantId === "local-demo" &&
+      user.roles.some((role) => role === "support-agent" || role === "admin") &&
+      studioChromeMetadata.has(path)
     )
       return true;
     const studioRegistryIds = {

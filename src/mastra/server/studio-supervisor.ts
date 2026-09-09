@@ -4,14 +4,19 @@ import { withTrustedCaseReadScope } from "../lib/trusted-run-scope";
 import { caseStore } from "../lib/case-store";
 import { bindingsForCase } from "../providers/contracts";
 import { ensureStudioSupervisorDemoCase } from "../runtime/studio-seed";
-import { canAccessCase, hasRole, principalFromHeaders } from "./auth";
+import {
+  canAccessCase,
+  hasRole,
+  isForeignCookieMutation,
+  studioPrincipalFromHeaders,
+} from "./auth";
 import {
   supportSupervisorInstructions,
   supportSupervisorModel,
 } from "../agents/support-supervisor";
 
 const nativeSupervisorRoute =
-  /^\/api\/agents\/support-supervisor\/(?:generate|stream|send-message|signals)$/;
+  /^\/api\/agents\/support-supervisor\/(?:generate|stream|send-message|signals|threads\/subscribe)$/;
 const scopedStudioMemoryRoute = (path: string, method: string) =>
   (method === "GET" &&
     /^\/api\/memory\/(?:status|config|threads(?:\/[^/]+(?:\/messages)?)?)$/.test(
@@ -97,6 +102,8 @@ export async function studioSupervisorMiddleware(
   c: ContextWithMastra,
   next: () => Promise<void>,
 ) {
+  if (isForeignCookieMutation(c.req.raw))
+    return c.json({ error: "Cross-origin cookie mutation denied." }, 403);
   const path = new URL(c.req.url).pathname;
   const isNativeSupervisor = nativeSupervisorRoute.test(path);
   const isScopedMemory = scopedStudioMemoryRoute(path, c.req.method);
@@ -104,7 +111,7 @@ export async function studioSupervisorMiddleware(
   if (isNativeSupervisor && c.req.method !== "POST")
     return c.json({ error: "Method not allowed." }, 405);
 
-  const principal = principalFromHeaders(c.req.raw.headers);
+  const principal = studioPrincipalFromHeaders(c.req.raw.headers);
   if (!principal) return c.json({ error: "Authentication required." }, 401);
   if (
     principal.tenantId !== "local-demo" ||

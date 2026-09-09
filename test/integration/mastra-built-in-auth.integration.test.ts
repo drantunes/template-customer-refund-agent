@@ -13,6 +13,33 @@ import { temporaryDatabasePath } from "../support/temp-path";
 const databases: string[] = [];
 const shutdowns: Array<() => Promise<void>> = [];
 
+async function readSseUntil(response: Response, expected: string[]) {
+  const reader = response.body?.getReader();
+  if (!reader)
+    throw new Error("Studio thread subscription did not return SSE.");
+  const decoder = new TextDecoder();
+  let output = "";
+  try {
+    for (let attempts = 0; attempts < 20; attempts += 1) {
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("Timed out waiting for Studio SSE.")),
+            500,
+          ),
+        ),
+      ]);
+      if (next.done) break;
+      output += decoder.decode(next.value, { stream: true });
+      if (expected.every((value) => output.includes(value))) return output;
+    }
+    throw new Error(`Studio SSE did not include: ${expected.join(", ")}`);
+  } finally {
+    await reader.cancel();
+  }
+}
+
 function nativeStudioReadModel(): LanguageModelV2 {
   let call = 0;
   return {
@@ -147,8 +174,83 @@ describe("configured Mastra built-in API authorization", () => {
       },
     );
     expect(signIn.status).toBe(200);
+    const sessionCookie = signIn.headers.get("set-cookie");
+    expect(sessionCookie).toContain("mastra-token=");
+    expect(sessionCookie).toContain("HttpOnly");
+    expect(sessionCookie).toContain("SameSite=Strict");
+    expect(sessionCookie).toContain("Path=/api");
+    expect(sessionCookie).toContain("Max-Age=28800");
     const staffSession = (await signIn.json()) as { token: string };
     const staffHeaders = { authorization: `Bearer ${staffSession.token}` };
+    const cookieHeaders = { cookie: sessionCookie!.split(";")[0] };
+    expect(
+      (
+        await server.request("http://support.test/api/agents", {
+          headers: cookieHeaders,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await server.request("http://support.test/support/openapi.json", {
+          headers: cookieHeaders,
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await server.request("http://support.test/api/agents", {
+          headers: {
+            ...cookieHeaders,
+            authorization: "Bearer invalid-token",
+          },
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await server.request(
+          "http://support.test/api/auth/credentials/sign-in",
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              origin: "https://foreign.example",
+            },
+            body: JSON.stringify({
+              email: "agent@local.test",
+              password: "local-support-agent",
+            }),
+          },
+        )
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await server.request("http://support.test/api/auth/logout", {
+          method: "POST",
+          headers: { ...cookieHeaders, origin: "https://foreign.example" },
+        })
+      ).status,
+    ).toBe(403);
+    const logout = await server.request("http://support.test/api/auth/logout", {
+      method: "POST",
+      headers: cookieHeaders,
+    });
+    expect(logout.status).toBe(200);
+    expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
+    const httpsSignIn = await server.request(
+      "https://support.test/api/auth/credentials/sign-in",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          email: "agent@local.test",
+          password: "local-support-agent",
+        }),
+      },
+    );
+    expect(httpsSignIn.headers.get("set-cookie")).toContain("Secure");
     const capabilities = await server.request(
       "http://support.test/api/auth/capabilities",
       { headers: staffHeaders },
@@ -162,6 +264,11 @@ describe("configured Mastra built-in API authorization", () => {
       "/api/memory/config?agentId=support-supervisor",
       "/api/memory/status?agentId=support-supervisor",
       "/api/memory/threads?agentId=support-supervisor&resourceId=attacker",
+      "/api/agents/providers",
+      "/api/editor/builder/settings",
+      "/api/editor/builder/models/available",
+      "/api/system/packages",
+      "/api/scores/scorers",
     ]) {
       expect(
         (
@@ -323,12 +430,51 @@ describe("configured Mastra built-in API authorization", () => {
         temperature: 1,
       },
     };
+    const subscription = await server.request(
+      "http://support.test/api/agents/support-supervisor/threads/subscribe",
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          resourceId: "support-supervisor",
+          threadId: "browser-generated-thread",
+        }),
+      },
+    );
+    expect(subscription.status).toBe(200);
+    const received = readSseUntil(subscription, [
+      "lookup_order",
+      "ORD-1001",
+      "fulfilled",
+    ]);
+
+    // This is the actual first interactive payload from the Studio bundle:
+    // subscribe, then send agent-id/browser-thread aliases for server scoping.
     const response = await server.request(
-      "http://support.test/api/agents/support-supervisor/stream",
-      { method: "POST", headers, body: JSON.stringify(request) },
+      "http://support.test/api/agents/support-supervisor/send-message",
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          resourceId: "support-supervisor",
+          threadId: "browser-generated-thread",
+          message: {
+            contents: "Check ORD-1001 and summarize the evidence.",
+            metadata: { clientMessageId: "synthetic" },
+          },
+          ifIdle: {
+            streamOptions: {
+              maxSteps: 15,
+              modelSettings: { maxRetries: 2 },
+              requestContext: {},
+            },
+          },
+        }),
+      },
     );
     expect(response.status).toBe(200);
-    const stream = await response.text();
+    expect(await response.json()).toMatchObject({ accepted: true });
+    const stream = await received;
     expect(stream).toContain("lookup_order");
     expect(stream).toContain("ORD-1001");
     expect(stream).toContain("fulfilled");
@@ -344,8 +490,8 @@ describe("configured Mastra built-in API authorization", () => {
         body: JSON.stringify({
           caseId: studioSupervisorDemoCaseId,
           resourceId: "support-supervisor",
-          threadId: "another-tab",
-          message: "Confirm the safe outcome.",
+          threadId: "browser-generated-thread",
+          message: { contents: "Confirm the safe outcome." },
           ifIdle: {
             behavior: "wake",
             streamOptions: {
@@ -366,6 +512,21 @@ describe("configured Mastra built-in API authorization", () => {
       threadId: "foreign-studio-memory",
       resourceId: "tenant:local-demo:owner:customer-jordan",
     });
+    expect(
+      (
+        await server.request(
+          "http://support.test/api/agents/support-supervisor/threads/subscribe",
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              resourceId: "support-supervisor",
+              threadId: "foreign-studio-memory",
+            }),
+          },
+        )
+      ).status,
+    ).toBe(403);
 
     for (const body of [
       { ...request, model: "openai/attacker-model" },
@@ -407,6 +568,23 @@ describe("configured Mastra built-in API authorization", () => {
       },
     );
     expect(customer.status).toBe(403);
+    const foreignCookieMutation = await server.request(
+      "http://support.test/api/agents/support-supervisor/send-message",
+      {
+        method: "POST",
+        headers: {
+          cookie: `mastra-token=${issueLocalSession({ id: "support-agent-demo" })}`,
+          "content-type": "application/json",
+          origin: "https://foreign.example",
+        },
+        body: JSON.stringify({
+          resourceId: "support-supervisor",
+          threadId: "browser-generated-thread",
+          message: { contents: "Cross-origin cookie probe." },
+        }),
+      },
+    );
+    expect(foreignCookieMutation.status).toBe(403);
   });
 
   it("redacts application prose before configured span and log storage export", async () => {

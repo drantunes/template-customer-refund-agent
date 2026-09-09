@@ -10,7 +10,10 @@ export async function ensureStudioSupervisorDemoCase() {
 
   const binding = defaultLocalBinding(studioSupervisorDemoCaseId);
   await localRuntime.seed(binding);
-  const createdAt = "2026-09-01T12:00:00.000Z";
+  // A newly provisioned local database must not inherit an already-expired
+  // synthetic case as retention windows advance. Existing durable seed data is
+  // intentionally left untouched above.
+  const createdAt = new Date().toISOString();
   const supportCase = {
     id: studioSupervisorDemoCaseId,
     externalId: "studio-demo-order-status-event",
