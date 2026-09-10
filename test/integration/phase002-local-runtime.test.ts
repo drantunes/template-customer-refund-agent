@@ -254,7 +254,7 @@ describe("Phase 002 persistent local runtime", () => {
       .execute("INSERT INTO mastra_owned_probe VALUES ('keep')");
     await store.create(supportCase("legacy"));
     await expect(store.migrate(1)).rejects.toThrow(
-      "Refusing unsupported downgrade from support schema v23 to v1.",
+      "Refusing unsupported downgrade from support schema v24 to v1.",
     );
     expect((await store.get("legacy"))?.externalId).toBe("legacy");
     expect(
@@ -335,7 +335,7 @@ describe("Phase 002 persistent local runtime", () => {
     const { store } = await runtime();
     await store.create(supportCase("bad-migration"));
     await expect(store.migrate(3)).rejects.toThrow(
-      "Refusing unsupported downgrade from support schema v23 to v3.",
+      "Refusing unsupported downgrade from support schema v24 to v3.",
     );
     const versions = await store
       .getClient()
@@ -344,7 +344,7 @@ describe("Phase 002 persistent local runtime", () => {
       );
     expect(versions.rows.map((row) => Number(row.version))).toEqual([
       1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-      22, 23,
+      22, 23, 24,
     ]);
     expect(
       await store

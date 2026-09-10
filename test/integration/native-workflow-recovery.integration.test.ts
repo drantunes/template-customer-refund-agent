@@ -2853,7 +2853,7 @@ describe("native approval workflow recovery", () => {
       status: "resolved",
       refundResult: { amount: 20, status: "executed" },
     });
-    expect(
+    await expect(
       (
         await import("../../src/mastra/runtime/local-runtime")
       ).localRuntime.refunds(binding, "ORD-1001"),
