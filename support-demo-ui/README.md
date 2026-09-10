@@ -18,7 +18,7 @@ npm run dev # starts the Mastra API on :4111
 In another terminal:
 
 ```bash
-npm run --workspace support-refund-agent-web dev # starts the UI on :5173, proxying /support/* to :4111
+npm run --workspace support-demo-ui dev # starts the UI on :5173, proxying /support/* to :4111
 ```
 
 Open [http://localhost:5173](http://localhost:5173).

@@ -248,8 +248,8 @@ async function documentationFixture() {
   const repository = await temporaryDirectory();
   await Promise.all([
     mkdir(join(repository, "scripts"), { recursive: true }),
-    mkdir(join(repository, "web"), { recursive: true }),
-    mkdir(join(repository, "demo"), { recursive: true }),
+    mkdir(join(repository, "support-demo-ui"), { recursive: true }),
+    mkdir(join(repository, "client-demo-ui"), { recursive: true }),
     mkdir(join(repository, "docs/assets"), { recursive: true }),
   ]);
   await cp(checkDocs, join(repository, "scripts/check-docs.mjs"));
@@ -259,7 +259,7 @@ async function documentationFixture() {
       JSON.stringify({ scripts: { check: "node check.mjs" } }),
     ),
     writeFile(
-      join(repository, "web/package.json"),
+      join(repository, "support-demo-ui/package.json"),
       JSON.stringify({ scripts: { dev: "vite" } }),
     ),
     writeFile(
@@ -269,12 +269,12 @@ async function documentationFixture() {
     writeFile(join(repository, "CONTRIBUTING.md"), "# Contributing\n"),
     writeFile(join(repository, ".env.example"), "LOCAL_AUTH_SIGNING_KEY=\n"),
     writeFile(
-      join(repository, "web/README.md"),
-      "# Web\nnpm run --workspace support-refund-agent-web dev\n",
+      join(repository, "support-demo-ui/README.md"),
+      "# Web\nnpm run --workspace support-demo-ui dev\n",
     ),
-    writeFile(join(repository, "demo/README.md"), "# Demo\n"),
+    writeFile(join(repository, "client-demo-ui/README.md"), "# Demo\n"),
     writeFile(
-      join(repository, "demo/package.json"),
+      join(repository, "client-demo-ui/package.json"),
       JSON.stringify({ scripts: { dev: "tsx src/server.tsx" } }),
     ),
     writeFile(

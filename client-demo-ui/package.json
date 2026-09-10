@@ -1,11 +1,12 @@
 {
-  "name": "support-customer-demo",
+  "name": "client-demo-ui",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "npm run build && node --env-file-if-exists=../.env dist/server.js",
     "seed": "npm run build && node --env-file-if-exists=../.env dist/seed.js",
+    "setup": "npm run build && node --env-file-if-exists=../.env dist/setup.js",
     "format:check": "prettier --check src test README.md package.json tsconfig.json",
     "lint": "oxlint --deny-warnings src test",
     "typecheck": "tsc --noEmit",

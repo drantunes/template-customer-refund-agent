@@ -8,7 +8,7 @@ src/mastra/public/
 .env.local
 *.db
 *.db-*
-demo/.data/
+client-demo-ui/.data/
 .netlify
 .vercel
 *.duckdb

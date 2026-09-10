@@ -6,8 +6,8 @@ const documentation = [
   "README.md",
   "CONTRIBUTING.md",
   ".env.example",
-  "web/README.md",
-  "demo/README.md",
+  "support-demo-ui/README.md",
+  "client-demo-ui/README.md",
   ...walk(resolve(root, "docs")).map((path) => relative(root, path)),
 ];
 const errors = [];
@@ -16,16 +16,19 @@ const packageScripts = {
     JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")).scripts,
   ),
   web: Object.keys(
-    JSON.parse(readFileSync(resolve(root, "web/package.json"), "utf8")).scripts,
+    JSON.parse(
+      readFileSync(resolve(root, "support-demo-ui/package.json"), "utf8"),
+    ).scripts,
   ),
   demo: Object.keys(
-    JSON.parse(readFileSync(resolve(root, "demo/package.json"), "utf8"))
-      .scripts,
+    JSON.parse(
+      readFileSync(resolve(root, "client-demo-ui/package.json"), "utf8"),
+    ).scripts,
   ),
 };
 const workspaceScripts = {
-  "support-refund-agent-web": packageScripts.web,
-  "support-customer-demo": packageScripts.demo,
+  "support-demo-ui": packageScripts.web,
+  "client-demo-ui": packageScripts.demo,
 };
 
 for (const file of documentation) {

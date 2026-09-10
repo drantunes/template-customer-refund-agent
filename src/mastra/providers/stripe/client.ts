@@ -240,10 +240,13 @@ export class StripeClient {
         "Stripe customer lookup is ambiguous; an explicit Checkout or PaymentIntent id is required.",
       );
     const session = candidates[0];
-    if (!session)
-      return orderId
-        ? this.findInvoiceOrder(binding, email, customerId, orderId)
+    if (!session) {
+      if (orderId)
+        return this.findInvoiceOrder(binding, email, customerId, orderId);
+      return customerId
+        ? this.findStandaloneInvoiceOrder(binding, email, customerId)
         : undefined;
+    }
     if (session.status !== "complete" || session.payment_status !== "paid")
       throw new Error("Stripe Checkout Session is not complete and paid.");
     const customer = asObject(
@@ -295,6 +298,40 @@ export class StripeClient {
         ref("payment_intent", paymentIntent),
       ],
     };
+  }
+
+  /** Paid standalone invoices support API-created purchases. This path is
+   * narrower than a checkout lookup: subscription invoices are never selected
+   * from an email alone. */
+  private async findStandaloneInvoiceOrder(
+    binding: ProviderBinding,
+    email: string,
+    customerId: string,
+  ): Promise<CommerceOrder | undefined> {
+    const invoices = await this.list(
+      "/v1/invoices",
+      new URLSearchParams({ customer: customerId }),
+    );
+    const candidates = invoices.filter(
+      (invoice) =>
+        invoice.livemode === false &&
+        asId(invoice.customer, "Invoice customer") === customerId &&
+        (invoice.status === "paid" || invoice.paid === true) &&
+        invoice.billing_reason === "manual" &&
+        !invoice.subscription &&
+        !asObject(invoice.parent ?? {}, "Invoice parent").subscription_details,
+    );
+    if (candidates.length === 0) return undefined;
+    if (candidates.length > 1)
+      throw new Error(
+        "Stripe standalone invoice lookup is ambiguous; an explicit Invoice id is required.",
+      );
+    return this.findInvoiceOrder(
+      binding,
+      email,
+      customerId,
+      asId(candidates[0], "Invoice"),
+    );
   }
 
   /** An InvoicePayment is the authoritative bridge from a subscription invoice
@@ -369,7 +406,7 @@ export class StripeClient {
     return {
       orderId: asId(invoice, "Invoice"),
       customerEmail,
-      product: String(invoice.description ?? "Stripe subscription invoice"),
+      product: String(invoice.description ?? "Stripe invoice"),
       amount: supportedMoney(
         paymentIntent.currency,
         paymentIntent.amount_received ?? paymentIntent.amount,

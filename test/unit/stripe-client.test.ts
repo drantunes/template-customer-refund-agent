@@ -414,6 +414,148 @@ describe("Stripe fetch mapping", () => {
     ).toBe(true);
   });
 
+  it("finds one paid manual standalone invoice when Checkout is absent", async () => {
+    const client = new StripeClient(config, async (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/v1/account")
+        return Response.json({ id: config.accountId });
+      if (path === "/v1/customers")
+        return Response.json({
+          data: [{ id: "cus_1", email: "alex@example.com", livemode: false }],
+          has_more: false,
+        });
+      if (path === "/v1/checkout/sessions")
+        return Response.json({ data: [], has_more: false });
+      if (path === "/v1/invoices")
+        return Response.json({
+          data: [
+            {
+              id: "in_standalone",
+              customer: "cus_1",
+              livemode: false,
+              status: "paid",
+              paid: true,
+              billing_reason: "manual",
+              parent: {},
+            },
+          ],
+          has_more: false,
+        });
+      if (path === "/v1/invoices/in_standalone")
+        return Response.json({
+          id: "in_standalone",
+          customer: "cus_1",
+          livemode: false,
+          status: "paid",
+          paid: true,
+          created: 1,
+          description: "Northstar Toolkit",
+        });
+      if (path === "/v1/invoice_payments")
+        return Response.json({
+          data: [
+            {
+              id: "inpay_1",
+              invoice: "in_standalone",
+              livemode: false,
+              status: "paid",
+              payment: { type: "payment_intent", payment_intent: "pi_1" },
+            },
+          ],
+          has_more: false,
+        });
+      if (path === "/v1/payment_intents/pi_1")
+        return Response.json({
+          id: "pi_1",
+          livemode: false,
+          status: "succeeded",
+          currency: "usd",
+          amount_received: 500,
+        });
+      if (path === "/v1/customers/cus_1")
+        return Response.json({
+          id: "cus_1",
+          email: "alex@example.com",
+          livemode: false,
+        });
+      throw new Error(`unexpected ${path}`);
+    });
+    await expect(
+      client.findOrder(binding, "alex@example.com"),
+    ).resolves.toMatchObject({
+      orderId: "in_standalone",
+      amount: { currency: "USD", minor: 500 },
+    });
+  });
+
+  it.each([
+    { name: "has no paid standalone invoice", invoices: [] },
+    {
+      name: "only has a subscription invoice",
+      invoices: [
+        {
+          id: "in_subscription",
+          customer: "cus_1",
+          livemode: false,
+          status: "paid",
+          billing_reason: "subscription_create",
+          subscription: "sub_1",
+          parent: { subscription_details: { subscription: "sub_1" } },
+        },
+      ],
+    },
+  ])("returns no email-only order when $name", async ({ invoices }) => {
+    const client = new StripeClient(config, async (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/v1/account")
+        return Response.json({ id: config.accountId });
+      if (path === "/v1/customers")
+        return Response.json({
+          data: [{ id: "cus_1", email: "alex@example.com", livemode: false }],
+          has_more: false,
+        });
+      if (path === "/v1/checkout/sessions")
+        return Response.json({ data: [], has_more: false });
+      if (path === "/v1/invoices")
+        return Response.json({ data: invoices, has_more: false });
+      throw new Error(`unexpected ${path}`);
+    });
+    await expect(
+      client.findOrder(binding, "alex@example.com"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("fails closed when email-only standalone invoices are ambiguous", async () => {
+    const client = new StripeClient(config, async (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/v1/account")
+        return Response.json({ id: config.accountId });
+      if (path === "/v1/customers")
+        return Response.json({
+          data: [{ id: "cus_1", email: "alex@example.com", livemode: false }],
+          has_more: false,
+        });
+      if (path === "/v1/checkout/sessions")
+        return Response.json({ data: [], has_more: false });
+      if (path === "/v1/invoices")
+        return Response.json({
+          data: ["in_one", "in_two"].map((id) => ({
+            id,
+            customer: "cus_1",
+            livemode: false,
+            status: "paid",
+            billing_reason: "manual",
+            parent: {},
+          })),
+          has_more: false,
+        });
+      throw new Error(`unexpected ${path}`);
+    });
+    await expect(client.findOrder(binding, "alex@example.com")).rejects.toThrow(
+      "standalone invoice lookup is ambiguous",
+    );
+  });
+
   it("rejects a live resource returned by fake HTTP", async () => {
     const client = new StripeClient(config, async (request) => {
       const path = new URL(request.url).pathname;

@@ -51,7 +51,7 @@ Open [Mastra Studio](http://localhost:4111), sign in as `agent@local.test` with 
 - Change the policies and review limits to match your support process.
 - Connect the optional [Intercom development or Stripe sandbox adapter](docs/external-adapters.md) to try the same flow with a representative integration.
 
-The separate [Northstar demo](demo/README.md) needs its own synthetic accounts and external Intercom credentials. It is not required for the Studio-first quick start.
+The separate [Northstar demo](client-demo-ui/README.md) needs its own synthetic accounts and external Intercom credentials. It is not required for the Studio-first quick start.
 
 See [local troubleshooting](docs/troubleshooting.md) for setup help, [synthetic examples](docs/examples.md) for the local flow, and [CONTRIBUTING.md](CONTRIBUTING.md) for verification commands.
 

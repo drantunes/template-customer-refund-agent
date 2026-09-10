@@ -7,6 +7,7 @@ import {
 } from "node:crypto";
 import { promisify } from "node:util";
 import { mkdir } from "node:fs/promises";
+import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { DemoCustomer, DemoSession } from "./types.js";
 
@@ -14,11 +15,12 @@ const scrypt = promisify(scryptCallback);
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
 export function databaseUrl() {
-  // npm executes workspace scripts from demo/, so this resolves consistently
+  // npm executes workspace scripts from client-demo-ui/, so this resolves consistently
   // for `npm run dev:demo` and direct workspace commands.
   return process.env.DEMO_DATABASE_URL ?? "file:.data/northstar-demo.db";
 }
 export function openDatabase(url = databaseUrl()) {
+  ensureDatabaseDirectorySync(url);
   return createClient({ url });
 }
 export async function initializeDatabase(client: Client) {
@@ -33,6 +35,12 @@ export async function ensureDatabaseDirectory(url: string) {
   const filename = url.slice("file:".length).split("?", 1)[0];
   if (!filename) return;
   await mkdir(dirname(resolve(process.cwd(), filename)), { recursive: true });
+}
+function ensureDatabaseDirectorySync(url: string) {
+  if (!url.startsWith("file:") || url.includes(":memory:")) return;
+  const filename = url.slice("file:".length).split("?", 1)[0];
+  if (filename)
+    mkdirSync(dirname(resolve(process.cwd(), filename)), { recursive: true });
 }
 function digest(value: string) {
   return createHash("sha256").update(value).digest("hex");

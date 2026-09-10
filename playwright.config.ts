@@ -16,7 +16,7 @@ export default defineConfig({
     ...devices["Desktop Chrome"],
   },
   webServer: {
-    command: `npm run --workspace support-refund-agent-web dev -- --host 127.0.0.1 --port ${e2ePort} --strictPort`,
+    command: `npm run --workspace support-demo-ui dev -- --host 127.0.0.1 --port ${e2ePort} --strictPort`,
     url: e2eUrl,
     reuseExistingServer: false,
     timeout: 30_000,
