@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   caseFeedbackSchema,
+  customerFinancialRequestSchema,
   publicSupportCaseSchema,
 } from "../domain/support-case";
 
@@ -24,6 +25,9 @@ export const inboundSupportResponseSchema = z.object({
 
 export const caseListResponseSchema = z.object({
   cases: z.array(publicSupportCaseSchema),
+});
+export const customerFinancialRequestsResponseSchema = z.object({
+  requests: z.array(customerFinancialRequestSchema),
 });
 export const approvalRequestSchema = z.object({
   commandFingerprint: z.string().min(1),
@@ -346,6 +350,27 @@ export const supportOpenApiDocument = {
           },
           "401": {
             ...errorResponse("Authentication required"),
+          },
+        },
+      },
+    },
+    "/support/customer/financial-requests": {
+      get: {
+        responses: {
+          "200": {
+            description:
+              "Customer-scoped historical refund and subscription-credit request statuses",
+            content: {
+              "application/json": {
+                schema: jsonSchema(customerFinancialRequestsResponseSchema),
+              },
+            },
+          },
+          "401": {
+            ...errorResponse("Authentication required"),
+          },
+          "403": {
+            ...errorResponse("Only a customer may read this projection"),
           },
         },
       },

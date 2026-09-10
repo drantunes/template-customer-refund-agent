@@ -13,6 +13,11 @@
     "build:web": "npm run --workspace support-refund-agent-web build",
     "dev:demo": "npm run --workspace support-customer-demo dev",
     "build:demo": "npm run --workspace support-customer-demo build",
+    "lint:demo": "npm run --workspace support-customer-demo lint",
+    "typecheck:demo": "npm run --workspace support-customer-demo typecheck",
+    "test:unit:demo": "npm run --workspace support-customer-demo test:unit",
+    "test:integration:demo": "npm run --workspace support-customer-demo test:integration",
+    "test:e2e:demo": "npm run --workspace support-customer-demo test:e2e",
     "check:runtime": "node scripts/check-runtime.mjs",
     "start": "node --env-file-if-exists=.env --import ./scripts/database-env.mjs ./node_modules/mastra/dist/index.js start",
     "check:env": "node --env-file-if-exists=.env scripts/check-env.mjs",
@@ -31,8 +36,8 @@
     "test:contract": "vitest run --project contract",
     "test:eval": "node scripts/require-eval-baseline.mjs && vitest run --project eval",
     "eval:candidate-report": "node scripts/eval-candidate-report.mjs",
-    "test:e2e": "playwright test",
-    "test": "npm run test:unit && npm run --workspace support-refund-agent-web test:unit && npm run test:integration && npm run --workspace support-refund-agent-web test:integration && npm run test:contract && npm run --workspace support-refund-agent-web test:contract && npm run test:eval && npm run --workspace support-refund-agent-web test:eval"
+    "test:e2e": "npm run test:e2e:demo && playwright test",
+    "test": "npm run test:unit && npm run test:unit:demo && npm run --workspace support-refund-agent-web test:unit && npm run test:integration && npm run test:integration:demo && npm run --workspace support-refund-agent-web test:integration && npm run test:contract && npm run --workspace support-refund-agent-web test:contract && npm run test:eval && npm run --workspace support-refund-agent-web test:eval"
   },
   "keywords": [],
   "author": "",

@@ -1,11 +1,14 @@
 import { serve } from "@hono/node-server";
 import { timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { Hono, type Context } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
-import { Landing, Login, Account } from "./views.js";
+import { Landing, Login, Account, FinancialRequests } from "./views.js";
 import {
   createSession,
+  databaseUrl,
   deleteSession,
+  ensureDatabaseDirectory,
   initializeDatabase,
   openDatabase,
   sessionById,
@@ -14,17 +17,23 @@ import {
 import { issueBackendBridge, issueMessengerJwt } from "./bridge.js";
 
 const cookieName = "northstar_session";
+const identityKey = "northstar:customer-id";
+const maxWebhookBytes = 256 * 1024;
 const app = new Hono();
-const client = openDatabase();
+const configuredDatabaseUrl = databaseUrl();
+// libSQL opens its file lazily today, but create the configured parent before
+// creating the client so a future eager driver cannot break a clean seed/run.
+await ensureDatabaseDirectory(configuredDatabaseUrl);
+const client = openDatabase(configuredDatabaseUrl);
+const styles = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 const backend = () =>
   (process.env.SUPPORT_BACKEND_URL ?? "http://127.0.0.1:4111").replace(
     /\/$/,
     "",
   );
-const safeNext = (value: string | undefined) =>
-  value?.startsWith("/") && !value.startsWith("//") ? value : "/conta";
+const safeNext = () => "/conta";
 function expiredPage() {
-  return "window.Intercom&&window.Intercom('shutdown');window.location.assign('/entrar');";
+  return `try{localStorage.removeItem(${JSON.stringify(identityKey)})}catch(_){ }window.Intercom&&window.Intercom('shutdown');window.location.assign('/entrar');`;
 }
 async function current(c: { req: { raw: Request } }) {
   return sessionById(client, getCookie(c as never, cookieName));
@@ -45,63 +54,91 @@ function sameToken(actual: string, expected: string) {
   const right = Buffer.from(expected);
   return left.length === right.length && timingSafeEqual(left, right);
 }
+function noStore(c: Context) {
+  c.header("Cache-Control", "no-store");
+  c.header("Pragma", "no-cache");
+}
+function scriptValue(value: unknown) {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
 function widget(
   customer: Parameters<typeof issueMessengerJwt>[0],
   expiresAt: string,
+  openChat: boolean,
 ) {
   const appId = process.env.INTERCOM_APP_ID;
   const jwt = issueMessengerJwt(customer, expiresAt);
   if (!appId || !jwt) return undefined;
-  const settings = JSON.stringify({
+  const settings = scriptValue({
     app_id: appId,
     user_id: customer.id,
     intercom_user_jwt: jwt,
   });
-  return `window.intercomSettings=${settings};(function(){var w=window;if(typeof w.Intercom==='function'){w.Intercom('update',w.intercomSettings)}else{var d=document,i=function(){i.c(arguments)};i.q=[];i.c=function(a){i.q.push(a)};w.Intercom=i;var l=function(){var s=d.createElement('script');s.async=true;s.src='https://widget.intercom.io/widget/${appId}';d.head.appendChild(s)};if(d.readyState==='complete')l();else w.addEventListener('load',l)}})();var northstarSessionCheck=function(){fetch('/sessao',{credentials:'same-origin',cache:'no-store'}).then(function(r){if(!r.ok){window.Intercom&&window.Intercom('shutdown');location.assign('/entrar')}}).catch(function(){})};window.addEventListener('visibilitychange',function(){if(!document.hidden)northstarSessionCheck()});window.setInterval(northstarSessionCheck,60000);`;
+  const identity = scriptValue(customer.id);
+  const expiry = scriptValue(expiresAt);
+  return `(function(){var key=${scriptValue(identityKey)},identity=${identity},expiresAt=${expiry},openChat=${scriptValue(openChat)},closed=false;function shutdown(){if(closed)return;closed=true;window.Intercom&&window.Intercom('shutdown');location.assign('/entrar')}try{var previous=localStorage.getItem(key);if(previous&&previous!==identity){window.Intercom&&window.Intercom('shutdown')}localStorage.setItem(key,identity)}catch(_){ }window.addEventListener('storage',function(event){if(event.key===key&&event.newValue!==identity)shutdown()});window.intercomSettings=${settings};var w=window;if(typeof w.Intercom==='function'){w.Intercom('boot',w.intercomSettings);if(openChat)w.Intercom('show')}else{var d=document,i=function(){i.c(arguments)};i.q=[];i.c=function(a){i.q.push(a)};w.Intercom=i;w.Intercom('boot',w.intercomSettings);if(openChat)w.Intercom('show');var l=function(){var s=d.createElement('script');s.async=true;s.src='https://widget.intercom.io/widget/'+encodeURIComponent(w.intercomSettings.app_id);d.head.appendChild(s)};if(d.readyState==='complete')l();else w.addEventListener('load',l)}var check=function(){fetch('/sessao',{credentials:'same-origin',cache:'no-store',headers:{'Cache-Control':'no-store'}}).then(function(r){if(!r.ok)shutdown()}).catch(function(){})};window.addEventListener('visibilitychange',function(){if(!document.hidden)check()});var remaining=Date.parse(expiresAt)-Date.now();window.setTimeout(shutdown,Math.max(0,remaining));window.setInterval(check,15000)})();`;
 }
-async function casesFor(
+async function financialRequestsFor(
   customer: Parameters<typeof issueBackendBridge>[0],
   expiresAt: string,
 ): Promise<{
   available: boolean;
-  cases: Array<{
-    id: string;
-    subject: string;
+  requests: Array<{
+    caseId: string;
+    turnId: string;
+    type: "refund" | "subscription_credit";
+    amount: number;
+    currency: string;
     status: string;
-    updatedAt: string;
-    messages?: Array<{ author: string; body: string }>;
+    requestedAt: string;
   }>;
 }> {
   const token = issueBackendBridge(customer, expiresAt);
-  if (!token) return { available: false, cases: [] };
+  if (!token) return { available: false, requests: [] };
   try {
-    const response = await fetch(`${backend()}/support/cases`, {
-      headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(3_000),
-    });
-    if (!response.ok) return { available: false, cases: [] };
-    const data = (await response.json()) as { cases?: unknown };
+    const response = await fetch(
+      `${backend()}/support/customer/financial-requests`,
+      {
+        headers: { authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(3_000),
+      },
+    );
+    if (!response.ok) return { available: false, requests: [] };
+    const data = (await response.json()) as { requests?: unknown };
     return {
-      available: Array.isArray(data.cases),
-      cases: Array.isArray(data.cases)
-        ? (data.cases as Array<{
-            id: string;
-            subject: string;
+      available: Array.isArray(data.requests),
+      requests: Array.isArray(data.requests)
+        ? (data.requests as Array<{
+            caseId: string;
+            turnId: string;
+            type: "refund" | "subscription_credit";
+            amount: number;
+            currency: string;
             status: string;
-            updatedAt: string;
-            messages?: Array<{ author: string; body: string }>;
+            requestedAt: string;
           }>)
         : [],
     };
   } catch {
-    return { available: false, cases: [] };
+    return { available: false, requests: [] };
   }
 }
 app.get("/", (c) => c.html(<Landing />));
-app.get("/atendimento", (c) => c.redirect("/entrar?next=/conta"));
-app.get("/entrar", (c) =>
-  c.html(<Login next={safeNext(c.req.query("next"))} />),
+app.get("/styles.css", (c) =>
+  c.body(styles, 200, { "content-type": "text/css; charset=utf-8" }),
 );
+app.get("/atendimento", async (c) => {
+  const session = await current(c);
+  if (!session) return c.redirect("/entrar?next=/conta");
+  noStore(c);
+  return c.redirect("/conta?chat=open", 303);
+});
+app.get("/entrar", (c) => c.html(<Login next={safeNext()} />));
 app.post("/entrar", async (c) => {
   if (!originAllowed(c.req.raw)) return c.text("Origem não permitida.", 403);
   const form = await c.req.parseBody();
@@ -110,13 +147,14 @@ app.post("/entrar", async (c) => {
     String(form.email ?? ""),
     String(form.password ?? ""),
   );
-  const next = safeNext(typeof form.next === "string" ? form.next : undefined);
+  const next = safeNext();
   if (!customer)
     return c.html(
       <Login error="E-mail ou senha inválidos." next={next} />,
       401,
     );
   const session = await createSession(client, customer);
+  noStore(c);
   setCookie(c, cookieName, session.id, {
     httpOnly: true,
     sameSite: "Strict",
@@ -127,10 +165,26 @@ app.post("/entrar", async (c) => {
   return c.redirect(next, 303);
 });
 app.get("/sessao", async (c) => {
+  noStore(c);
   const session = await current(c);
   return session
     ? c.json({ expiresAt: session.expiresAt })
     : c.text("Sessão expirada.", 401);
+});
+app.get("/solicitacoes", async (c) => {
+  const session = await current(c);
+  noStore(c);
+  if (!session) return c.text("Sessão expirada.", 401);
+  const projection = await financialRequestsFor(
+    session.customer,
+    session.expiresAt,
+  );
+  return c.html(
+    <FinancialRequests
+      requests={projection.requests}
+      requestsAvailable={projection.available}
+    />,
+  );
 });
 app.post("/sair", async (c) => {
   if (!originAllowed(c.req.raw)) return c.text("Origem não permitida.", 403);
@@ -144,6 +198,7 @@ app.post("/sair", async (c) => {
   )
     return c.text("Sessão ou proteção CSRF inválida.", 403);
   await deleteSession(client, id);
+  noStore(c);
   setCookie(c, cookieName, "", {
     httpOnly: true,
     sameSite: "Strict",
@@ -161,14 +216,22 @@ app.post("/sair", async (c) => {
 app.get("/conta", async (c) => {
   const session = await current(c);
   if (!session) return c.redirect("/entrar?next=/conta");
-  const chat = widget(session.customer, session.expiresAt);
-  const projection = await casesFor(session.customer, session.expiresAt);
+  noStore(c);
+  const chat = widget(
+    session.customer,
+    session.expiresAt,
+    c.req.query("chat") === "open",
+  );
+  const projection = await financialRequestsFor(
+    session.customer,
+    session.expiresAt,
+  );
   return c.html(
     <Account
       customer={session.customer}
       csrfToken={session.csrfToken}
-      cases={projection.cases}
-      casesAvailable={projection.available}
+      requests={projection.requests}
+      requestsAvailable={projection.available}
       widget={chat}
       chatUnavailable={!chat}
     />,
@@ -177,7 +240,11 @@ app.get("/conta", async (c) => {
 async function forwardWebhook(c: Context) {
   const url = new URL(c.req.url);
   const destination = `${backend()}${url.pathname}`;
-  const body = await c.req.raw.arrayBuffer();
+  const declared = Number(c.req.header("content-length"));
+  if (Number.isFinite(declared) && declared > maxWebhookBytes)
+    return c.text("Webhook maior que o limite aceito.", 413);
+  const body = await limitedBody(c.req.raw, maxWebhookBytes);
+  if (!body) return c.text("Webhook maior que o limite aceito.", 413);
   const headers = new Headers();
   for (const name of [
     "content-type",
@@ -199,6 +266,33 @@ async function forwardWebhook(c: Context) {
     status: response.status,
     headers: new Headers(response.headers),
   });
+}
+async function limitedBody(request: Request, maximum: number) {
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      size += chunk.value.byteLength;
+      if (size > maximum) {
+        await reader.cancel();
+        return undefined;
+      }
+      chunks.push(chunk.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const result = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
 }
 app.post("/support/webhooks/intercom", forwardWebhook);
 app.post("/support/webhooks/stripe", forwardWebhook);

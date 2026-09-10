@@ -2,7 +2,7 @@
   "name": "support-refund-agent-web",
   "private": true,
   "version": "0.0.0",
-  "description": "Demo UI for the customer support/refund Mastra agent: a landing explainer, a customer portal, and a support admin queue with refund approvals.",
+  "description": "Demo UI for the customer support/refund Mastra agent: a landing explainer and a support admin queue with refund approvals.",
   "type": "module",
   "scripts": {
     "dev": "vite",

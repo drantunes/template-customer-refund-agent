@@ -6,6 +6,7 @@ import { shippingPolicy } from "./docs/shipping-policy.ts";
 import { subscriptionCancellationPolicy } from "./docs/subscription-cancellation-policy.ts";
 import { escalationPolicy } from "./docs/escalation-policy.ts";
 import { serviceProblemCreditPolicy } from "./docs/service-problem-credit-policy.ts";
+import { addressGuidance } from "./docs/address-guidance.ts";
 
 export type { PolicyDocument };
 
@@ -32,4 +33,5 @@ export const POLICY_DOCUMENTS: PolicyDocument[] = [
   subscriptionCancellationPolicy,
   escalationPolicy,
   serviceProblemCreditPolicy,
+  addressGuidance,
 ];

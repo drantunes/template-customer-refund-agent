@@ -8,6 +8,7 @@ import {
   supportCaseFeedbackRoute,
   supportCaseFollowUpRoute,
   supportCaseDetailRoute,
+  supportCustomerFinancialRequestsRoute,
   supportCasesListRoute,
 } from "./casework-routes";
 import {
@@ -28,6 +29,7 @@ export {
   stripeWebhookRoute,
   supportCaseApproveRoute,
   supportCaseDetailRoute,
+  supportCustomerFinancialRequestsRoute,
   supportCaseFeedbackRoute,
   supportCaseFollowUpRoute,
   supportCaseRejectRoute,
@@ -46,6 +48,7 @@ export const supportRoutes = [
   intercomWebhookRoute,
   stripeWebhookRoute,
   supportCasesListRoute,
+  supportCustomerFinancialRequestsRoute,
   supportCaseDetailRoute,
   supportCaseSupervisorRoute,
   supportCaseApproveRoute,

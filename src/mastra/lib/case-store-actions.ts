@@ -1,5 +1,6 @@
 import type { Client } from "@libsql/client";
 import type { SupportCase } from "../domain/support-case";
+import type { CustomerFinancialRequest } from "../domain/support-case";
 import {
   now,
   parse,
@@ -7,6 +8,76 @@ import {
   financialRetentionTombstoneError,
   StaleCaseWriteError,
 } from "./case-store-shared";
+
+type FinancialCommand = {
+  binding?: { providerKind?: unknown };
+  amount?: { minor?: unknown; currency?: unknown } | number;
+  currency?: unknown;
+  orderId?: unknown;
+  customerId?: unknown;
+  subscriptionId?: unknown;
+  idempotencyKey?: unknown;
+};
+
+function safeReceipt(value: unknown): Record<string, unknown> | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(String(value));
+    return typeof parsed === "object" && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A durable idempotency row may mean a pending recovery, a failed attempt, or
+ * a retention tombstone. Only a receipt that matches its immutable command is
+ * a customer-visible completed transaction. */
+export function customerReceiptState(
+  kind: string,
+  command: FinancialCommand,
+  receipt: Record<string, unknown> | undefined,
+): "executed" | "failed" | "unknown" | undefined {
+  if (!receipt || receipt.retention) return undefined;
+  const providerStatus = receipt.status;
+  if (providerStatus === "failed") return "failed";
+  if (providerStatus === "pending") return undefined;
+  if (providerStatus === "unknown") return "unknown";
+  const amount = command.amount;
+  const expectedAmount =
+    typeof amount === "object" && amount !== null
+      ? amount.minor
+      : typeof amount === "number"
+        ? Math.round(amount * 100)
+        : undefined;
+  const expectedCurrency =
+    typeof amount === "object" && amount !== null
+      ? amount.currency
+      : command.currency;
+  const receivedAmount = receipt.amount as
+    { minor?: unknown; currency?: unknown } | undefined;
+  const matchingMoney =
+    typeof expectedAmount === "number" &&
+    typeof expectedCurrency === "string" &&
+    typeof receivedAmount?.minor === "number" &&
+    receivedAmount.minor === expectedAmount &&
+    receivedAmount.currency === expectedCurrency;
+  const matchingRequest =
+    receipt.idempotencyKey === command.idempotencyKey &&
+    (kind === "refund-command"
+      ? receipt.orderId === command.orderId
+      : receipt.customerId === command.customerId &&
+        receipt.subscriptionId === command.subscriptionId);
+  if (!matchingMoney || !matchingRequest) return "unknown";
+  // Stripe's asynchronous receipt must explicitly settle. The local provider
+  // has a synchronous, validated receipt without a status field.
+  if (command.binding?.providerKind === "stripe")
+    return providerStatus === "succeeded" ? "executed" : "unknown";
+  return providerStatus === undefined || providerStatus === "succeeded"
+    ? "executed"
+    : "unknown";
+}
 
 export class CaseStoreActions {
   constructor(private readonly client: Client) {}
@@ -225,6 +296,98 @@ export class CaseStoreActions {
           turnId: String(row.turn_id),
         }
       : undefined;
+  }
+  /**
+   * This read model is intentionally assembled from immutable action/decision
+   * rows and the receipt ledger. A later customer follow-up cannot erase an
+   * earlier request. It returns only the fields the customer can understand.
+   */
+  async customerFinancialRequests(
+    caseIds: string[],
+  ): Promise<CustomerFinancialRequest[]> {
+    if (!caseIds.length) return [];
+    const placeholders = caseIds.map(() => "?").join(", ");
+    const rows = await this.client.execute({
+      sql: `SELECT a.case_id, a.kind, a.fingerprint, a.data, a.created_at,
+          t.id AS turn_id, d.approved AS approved, i.effect AS receipt,
+          EXISTS(SELECT 1 FROM support_actions f WHERE f.case_id = a.case_id
+            AND f.fingerprint = a.fingerprint
+            AND f.kind IN ('refund-failure', 'refund-uncertain')) AS failed
+        FROM support_actions a
+        JOIN support_turns t ON t.case_id = a.case_id
+          AND t.command_fingerprint = a.fingerprint
+        LEFT JOIN support_decisions d ON d.case_id = a.case_id
+          AND d.turn_id = t.id AND d.command_fingerprint = a.fingerprint
+        LEFT JOIN support_idempotency i ON i.fingerprint = a.fingerprint
+        WHERE a.case_id IN (${placeholders})
+          AND a.kind IN ('refund-command', 'subscription-credit-command')
+        ORDER BY a.created_at DESC`,
+      args: caseIds,
+    });
+    return rows.rows.flatMap((row) => {
+      let command: FinancialCommand;
+      try {
+        command = JSON.parse(String(row.data)) as FinancialCommand;
+      } catch {
+        return [];
+      }
+      if (
+        typeof command.amount !== "object" &&
+        (typeof command.amount !== "number" ||
+          !Number.isFinite(command.amount) ||
+          command.amount <= 0)
+      )
+        return [];
+      const money = command.amount as
+        number | { minor?: unknown; currency?: unknown };
+      const amount =
+        typeof money === "number"
+          ? money
+          : typeof money.minor === "number"
+            ? money.minor / 100
+            : undefined;
+      const currency =
+        typeof command.currency === "string"
+          ? command.currency
+          : typeof money === "object" && typeof money.currency === "string"
+            ? money.currency
+            : undefined;
+      if (!amount || !currency) return [];
+      const receipt = safeReceipt(row.receipt);
+      const receiptStatus = customerReceiptState(
+        String(row.kind),
+        command,
+        receipt,
+      );
+      const status =
+        row.approved === null || row.approved === undefined
+          ? "pending_approval"
+          : Number(row.approved) === 0
+            ? "rejected"
+            : receiptStatus === "executed"
+              ? "executed"
+              : receiptStatus === "failed"
+                ? "failed"
+                : receiptStatus === "unknown"
+                  ? "unknown"
+                  : Number(row.failed) > 0
+                    ? "failed"
+                    : "processing";
+      return [
+        {
+          caseId: String(row.case_id),
+          turnId: String(row.turn_id),
+          type:
+            String(row.kind) === "subscription-credit-command"
+              ? "subscription_credit"
+              : "refund",
+          amount,
+          currency,
+          status,
+          requestedAt: String(row.created_at),
+        },
+      ];
+    });
   }
   /** Monitoring reads immutable decision rows rather than a mutable case
    * projection, so a later follow-up cannot erase earlier approval outcomes. */

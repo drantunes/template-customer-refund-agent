@@ -27,13 +27,13 @@ export function Landing() {
             separately.
           </p>
           <p>
-            Send a support message, inspect the recorded evidence, and review a
-            proposed refund in the admin dashboard.
+            Inspect the recorded evidence and review a proposed refund in the
+            admin dashboard.
           </p>
         </CardContent>
         <CardFooter>
-          <Link to="/portal" className={buttonVariants()}>
-            Let's go
+          <Link to="/admin" className={buttonVariants()}>
+            Open admin queue
             <ArrowRight data-icon="inline-end" />
           </Link>
         </CardFooter>

@@ -6,22 +6,33 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import { promisify } from "node:util";
+import { mkdir } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import type { DemoCustomer, DemoSession } from "./types.js";
 
 const scrypt = promisify(scryptCallback);
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
 export function databaseUrl() {
-  return process.env.DEMO_DATABASE_URL ?? "file:demo/.data/northstar-demo.db";
+  // npm executes workspace scripts from demo/, so this resolves consistently
+  // for `npm run dev:demo` and direct workspace commands.
+  return process.env.DEMO_DATABASE_URL ?? "file:.data/northstar-demo.db";
 }
 export function openDatabase(url = databaseUrl()) {
   return createClient({ url });
 }
 export async function initializeDatabase(client: Client) {
+  await ensureDatabaseDirectory(databaseUrl());
   await client.batch([
     "CREATE TABLE IF NOT EXISTS demo_customers (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE COLLATE NOCASE, password_salt TEXT NOT NULL, password_hash TEXT NOT NULL, tenant_id TEXT NOT NULL, stripe_customer_id TEXT NOT NULL UNIQUE, intercom_contact_id TEXT NOT NULL UNIQUE, checkout_session_id TEXT, subscription_id TEXT, invoice_id TEXT, payment_intent_id TEXT, purchase_paid INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS demo_sessions (id_hash TEXT PRIMARY KEY, customer_id TEXT NOT NULL REFERENCES demo_customers(id), csrf_token TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)",
   ]);
+}
+export async function ensureDatabaseDirectory(url: string) {
+  if (!url.startsWith("file:") || url.includes(":memory:")) return;
+  const filename = url.slice("file:".length).split("?", 1)[0];
+  if (!filename) return;
+  await mkdir(dirname(resolve(process.cwd(), filename)), { recursive: true });
 }
 function digest(value: string) {
   return createHash("sha256").update(value).digest("hex");

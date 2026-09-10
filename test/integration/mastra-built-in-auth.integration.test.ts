@@ -940,7 +940,7 @@ describe("configured Mastra built-in API authorization", () => {
     expect(summaryA.telemetry.providerCalls).toContainEqual(
       expect.objectContaining({
         operation: "knowledge.fetch_document",
-        calls: 7,
+        calls: 8,
       }),
     );
     expect(

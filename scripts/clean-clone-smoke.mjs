@@ -291,6 +291,7 @@ try {
   for (const command of [
     ["run", "build"],
     ["run", "build:web"],
+    ["run", "build:demo"],
     ["run", "test:e2e"],
   ])
     run("npm", command, destination, env);

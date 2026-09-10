@@ -52,6 +52,18 @@ jobs:
         run: npm run test:eval
       - name: Backend build
         run: npm run build
+      - name: Customer demo format
+        run: npm run --workspace support-customer-demo format:check
+      - name: Customer demo style
+        run: npm run lint:demo
+      - name: Customer demo typecheck
+        run: npm run typecheck:demo
+      - name: Customer demo unit tests
+        run: npm run test:unit:demo
+      - name: Customer demo integration tests
+        run: npm run test:integration:demo
+      - name: Customer demo build
+        run: npm run build:demo
       - name: Frontend format
         run: npm run --workspace support-refund-agent-web format:check
       - name: Frontend style

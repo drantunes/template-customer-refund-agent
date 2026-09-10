@@ -5375,6 +5375,124 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
         },
       },
     },
+    "/support/customer/financial-requests": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": false,
+                  "properties": {
+                    "requests": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "amount": {
+                            "exclusiveMinimum": 0,
+                            "type": "number",
+                          },
+                          "caseId": {
+                            "type": "string",
+                          },
+                          "currency": {
+                            "minLength": 1,
+                            "type": "string",
+                          },
+                          "requestedAt": {
+                            "type": "string",
+                          },
+                          "status": {
+                            "enum": [
+                              "pending_approval",
+                              "rejected",
+                              "processing",
+                              "executed",
+                              "failed",
+                              "unknown",
+                            ],
+                            "type": "string",
+                          },
+                          "turnId": {
+                            "type": "string",
+                          },
+                          "type": {
+                            "enum": [
+                              "refund",
+                              "subscription_credit",
+                            ],
+                            "type": "string",
+                          },
+                        },
+                        "required": [
+                          "caseId",
+                          "turnId",
+                          "type",
+                          "amount",
+                          "currency",
+                          "status",
+                          "requestedAt",
+                        ],
+                        "type": "object",
+                      },
+                      "type": "array",
+                    },
+                  },
+                  "required": [
+                    "requests",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Customer-scoped historical refund and subscription-credit request statuses",
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Authentication required",
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Only a customer may read this projection",
+          },
+        },
+      },
+    },
     "/support/inbound": {
       "post": {
         "requestBody": {

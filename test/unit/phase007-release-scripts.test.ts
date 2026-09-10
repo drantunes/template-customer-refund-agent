@@ -235,6 +235,7 @@ async function documentationFixture() {
   await Promise.all([
     mkdir(join(repository, "scripts"), { recursive: true }),
     mkdir(join(repository, "web"), { recursive: true }),
+    mkdir(join(repository, "demo"), { recursive: true }),
     mkdir(join(repository, "docs/assets"), { recursive: true }),
   ]);
   await cp(checkDocs, join(repository, "scripts/check-docs.mjs"));
@@ -257,13 +258,14 @@ async function documentationFixture() {
       join(repository, "web/README.md"),
       "# Web\nnpm run --workspace support-refund-agent-web dev\n",
     ),
+    writeFile(join(repository, "demo/README.md"), "# Demo\n"),
+    writeFile(
+      join(repository, "demo/package.json"),
+      JSON.stringify({ scripts: { dev: "tsx src/server.tsx" } }),
+    ),
     writeFile(
       join(repository, "docs/examples.md"),
       "# Example\nEvery identity, message, order, and result below is synthetic.\n",
-    ),
-    writeFile(
-      join(repository, "docs/assets/local-demo-portal.png"),
-      "synthetic",
     ),
     writeFile(
       join(repository, "docs/assets/local-demo-admin.png"),

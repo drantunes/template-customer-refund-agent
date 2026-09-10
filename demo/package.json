@@ -11,9 +11,9 @@
     "typecheck": "tsc --noEmit",
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
-    "test:e2e": "playwright test -c playwright.config.ts",
+    "test:e2e": "npm run build && playwright test -c playwright.config.ts",
     "e2e:serve": "node dist/e2e-seed.js && node dist/server.js",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "tsc -p tsconfig.build.json && cp src/styles.css dist/styles.css"
   },
   "dependencies": {
     "@hono/node-server": "1.19.17",

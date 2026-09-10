@@ -13,6 +13,7 @@ import type { CaseFeedback } from "../domain/support-case";
 import { canAccessCase, hasRole } from "./auth";
 import {
   caseListResponseSchema,
+  customerFinancialRequestsResponseSchema,
   errorResponseSchema,
   feedbackRequestSchema,
   followUpRequestSchema,
@@ -235,6 +236,35 @@ export const supportCasesListRoute = registerApiRoute("/support/cases", {
     );
   },
 });
+
+/** Customer-facing financial history is a purpose-built read model. It does
+ * not reuse the staff case DTO because a command, approval note, or provider
+ * reference is never customer-visible. */
+export const supportCustomerFinancialRequestsRoute = registerApiRoute(
+  "/support/customer/financial-requests",
+  {
+    method: "GET",
+    handler: async (c) => {
+      const current = requirePrincipal(c);
+      if (current instanceof Response) return current;
+      if (!hasRole(current, "customer"))
+        return c.json(
+          errorResponseSchema.parse({ error: "Insufficient authority." }),
+          403,
+        );
+      const cases = (await caseStore.list()).filter((supportCase) =>
+        canAccessCase(current, supportCase),
+      );
+      return c.json(
+        customerFinancialRequestsResponseSchema.parse({
+          requests: await caseStore.customerFinancialRequests(
+            cases.map((supportCase) => supportCase.id),
+          ),
+        }),
+      );
+    },
+  },
+);
 
 export const supportCaseDetailRoute = registerApiRoute(
   "/support/cases/:caseId",

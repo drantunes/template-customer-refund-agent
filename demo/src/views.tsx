@@ -1,14 +1,13 @@
 import type { Child } from "hono/jsx";
 import type { DemoCustomer } from "./types.js";
 
-const css = `:root{color-scheme:dark;--bg:#111315;--panel:#191c1f;--line:#30363d;--muted:#a2a9b2;--text:#f5f7f8;--green:#56c596}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 Inter,ui-sans-serif,system-ui,sans-serif}a{color:inherit;text-decoration:none}.shell{max-width:1100px;margin:auto;padding:0 24px}.nav{display:flex;align-items:center;justify-content:space-between;padding:22px 0;border-bottom:1px solid var(--line)}.brand{font-weight:750;letter-spacing:-.03em}.mark{color:var(--green)}.nav-links{display:flex;gap:18px;align-items:center}.button{border:1px solid var(--line);background:#23282c;color:var(--text);padding:10px 15px;border-radius:8px;font:inherit;cursor:pointer}.button.primary{background:var(--green);color:#092117;border-color:var(--green);font-weight:700}.hero{padding:96px 0 74px;max-width:750px}.eyebrow{color:var(--green);font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.1em}.hero h1{font-size:clamp(42px,7vw,76px);line-height:1.02;letter-spacing:-.055em;margin:14px 0 24px}.lead{font-size:20px;color:var(--muted);max-width:610px}.actions{display:flex;gap:12px;margin-top:30px;flex-wrap:wrap}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:0 0 70px}.card{border:1px solid var(--line);background:var(--panel);border-radius:12px;padding:22px}.card h2,.card h3{margin-top:0;letter-spacing:-.025em}.muted{color:var(--muted)}.auth{max-width:420px;margin:80px auto}.auth h1{letter-spacing:-.04em}.field{display:grid;gap:7px;margin:17px 0}.field input{border:1px solid var(--line);background:#121416;border-radius:8px;padding:12px;color:var(--text);font:inherit}.error{border-left:3px solid #dd6b6b;padding:9px 12px;background:#302021}.account{padding:42px 0 72px}.account-header{display:flex;justify-content:space-between;gap:24px;align-items:flex-end;margin-bottom:28px}.account h1{margin:0;letter-spacing:-.04em}.section{margin-top:28px}.stack{display:grid;gap:12px}.status{font-size:13px;border:1px solid var(--line);padding:4px 8px;border-radius:99px;color:var(--muted);white-space:nowrap}.row{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.notice{border:1px solid #34634e;background:#14271e;padding:15px;border-radius:10px}.empty{border:1px dashed var(--line);border-radius:10px;padding:24px;color:var(--muted)}@media(max-width:700px){.grid{grid-template-columns:1fr}.hero{padding:64px 0 44px}.account-header{align-items:flex-start;flex-direction:column}.shell{padding:0 18px}.nav-links{gap:12px}}`;
-
 export function Layout(props: {
   title: string;
   children: Child;
   customer?: DemoCustomer;
   csrfToken?: string;
   widget?: string;
+  requestsRefresh?: boolean;
 }) {
   return (
     <html lang="pt-BR">
@@ -16,7 +15,7 @@ export function Layout(props: {
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>{props.title} · Northstar</title>
-        <style>{css}</style>
+        <link rel="stylesheet" href="/styles.css" />
       </head>
       <body>
         <div class="shell">
@@ -48,6 +47,14 @@ export function Layout(props: {
         </div>
         {props.widget ? (
           <script dangerouslySetInnerHTML={{ __html: props.widget }} />
+        ) : null}
+        {props.requestsRefresh ? (
+          <script
+            dangerouslySetInnerHTML={{
+              __html:
+                "(function(){var target=document.getElementById('financial-requests');if(!target)return;var refresh=function(){fetch('/solicitacoes',{credentials:'same-origin',cache:'no-store',headers:{'Cache-Control':'no-store'}}).then(function(response){if(!response.ok)return;return response.text()}).then(function(html){if(html)target.innerHTML=html}).catch(function(){})};window.setInterval(refresh,30000)})();",
+            }}
+          />
         ) : null}
       </body>
     </html>
@@ -128,32 +135,33 @@ export function Login(props: { error?: string; next?: string }) {
   );
 }
 type SupportCase = {
-  id: string;
-  subject: string;
+  caseId: string;
+  turnId: string;
+  type: "refund" | "subscription_credit";
+  amount: number;
+  currency: string;
   status: string;
-  updatedAt: string;
-  messages?: Array<{ author: string; body: string }>;
 };
 const labels: Record<string, string> = {
-  new: "Nova",
-  processing: "Em análise",
-  waiting_approval: "Aguardando revisão",
-  resolved: "Resolvida",
-  escalated: "Encaminhada",
+  pending_approval: "Aguardando aprovação",
+  rejected: "Não aprovada",
+  processing: "Em processamento",
+  executed: "Concluída",
   failed: "Precisa de atenção",
+  unknown: "Em verificação",
 };
 export function Account(props: {
   customer: DemoCustomer;
   csrfToken: string;
-  cases: SupportCase[];
-  casesAvailable: boolean;
+  requests: SupportCase[];
+  requestsAvailable: boolean;
   widget?: string;
   chatUnavailable: boolean;
 }) {
   const purchases = [
     props.customer.purchasePaid
       ? {
-          title: "Starter Toolkit",
+          title: "Northstar Toolkit",
           detail: "Compra única · US$ 5",
           state: "Pagamento confirmado",
         }
@@ -172,6 +180,7 @@ export function Account(props: {
       customer={props.customer}
       csrfToken={props.csrfToken}
       widget={props.widget}
+      requestsRefresh
     >
       <main class="account">
         <div class="account-header">
@@ -214,33 +223,11 @@ export function Account(props: {
         </section>
         <section class="section">
           <h2>Solicitações</h2>
-          <div class="stack">
-            {!props.casesAvailable ? (
-              <div class="empty">
-                Não foi possível consultar as solicitações agora. Tente
-                novamente em instantes.
-              </div>
-            ) : props.cases.length ? (
-              props.cases.map((supportCase) => (
-                <article class="card row">
-                  <div>
-                    <h3>{supportCase.subject}</h3>
-                    <p class="muted">
-                      {supportCase.messages?.find(
-                        (message) => message.author === "agent",
-                      )?.body ?? "Acompanhamento disponível no atendimento."}
-                    </p>
-                  </div>
-                  <span class="status">
-                    {labels[supportCase.status] ?? supportCase.status}
-                  </span>
-                </article>
-              ))
-            ) : (
-              <div class="empty">
-                Ainda não há solicitações registradas para esta conta.
-              </div>
-            )}
+          <div id="financial-requests" aria-live="polite">
+            <FinancialRequests
+              requests={props.requests}
+              requestsAvailable={props.requestsAvailable}
+            />
           </div>
         </section>
         <section class="section">
@@ -255,5 +242,49 @@ export function Account(props: {
         </section>
       </main>
     </Layout>
+  );
+}
+export function FinancialRequests(props: {
+  requests: SupportCase[];
+  requestsAvailable: boolean;
+}) {
+  return (
+    <div class="stack">
+      {!props.requestsAvailable ? (
+        <div class="empty">
+          Não foi possível consultar as solicitações agora. Tente novamente em
+          instantes.
+        </div>
+      ) : props.requests.length ? (
+        props.requests.map((request) => (
+          <article class="card row">
+            <div>
+              <h3>
+                {request.type === "subscription_credit"
+                  ? "Crédito para a próxima fatura"
+                  : "Solicitação de reembolso"}
+              </h3>
+              <p class="muted">
+                {request.amount.toLocaleString("pt-BR", {
+                  style: "currency",
+                  currency: request.currency,
+                })}
+                {request.type === "subscription_credit" &&
+                request.status === "executed"
+                  ? " · Crédito disponível para uma fatura futura."
+                  : ""}
+              </p>
+            </div>
+            <span class="status">
+              {labels[request.status] ?? request.status}
+            </span>
+          </article>
+        ))
+      ) : (
+        <div class="empty">
+          Ainda não há solicitações registradas para esta conta.
+        </div>
+      )}
+    </div>
   );
 }

@@ -23,11 +23,7 @@ export function issueMessengerJwt(customer: DemoCustomer, expiresAt: string) {
   if (!signingKey) return undefined;
   const header = encode({ alg: "HS256", typ: "JWT" });
   const payload = encode({
-    sub: customer.id,
     user_id: customer.id,
-    external_id: customer.id,
-    contact_id: customer.intercomContactId,
-    email: customer.email,
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.parse(expiresAt) / 1000),
   });

@@ -472,6 +472,11 @@ export class CaseStore {
     return this.actions.approvalDecision(caseId, turnId);
   }
 
+  async customerFinancialRequests(caseIds: string[]) {
+    await this.ensured();
+    return this.actions.customerFinancialRequests(caseIds);
+  }
+
   async monitoringDecisions(caseIds: string[], actionKind?: string) {
     await this.ensured();
     return this.actions.monitoringDecisions(caseIds, actionKind);

@@ -380,6 +380,28 @@ export const publicSupportCaseSchema = supportCaseSchema.extend({
 });
 export type PublicSupportCase = z.infer<typeof publicSupportCaseSchema>;
 
+/** A customer may track an approved financial request, but never receive its
+ * immutable command, internal note, provider handles, or arbitrary metadata. */
+export const customerFinancialRequestSchema = z.object({
+  caseId: z.string(),
+  turnId: z.string(),
+  type: z.enum(["refund", "subscription_credit"]),
+  amount: z.number().positive(),
+  currency: z.string().min(1),
+  status: z.enum([
+    "pending_approval",
+    "rejected",
+    "processing",
+    "executed",
+    "failed",
+    "unknown",
+  ]),
+  requestedAt: z.string(),
+});
+export type CustomerFinancialRequest = z.infer<
+  typeof customerFinancialRequestSchema
+>;
+
 /** Create the application-owned identifier before a normalized case is saved. */
 export function generateCaseId(): string {
   return `case_${crypto.randomUUID().slice(0, 8)}`;
