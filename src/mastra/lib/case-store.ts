@@ -122,7 +122,7 @@ export class CaseStore {
     await this.ready;
   }
 
-  async migrate(target = 22): Promise<void> {
+  async migrate(target = 23): Promise<void> {
     await this.migrations.migrate(target);
   }
 
@@ -514,6 +514,18 @@ export class CaseStore {
     return this.financial.projectRefundToolExecution(input);
   }
 
+  async projectSubscriptionCreditToolExecution(input: {
+    caseId: string;
+    turnId: string;
+    fingerprint: string;
+    idempotencyKey: string;
+    result: NonNullable<SupportCase["subscriptionCreditResult"]>;
+    effect: unknown;
+  }) {
+    await this.ensured();
+    return this.financial.projectSubscriptionCreditToolExecution(input);
+  }
+
   async prepareStripeRefundAttempt(input: {
     caseId: string;
     binding: ProviderBinding;
@@ -526,6 +538,40 @@ export class CaseStore {
   }) {
     await this.ensured();
     return this.financial.prepareStripeRefundAttempt(input);
+  }
+
+  async prepareStripeSubscriptionCreditAttempt(input: {
+    caseId: string;
+    binding: ProviderBinding;
+    fingerprint: string;
+    idempotencyKey: string;
+    dispatchId: string;
+    leaseToken: string;
+    turnId: string;
+    command: unknown;
+  }) {
+    await this.ensured();
+    return this.financial.prepareStripeSubscriptionCreditAttempt(input);
+  }
+
+  async updateStripeSubscriptionCreditAttempt(
+    idempotencyKey: string,
+    update: {
+      status: "succeeded" | "unknown" | "quarantined";
+      creditId?: string;
+      providerStatus?: string;
+    },
+  ) {
+    await this.ensured();
+    return this.financial.updateStripeSubscriptionCreditAttempt(
+      idempotencyKey,
+      update,
+    );
+  }
+
+  async stripeSubscriptionCreditAttempt(idempotencyKey: string) {
+    await this.ensured();
+    return this.financial.stripeSubscriptionCreditAttempt(idempotencyKey);
   }
 
   async updateStripeRefundAttempt(

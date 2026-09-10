@@ -1,5 +1,9 @@
 import { z } from "zod";
 import { persistedRefundCommandSchema } from "./refund-command.ts";
+import {
+  persistedSubscriptionCreditCommandSchema,
+  retainedSubscriptionCreditCommandReferenceSchema,
+} from "./subscription-credit-command.ts";
 
 export const caseSourceSchema = z.enum([
   "mock-email",
@@ -42,6 +46,7 @@ export const triageResultSchema = z.object({
     "cancellation",
     "damaged_item",
     "account_issue",
+    "service_problem",
     "other",
   ]),
   urgency: z.enum(["low", "normal", "high", "critical"]),
@@ -96,12 +101,15 @@ export const subscriptionLookupSchema = z.object({
   subscription: z
     .object({
       subscriptionId: z.string(),
+      customerId: z.string().optional(),
       customerEmail: z.email(),
       plan: z.string(),
       amount: z.number(),
       currency: z.string(),
       status: z.enum(["active", "cancelled", "past_due"]),
       renewsAt: z.string(),
+      cancelAtPeriodEnd: z.literal(true).optional(),
+      cancelsAt: z.string().optional(),
       /** The paid invoice is the only subscription refund target. */
       refundOrderId: z.string().optional(),
     })
@@ -141,6 +149,14 @@ export const draftResolutionSchema = z.object({
       "Exact, relevant excerpts from cited policy documents. These are rendered as policy guidance, never as a completed account effect.",
     ),
   recommendRefund: z.boolean(),
+  /** Explicit action selection for new financial resolutions. The legacy
+   * refund fields remain readable while earlier turns complete. */
+  resolutionAction: z
+    .enum(["none", "refund", "subscription_credit"])
+    .optional(),
+  subscriptionCreditAmount: z.number().optional(),
+  subscriptionCreditCurrency: z.string().optional(),
+  subscriptionCreditReason: z.string().optional(),
   refundAmount: z.number().optional(),
   refundCurrency: z.string().optional(),
   refundReason: z.string().optional(),
@@ -177,6 +193,19 @@ export const refundResultSchema = z.object({
   executedAt: z.string(),
 });
 export type RefundResult = z.infer<typeof refundResultSchema>;
+export const subscriptionCreditResultSchema = z.object({
+  creditId: z.string(),
+  customerId: z.string(),
+  subscriptionId: z.string(),
+  amount: z.number(),
+  currency: z.string(),
+  status: z.enum(["executed", "skipped", "pending", "failed"]),
+  idempotencyKey: z.string(),
+  executedAt: z.string(),
+});
+export type SubscriptionCreditResult = z.infer<
+  typeof subscriptionCreditResultSchema
+>;
 
 /** The binding is selected when a case is accepted and is immutable thereafter. */
 export const providerBindingSchema = z.object({
@@ -242,9 +271,18 @@ const knownCaseMetadataSchema = z
         retainedRefundCommandReferenceSchema,
       ])
       .optional(),
+    subscriptionCreditCommand: z
+      .union([
+        persistedSubscriptionCreditCommandSchema,
+        retainedSubscriptionCreditCommandReferenceSchema,
+      ])
+      .optional(),
     nativeApproval: nativeApprovalSchema.optional(),
     cancellationEffect: subscriptionCancellationEffectSchema.optional(),
     refundEffects: z.record(z.string(), refundResultSchema).optional(),
+    subscriptionCreditEffects: z
+      .record(z.string(), subscriptionCreditResultSchema)
+      .optional(),
     retentionRedactedAt: z.string().optional(),
   })
   .catchall(z.unknown());
@@ -261,6 +299,19 @@ export const caseMetadataSchema = knownCaseMetadataSchema.superRefine(
         message:
           "A partial refund command is valid only on a marked retention tombstone.",
       });
+    if (
+      metadata.subscriptionCreditCommand &&
+      !persistedSubscriptionCreditCommandSchema.safeParse(
+        metadata.subscriptionCreditCommand,
+      ).success &&
+      metadata.retentionRedactedAt === undefined
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["subscriptionCreditCommand"],
+        message:
+          "A partial subscription-credit command is valid only on a marked retention tombstone.",
+      });
   },
 );
 export type CaseMetadata = z.infer<typeof caseMetadataSchema>;
@@ -268,6 +319,11 @@ export type CaseMetadata = z.infer<typeof caseMetadataSchema>;
 /** The API has its own deliberately minimal financial metadata view. */
 export const staffCaseMetadataSchema = z.object({
   refundCommand: retainedRefundCommandReferenceSchema
+    .pick({
+      fingerprint: true,
+    })
+    .optional(),
+  subscriptionCreditCommand: retainedSubscriptionCreditCommandReferenceSchema
     .pick({
       fingerprint: true,
     })
@@ -293,6 +349,7 @@ export const supportCaseSchema = z.object({
   draft: draftResolutionSchema.optional(),
   approval: approvalDecisionSchema.optional(),
   refundResult: refundResultSchema.optional(),
+  subscriptionCreditResult: subscriptionCreditResultSchema.optional(),
   finalResponse: z.string().optional(),
   escalationReason: z.string().optional(),
   workflowRunId: z.string().optional(),

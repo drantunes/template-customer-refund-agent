@@ -123,6 +123,30 @@ export function CaseDetail({
         </Alert>
       )}
 
+      {c.subscriptionCreditResult && (
+        <Alert>
+          <BadgeCheck />
+          <AlertTitle>
+            Subscription credit{" "}
+            {c.subscriptionCreditResult.status === "skipped"
+              ? "already created"
+              : c.subscriptionCreditResult.status === "pending"
+                ? "pending receipt recovery"
+                : c.subscriptionCreditResult.status === "failed"
+                  ? "failed; staff review required"
+                  : "created"}
+            : {c.subscriptionCreditResult.amount}{" "}
+            {c.subscriptionCreditResult.currency}
+          </AlertTitle>
+          <AlertDescription>
+            {c.subscriptionCreditResult.creditId} · subscription{" "}
+            {c.subscriptionCreditResult.subscriptionId} · available for a future
+            invoice ·{" "}
+            {new Date(c.subscriptionCreditResult.executedAt).toLocaleString()}
+          </AlertDescription>
+        </Alert>
+      )}
+
       <Tabs defaultValue="conversation">
         <TabsList className="h-auto flex-wrap">
           <TabsTrigger value="conversation">Conversation</TabsTrigger>

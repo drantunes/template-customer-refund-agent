@@ -45,6 +45,7 @@ function jsonModel(
 function refundModel(
   input: Record<string, unknown>,
   beforeGenerate?: () => Promise<void>,
+  toolName = "issue_refund",
 ): LanguageModelV2 {
   let called = false;
   return {
@@ -61,7 +62,7 @@ function refundModel(
             {
               type: "tool-call" as const,
               toolCallId: "native-tool-call",
-              toolName: "issue_refund",
+              toolName,
               input: JSON.stringify(input),
             },
           ],
@@ -204,6 +205,7 @@ async function setup(
      * inbound event or running its workflow. */
     databasePath?: string;
     existingCase?: boolean;
+    credit?: boolean;
   },
 ) {
   const path =
@@ -239,6 +241,7 @@ async function setup(
     await import("../../src/mastra/agents/refund-execution-agent");
   const {
     supportCaseApproveRoute,
+    supportCaseRejectRoute,
     supportCaseFeedbackRoute,
     supportCaseFollowUpRoute,
     supportInboundRoute,
@@ -406,29 +409,51 @@ async function setup(
       throw new Error(
         `Execution case ${executionCaseId} has no active workflow turn.`,
       );
+    const actionKind = options?.credit
+      ? "subscription-credit-command"
+      : "refund-command";
     const action = await caseStore.getClient().execute({
-      sql: "SELECT action.data FROM support_actions AS action JOIN support_turns AS turn ON turn.case_id = action.case_id AND turn.command_fingerprint = action.fingerprint WHERE action.case_id = ? AND action.kind = 'refund-command' AND turn.id = ? LIMIT 1",
-      args: [executionCaseId, activeTurnId],
+      sql: "SELECT action.data FROM support_actions AS action JOIN support_turns AS turn ON turn.case_id = action.case_id AND turn.command_fingerprint = action.fingerprint WHERE action.case_id = ? AND action.kind = ? AND turn.id = ? LIMIT 1",
+      args: [executionCaseId, actionKind, activeTurnId],
     });
     const command = JSON.parse(String(action.rows[0]?.data ?? "{}")) as {
       approvalCaseId?: string;
       orderId?: string;
+      customerId?: string;
+      subscriptionId?: string;
+      amount?: { minor?: number; currency?: string };
+      reason?: string;
       idempotencyKey?: string;
       fingerprint?: string;
     };
-    const input = {
-      caseId: command.approvalCaseId ?? executionCaseId,
-      // Native approval must execute the immutable target selected by the
-      // workflow (including a subscription renewal Invoice), never a fixture
-      // alias for the initial Checkout.
-      orderId: command.orderId ?? "ORD-1001",
-      amount: refundAmount,
-      currency: refundCurrency,
-      reason: "duplicate charge",
-      idempotencyKey: command.idempotencyKey,
-      fingerprint: command.fingerprint,
-    };
-    return refundModel(input, options?.executionBeforeGenerate) as never;
+    const input = options?.credit
+      ? {
+          caseId: command.approvalCaseId ?? executionCaseId,
+          customerId: command.customerId,
+          subscriptionId: command.subscriptionId,
+          amount: command.amount?.minor ? command.amount.minor / 100 : 49,
+          currency: command.amount?.currency ?? "USD",
+          reason: command.reason,
+          idempotencyKey: command.idempotencyKey,
+          fingerprint: command.fingerprint,
+        }
+      : {
+          caseId: command.approvalCaseId ?? executionCaseId,
+          // Native approval must execute the immutable target selected by the
+          // workflow (including a subscription renewal Invoice), never a fixture
+          // alias for the initial Checkout.
+          orderId: command.orderId ?? "ORD-1001",
+          amount: refundAmount,
+          currency: refundCurrency,
+          reason: "duplicate charge",
+          idempotencyKey: command.idempotencyKey,
+          fingerprint: command.fingerprint,
+        };
+    return refundModel(
+      input,
+      options?.executionBeforeGenerate,
+      options?.credit ? "issue_subscription_credit" : "issue_refund",
+    ) as never;
   };
   refundExecutionAgent.__updateModel({ model: executionModel });
   // Workflows obtain this restricted agent through the Mastra registry.
@@ -449,6 +474,7 @@ async function setup(
     supportCaseFollowUpRoute.handler,
   );
   app.post("/support/cases/:caseId/approve", supportCaseApproveRoute.handler);
+  app.post("/support/cases/:caseId/reject", supportCaseRejectRoute.handler);
   app.post("/support/cases/:caseId/feedback", supportCaseFeedbackRoute.handler);
   app.post("/support/inbound", supportInboundRoute.handler);
   app.post("/support/webhooks/stripe", stripeWebhookRoute.handler);
@@ -736,6 +762,34 @@ function cancellationStripeTransport(
         email: "alex@example.com",
         livemode: false,
       });
+    if (path === "/v1/checkout/sessions")
+      return Response.json({
+        data: [
+          {
+            id: "ORD-1001",
+            customer: "cus_1",
+            customer_details: { email: "alex@example.com" },
+            payment_intent: "pi_order",
+            status: "complete",
+            payment_status: "paid",
+            livemode: false,
+            created: 1,
+          },
+        ],
+        has_more: false,
+      });
+    if (path === "/v1/checkout/sessions/ORD-1001/line_items")
+      return Response.json({ data: [], has_more: false });
+    if (path === "/v1/payment_intents/pi_order")
+      return Response.json({
+        id: "pi_order",
+        livemode: false,
+        status: "succeeded",
+        amount_received: 4900,
+        currency: "usd",
+      });
+    if (path === "/v1/refunds")
+      return Response.json({ data: [], has_more: false });
     if (path === "/v1/checkout/sessions/cs_purchase/line_items")
       return Response.json({ data: [], has_more: false });
     if (path === "/v1/payment_intents/pi_purchase")
@@ -910,6 +964,112 @@ function nativeRefundStripeTransport(input: {
 }
 
 describe("native approval workflow recovery", () => {
+  it("suspends the real native CREDIT tool, executes one approved monthly credit, and declines without an effect", async () => {
+    const policyExcerpt =
+      "For a verified service problem on one active monthly subscription, support may propose one credit equal to that subscription's single monthly charge.";
+    const creditResponse = jsonModel({
+      draftResponse: "We can add a credit for your next bill after approval.",
+      citedSources: ["service-problem-credit-policy"],
+      selectedPolicyExcerpts: [
+        { source: "service-problem-credit-policy", excerpt: policyExcerpt },
+      ],
+      recommendRefund: false,
+      resolutionAction: "subscription_credit",
+      subscriptionCreditAmount: 49,
+      subscriptionCreditCurrency: "USD",
+      subscriptionCreditReason: "Verified service outage",
+      requiresEscalation: false,
+    }) as never;
+    const approvedCaseId = `native-credit-approved-${crypto.randomUUID()}`;
+    const approved = await setup(
+      approvedCaseId,
+      undefined,
+      undefined,
+      undefined,
+      {
+        credit: true,
+        triage: {
+          intent: "service_problem",
+          urgency: "normal",
+          sentiment: "negative",
+          requiresHumanReview: false,
+          confidence: 1,
+          rationale: "Verified service outage.",
+        },
+        responseModel: creditResponse,
+      },
+    );
+    const approvedNative = approved.native!;
+    expect(
+      await approved.caseStore.getAction(
+        approvedCaseId,
+        "subscription-credit-command",
+        approvedNative.fingerprint,
+      ),
+    ).toMatchObject({
+      subscriptionId: "SUB-1001",
+      customerId: expect.any(String),
+    });
+    expect(
+      (
+        await approveNativeRefund(
+          approved.app,
+          approvedCaseId,
+          approvedNative.fingerprint,
+        )
+      ).status,
+    ).toBe(200);
+    expect(await approved.caseStore.get(approvedCaseId)).toMatchObject({
+      status: "resolved",
+      subscriptionCreditResult: {
+        subscriptionId: "SUB-1001",
+        amount: 49,
+        status: "executed",
+      },
+    });
+
+    const rejectedCaseId = `native-credit-rejected-${crypto.randomUUID()}`;
+    const rejected = await setup(
+      rejectedCaseId,
+      undefined,
+      undefined,
+      undefined,
+      {
+        credit: true,
+        triage: {
+          intent: "service_problem",
+          urgency: "normal",
+          sentiment: "negative",
+          requiresHumanReview: false,
+          confidence: 1,
+          rationale: "Verified service outage.",
+        },
+        responseModel: creditResponse,
+      },
+    );
+    const rejectedNative = rejected.native!;
+    expect(
+      (
+        await rejected.app.request(
+          `http://support.test/support/cases/${rejectedCaseId}/reject`,
+          {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${issueLocalSession({ id: "approver-demo" })}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              commandFingerprint: rejectedNative.fingerprint,
+            }),
+          },
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (await rejected.caseStore.get(rejectedCaseId))?.subscriptionCreditResult,
+    ).toBeUndefined();
+  });
+
   it("rejects tampered retrieved vector text before it can create an approval or financial effect", async () => {
     const caseId = `tampered-vector-text-${crypto.randomUUID()}`;
     const forgedExcerpt =

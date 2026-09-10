@@ -21,6 +21,7 @@ import {
 import { vectorStore } from "./lib/vector-store";
 import { supportRoutes } from "./server/routes";
 import { issueRefundTool } from "./tools/issue-refund";
+import { issueSubscriptionCreditTool } from "./tools/issue-subscription-credit";
 import { scheduleSubscriptionCancellationTool } from "./tools/schedule-subscription-cancellation";
 import {
   lookupCustomerRefundHistoryTool,
@@ -69,6 +70,7 @@ export const mastra = new Mastra({
     lookupSubscriptionTool,
     lookupCustomerRefundHistoryTool,
     issueRefundTool,
+    issueSubscriptionCreditTool,
     scheduleSubscriptionCancellationTool,
   },
   scorers: process.env.DISABLE_RUNTIME_SCORERS ? {} : liveSupportScorerRegistry,

@@ -372,6 +372,7 @@ export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipa
         "lookup_subscription",
         "lookup_customer_refund_history",
         "issue_refund",
+        "issue_subscription_credit",
         "schedule_subscription_cancellation",
       ]),
       workflows: new Set([

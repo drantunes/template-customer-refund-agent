@@ -6,10 +6,12 @@ import {
   safeEscalationResponse,
 } from "../domain/customer-response";
 import { persistedRefundCommandSchema } from "../domain/refund-command";
+import { persistedSubscriptionCreditCommandSchema } from "../domain/subscription-credit-command";
 import { STANDARD_REFUND_REVIEW_LIMIT } from "../domain/refund-review-limit";
 import { triageEscalationReason } from "../domain/resolution-decision";
 import { caseStore } from "../lib/case-store";
 import { legacyAmountToMoney, refundFingerprint } from "../lib/money";
+import { subscriptionCreditFingerprint } from "../lib/money";
 import {
   resolveConfiguredBinding,
   providerRegistry,
@@ -141,6 +143,67 @@ async function completedRefundResponse(
   return `Your refund of ${result.amount} ${result.currency} has been issued.`;
 }
 
+async function completedSubscriptionCreditResponse(
+  supportCase: SupportCase,
+  turnId: string,
+) {
+  const command = persistedSubscriptionCreditCommandSchema.safeParse(
+    supportCase.metadata.subscriptionCreditCommand,
+  );
+  const result = supportCase.subscriptionCreditResult;
+  const turn = await caseStore.turn(supportCase.id, turnId);
+  if (
+    !command.success ||
+    !result ||
+    !turn ||
+    !["executed", "skipped"].includes(result.status) ||
+    !supportCase.approval?.approved ||
+    turn.commandFingerprint !== command.data.fingerprint ||
+    supportCase.metadata.activeTurnId !== turnId
+  )
+    return undefined;
+  const binding = resolveConfiguredBinding(
+    bindingsForPersistedCase(supportCase).transactions,
+  );
+  const amount = legacyAmountToMoney(
+    command.data.amount,
+    command.data.currency,
+  );
+  const fingerprint = subscriptionCreditFingerprint({
+    binding,
+    approvalCaseId: supportCase.id,
+    customerId: command.data.customerId,
+    subscriptionId: command.data.subscriptionId,
+    amount,
+    reason: command.data.reason,
+    idempotencyKey: command.data.idempotencyKey,
+  });
+  const immutable = await caseStore.getAction(
+    supportCase.id,
+    "subscription-credit-command",
+    command.data.fingerprint,
+  );
+  const effect = await caseStore.idempotency(command.data.idempotencyKey);
+  const decision = await caseStore.approvalDecision(supportCase.id, turnId);
+  if (
+    fingerprint !== command.data.fingerprint ||
+    !decision?.approved ||
+    decision.commandFingerprint !== command.data.fingerprint ||
+    !immutable ||
+    !effect ||
+    effect.fingerprint !== command.data.fingerprint ||
+    JSON.stringify(
+      supportCase.metadata.subscriptionCreditEffects?.[fingerprint],
+    ) !== JSON.stringify(result) ||
+    result.customerId !== command.data.customerId ||
+    result.subscriptionId !== command.data.subscriptionId ||
+    result.amount !== command.data.amount ||
+    result.currency !== command.data.currency
+  )
+    return undefined;
+  return `A credit of ${result.amount} ${result.currency} has been added to your billing balance for a future invoice. Your subscription remains active.`;
+}
+
 const approvalOutputSchema = z.object({
   caseId: z.string(),
   turnId: z.string(),
@@ -200,7 +263,27 @@ export const resolveCaseStep = createStep({
         "Subscription cancellation was not durably scheduled.";
     }
 
-    if (draft.recommendRefund && !mustEscalate) {
+    if (draft.resolutionAction === "subscription_credit" && !mustEscalate) {
+      if (!inputData.approved) {
+        status = "escalated";
+        escalationReason = `Subscription credit declined by ${inputData.approverId ?? "reviewer"}${inputData.note ? `: ${inputData.note}` : "."}`;
+        finalResponse = safeEscalationResponse;
+      } else {
+        const completed = await completedSubscriptionCreditResponse(
+          supportCase,
+          inputData.turnId,
+        );
+        if (completed) {
+          status = "resolved";
+          finalResponse = completed;
+        } else {
+          status = "escalated";
+          escalationReason =
+            "The approved subscription credit has no durable billing-credit receipt.";
+          finalResponse = safeEscalationResponse;
+        }
+      }
+    } else if (draft.recommendRefund && !mustEscalate) {
       if (!inputData.approved) {
         status = "escalated";
         escalationReason = `Refund declined by ${inputData.approverId ?? "reviewer"}${inputData.note ? `: ${inputData.note}` : "."}`;

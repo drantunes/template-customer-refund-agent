@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import type { Money, RefundCommand } from "../providers/contracts";
+import type {
+  Money,
+  RefundCommand,
+  SubscriptionCreditCommand,
+} from "../providers/contracts";
 
 // The demo accepts only currencies whose display precision is known.  Keeping
 // this table here prevents the legacy/UI decimal edge from silently treating a
@@ -86,6 +90,27 @@ export function refundFingerprint(
         tenantId: command.binding.tenantId,
         account: command.binding.providerAccountId,
         orderId: command.orderId,
+        currency: command.amount.currency,
+        minor: command.amount.minor,
+        reason: command.reason,
+        idempotencyKey: command.idempotencyKey,
+      }),
+    )
+    .digest("hex");
+}
+
+export function subscriptionCreditFingerprint(
+  command: Omit<SubscriptionCreditCommand, "fingerprint">,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        action: "subscription_credit",
+        approvalCaseId: command.approvalCaseId,
+        tenantId: command.binding.tenantId,
+        account: command.binding.providerAccountId,
+        customerId: command.customerId,
+        subscriptionId: command.subscriptionId,
         currency: command.amount.currency,
         minor: command.amount.minor,
         reason: command.reason,

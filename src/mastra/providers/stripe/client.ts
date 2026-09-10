@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { money, refundFingerprint } from "../../lib/money";
+import {
+  money,
+  refundFingerprint,
+  subscriptionCreditFingerprint,
+} from "../../lib/money";
 import type {
   CommerceOrder,
   CommerceRefund,
@@ -12,6 +16,9 @@ import type {
   RefundQuote,
   SubscriptionCancellationCommand,
   SubscriptionCancellationEffect,
+  SubscriptionCreditCommand,
+  SubscriptionCreditEffect,
+  SubscriptionCreditQuote,
 } from "../contracts";
 import { STRIPE_API_VERSION, type StripeSandboxConfig } from "./config";
 
@@ -477,6 +484,7 @@ export class StripeClient {
     const cancelAtPeriodEnd = subscription.cancel_at_period_end === true;
     return {
       subscriptionId: asId(subscription, "Subscription"),
+      customerId: asId(customer[0], "Customer"),
       customerEmail: String(customer[0].email).toLowerCase(),
       plan: String(price.nickname ?? price.id ?? "Stripe subscription"),
       amount: supportedMoney(price.currency, price.unit_amount),
@@ -545,6 +553,228 @@ export class StripeClient {
     await this.assertConfiguredAccount();
     const target = await this.resolveRefundTarget(command, email);
     return this.quoteRefundForTarget(command, target);
+  }
+
+  /** Verify the exact single monthly subscription before a credit is ever
+   * proposed. A billing credit is owned by the customer, never the paid
+   * invoice that happened to establish the subscription. */
+  private async subscriptionCreditTarget(
+    command: SubscriptionCreditCommand,
+    email: string,
+  ) {
+    this.assertBinding(command.binding);
+    await this.assertConfiguredAccount();
+    const subscription = await this.request(
+      `/v1/subscriptions/${encodeURIComponent(command.subscriptionId)}`,
+    );
+    if (
+      subscription.livemode !== false ||
+      subscription.status !== "active" ||
+      subscription.cancel_at_period_end === true
+    )
+      throw new Error(
+        "Subscription credit requires an active Stripe test subscription.",
+      );
+    const customerId = asId(subscription.customer, "Subscription customer");
+    if (customerId !== command.customerId)
+      throw new Error(
+        "Subscription credit customer does not match its immutable command.",
+      );
+    const customer = await this.request(
+      `/v1/customers/${encodeURIComponent(customerId)}`,
+    );
+    if (
+      customer.livemode !== false ||
+      String(customer.email ?? "").toLowerCase() !== email.toLowerCase()
+    )
+      throw new Error(
+        "Stripe subscription does not belong to the verified customer.",
+      );
+    const items = asObject(subscription.items, "subscription items").data;
+    if (!Array.isArray(items) || items.length !== 1)
+      throw new Error(
+        "Subscription credit requires exactly one subscription item.",
+      );
+    const price = asObject(
+      asObject(items[0], "subscription item").price,
+      "subscription price",
+    );
+    const recurring = asObject(price.recurring, "subscription price recurring");
+    if (
+      recurring.interval !== "month" ||
+      price.currency !== command.amount.currency.toLowerCase() ||
+      price.unit_amount !== command.amount.minor
+    )
+      throw new Error(
+        "Subscription credit must equal one monthly subscription charge.",
+      );
+    return { customerId, subscription, customer };
+  }
+
+  async quoteSubscriptionCredit(
+    command: SubscriptionCreditCommand,
+    email: string,
+  ): Promise<SubscriptionCreditQuote> {
+    if (subscriptionCreditFingerprint(command) !== command.fingerprint)
+      throw new Error(
+        "Subscription credit command fingerprint was tampered with.",
+      );
+    await this.subscriptionCreditTarget(command, email);
+    return {
+      approvedAmount: command.amount,
+      commandFingerprint: command.fingerprint,
+    };
+  }
+
+  async createSubscriptionCredit(
+    command: SubscriptionCreditCommand,
+    email: string,
+    beforeDispatch?: () => Promise<void>,
+  ): Promise<SubscriptionCreditEffect> {
+    if (subscriptionCreditFingerprint(command) !== command.fingerprint)
+      throw new Error(
+        "Subscription credit command fingerprint was tampered with.",
+      );
+    const target = await this.subscriptionCreditTarget(command, email);
+    await beforeDispatch?.();
+    const response = await this.request(
+      `/v1/customers/${encodeURIComponent(target.customerId)}/balance_transactions`,
+      {
+        method: "POST",
+        body: new URLSearchParams({
+          amount: String(-command.amount.minor),
+          currency: command.amount.currency.toLowerCase(),
+          description: command.reason,
+          "metadata[support_case_id]": command.approvalCaseId,
+          "metadata[command_fingerprint]": command.fingerprint,
+          "metadata[subscription_id]": command.subscriptionId,
+        }),
+        headers: { "Idempotency-Key": command.idempotencyKey },
+      },
+    );
+    if (
+      response.livemode !== false ||
+      asId(response, "Customer balance transaction") === "" ||
+      asId(response.customer, "Customer balance transaction customer") !==
+        target.customerId ||
+      response.amount !== -command.amount.minor ||
+      String(response.currency).toUpperCase() !== command.amount.currency
+    )
+      throw new Error(
+        "Stripe customer balance transaction does not match the immutable credit command.",
+      );
+    const metadata = asObject(
+      response.metadata ?? {},
+      "customer balance transaction metadata",
+    );
+    if (
+      metadata.support_case_id !== command.approvalCaseId ||
+      metadata.command_fingerprint !== command.fingerprint ||
+      metadata.subscription_id !== command.subscriptionId
+    )
+      throw new Error(
+        "Stripe customer balance transaction metadata is not bound to the immutable command.",
+      );
+    return {
+      creditId: asId(response, "Customer balance transaction"),
+      customerId: target.customerId,
+      subscriptionId: command.subscriptionId,
+      amount: command.amount,
+      idempotencyKey: command.idempotencyKey,
+      executedAt: timestamp(response.created),
+      replayed: false,
+      status: "succeeded",
+      providerStatus: "created",
+      providerRefs: [
+        ref("customer_balance_transaction", response),
+        ref("customer", target.customer),
+        ref("subscription", target.subscription),
+      ],
+    };
+  }
+
+  async retrieveSubscriptionCredit(
+    command: SubscriptionCreditCommand,
+    email: string,
+    creditId: string,
+  ): Promise<SubscriptionCreditEffect> {
+    const target = await this.subscriptionCreditTarget(command, email);
+    const response = await this.request(
+      `/v1/customers/${encodeURIComponent(target.customerId)}/balance_transactions/${encodeURIComponent(creditId)}`,
+    );
+    const metadata = asObject(
+      response.metadata ?? {},
+      "customer balance transaction metadata",
+    );
+    if (
+      response.livemode !== false ||
+      asId(response, "Customer balance transaction") !== creditId ||
+      asId(response.customer, "Customer balance transaction customer") !==
+        target.customerId ||
+      response.amount !== -command.amount.minor ||
+      String(response.currency).toUpperCase() !== command.amount.currency ||
+      metadata.support_case_id !== command.approvalCaseId ||
+      metadata.command_fingerprint !== command.fingerprint ||
+      metadata.subscription_id !== command.subscriptionId
+    )
+      throw new Error(
+        "Stripe customer balance transaction does not match the immutable credit command.",
+      );
+    return {
+      creditId,
+      customerId: target.customerId,
+      subscriptionId: command.subscriptionId,
+      amount: command.amount,
+      idempotencyKey: command.idempotencyKey,
+      executedAt: timestamp(response.created),
+      replayed: true,
+      status: "succeeded",
+      providerStatus: "created",
+      providerRefs: [ref("customer_balance_transaction", response)],
+    };
+  }
+
+  /** Recovery deliberately searches Stripe's durable customer-balance ledger
+   * by all immutable metadata. It never retries a POST: a missing receipt is
+   * an unresolved financial state, not evidence that no remote effect exists. */
+  async findSubscriptionCreditReceipt(
+    command: SubscriptionCreditCommand,
+    email: string,
+  ): Promise<SubscriptionCreditEffect | undefined> {
+    const target = await this.subscriptionCreditTarget(command, email);
+    const transactions = await this.list(
+      `/v1/customers/${encodeURIComponent(target.customerId)}/balance_transactions`,
+      new URLSearchParams(),
+    );
+    const matches = transactions.filter((value) => {
+      const metadata = value.metadata;
+      return (
+        value.livemode === false &&
+        asId(value.customer, "Customer balance transaction customer") ===
+          target.customerId &&
+        value.amount === -command.amount.minor &&
+        String(value.currency).toUpperCase() === command.amount.currency &&
+        metadata !== null &&
+        typeof metadata === "object" &&
+        !Array.isArray(metadata) &&
+        (metadata as Record<string, unknown>).support_case_id ===
+          command.approvalCaseId &&
+        (metadata as Record<string, unknown>).command_fingerprint ===
+          command.fingerprint &&
+        (metadata as Record<string, unknown>).subscription_id ===
+          command.subscriptionId
+      );
+    });
+    if (matches.length > 1)
+      throw new Error(
+        "Stripe balance transaction recovery is ambiguous for this immutable command.",
+      );
+    if (!matches[0]) return undefined;
+    return this.retrieveSubscriptionCredit(
+      command,
+      email,
+      asId(matches[0], "Customer balance transaction"),
+    );
   }
 
   /** Resolve one owned paid PaymentIntent and use it for every pre-POST

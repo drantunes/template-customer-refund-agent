@@ -121,12 +121,15 @@ export const lookupSubscriptionTool = createTool({
     subscription: z
       .object({
         subscriptionId: z.string(),
+        customerId: z.string().optional(),
         customerEmail: z.email(),
         plan: z.string(),
         amount: z.number(),
         currency: z.string(),
         status: z.enum(["active", "cancelled", "past_due"]),
         renewsAt: z.string(),
+        cancelAtPeriodEnd: z.literal(true).optional(),
+        cancelsAt: z.string().optional(),
         refundOrderId: z.string().optional(),
       })
       .optional(),

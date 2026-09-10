@@ -117,6 +117,7 @@ export class CaseStoreRetention {
           supportCase.status,
         );
         const command = metadata.refundCommand;
+        const subscriptionCreditCommand = metadata.subscriptionCreditCommand;
         updated = {
           ...updated,
           customer: { email: "redacted@invalid.local" },
@@ -156,6 +157,19 @@ export class CaseStoreRetention {
                           fingerprint: command.fingerprint,
                           ...(command.idempotencyKey
                             ? { idempotencyKey: command.idempotencyKey }
+                            : {}),
+                        },
+                      }
+                    : {}),
+                  ...(subscriptionCreditCommand?.fingerprint
+                    ? {
+                        subscriptionCreditCommand: {
+                          fingerprint: subscriptionCreditCommand.fingerprint,
+                          ...(subscriptionCreditCommand.idempotencyKey
+                            ? {
+                                idempotencyKey:
+                                  subscriptionCreditCommand.idempotencyKey,
+                              }
                             : {}),
                         },
                       }

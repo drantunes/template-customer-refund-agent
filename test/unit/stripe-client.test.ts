@@ -4,6 +4,7 @@ import {
   STRIPE_API_VERSION,
   type StripeSandboxConfig,
 } from "../../src/mastra/providers/stripe/config";
+import { subscriptionCreditFingerprint } from "../../src/mastra/lib/money";
 
 const config: StripeSandboxConfig = {
   enabled: true,
@@ -21,6 +22,161 @@ const binding = {
 };
 
 describe("Stripe fetch mapping", () => {
+  it("creates one exact negative customer-balance transaction for a monthly subscription credit", async () => {
+    const commandBase = {
+      approvalCaseId: "case_credit",
+      binding,
+      customerId: "cus_1",
+      subscriptionId: "sub_1",
+      amount: { currency: "USD", minor: 4900 },
+      reason: "Verified outage credit",
+      idempotencyKey: "case_credit:turn_1:subscription-credit",
+    };
+    const command = {
+      ...commandBase,
+      fingerprint: subscriptionCreditFingerprint(commandBase),
+    };
+    let posted: URLSearchParams | undefined;
+    const client = new StripeClient(config, async (request) => {
+      const url = new URL(request.url);
+      if (url.pathname === "/v1/account")
+        return Response.json({ id: config.accountId });
+      if (url.pathname === "/v1/subscriptions/sub_1")
+        return Response.json({
+          id: "sub_1",
+          customer: "cus_1",
+          livemode: false,
+          status: "active",
+          cancel_at_period_end: false,
+          items: {
+            data: [
+              {
+                price: {
+                  currency: "usd",
+                  unit_amount: 4900,
+                  recurring: { interval: "month" },
+                },
+              },
+            ],
+          },
+        });
+      if (url.pathname === "/v1/customers/cus_1" && request.method === "GET")
+        return Response.json({
+          id: "cus_1",
+          email: "alex@example.com",
+          livemode: false,
+        });
+      if (url.pathname === "/v1/customers/cus_1/balance_transactions") {
+        posted = new URLSearchParams(await request.text());
+        return Response.json({
+          id: "cbtxn_1",
+          customer: "cus_1",
+          livemode: false,
+          amount: -4900,
+          currency: "usd",
+          created: 1,
+          metadata: {
+            support_case_id: "case_credit",
+            command_fingerprint: command.fingerprint,
+            subscription_id: "sub_1",
+          },
+        });
+      }
+      throw new Error(`unexpected ${url.pathname}`);
+    });
+    await expect(
+      client.createSubscriptionCredit(command, "alex@example.com"),
+    ).resolves.toMatchObject({
+      creditId: "cbtxn_1",
+      customerId: "cus_1",
+      subscriptionId: "sub_1",
+      amount: { currency: "USD", minor: 4900 },
+      status: "succeeded",
+    });
+    expect(posted?.get("amount")).toBe("-4900");
+    expect(posted?.get("currency")).toBe("usd");
+  });
+  it("recovers a timeout-after-remote-credit from immutable balance metadata without posting again", async () => {
+    const commandBase = {
+      approvalCaseId: "case_credit_recovery",
+      binding,
+      customerId: "cus_1",
+      subscriptionId: "sub_1",
+      amount: { currency: "USD", minor: 4900 },
+      reason: "Verified outage credit",
+      idempotencyKey: "case_credit_recovery:turn_1:subscription-credit",
+    };
+    const command = {
+      ...commandBase,
+      fingerprint: subscriptionCreditFingerprint(commandBase),
+    };
+    let posts = 0;
+    const transaction = {
+      id: "cbtxn_recovered",
+      customer: "cus_1",
+      livemode: false,
+      amount: -4900,
+      currency: "usd",
+      created: 1,
+      metadata: {
+        support_case_id: command.approvalCaseId,
+        command_fingerprint: command.fingerprint,
+        subscription_id: command.subscriptionId,
+      },
+    };
+    const client = new StripeClient(config, async (request) => {
+      const url = new URL(request.url);
+      if (url.pathname === "/v1/account")
+        return Response.json({ id: config.accountId });
+      if (url.pathname === "/v1/subscriptions/sub_1")
+        return Response.json({
+          id: "sub_1",
+          customer: "cus_1",
+          livemode: false,
+          status: "active",
+          cancel_at_period_end: false,
+          items: {
+            data: [
+              {
+                price: {
+                  currency: "usd",
+                  unit_amount: 4900,
+                  recurring: { interval: "month" },
+                },
+              },
+            ],
+          },
+        });
+      if (url.pathname === "/v1/customers/cus_1")
+        return Response.json({
+          id: "cus_1",
+          email: "alex@example.com",
+          livemode: false,
+        });
+      if (
+        url.pathname === "/v1/customers/cus_1/balance_transactions" &&
+        request.method === "POST"
+      ) {
+        posts += 1;
+        throw new TypeError("timeout after remote success");
+      }
+      if (url.pathname === "/v1/customers/cus_1/balance_transactions")
+        return Response.json({ data: [transaction], has_more: false });
+      if (
+        url.pathname ===
+        "/v1/customers/cus_1/balance_transactions/cbtxn_recovered"
+      )
+        return Response.json(transaction);
+      throw new Error(`unexpected ${request.method} ${url.pathname}`);
+    });
+    await expect(
+      client.createSubscriptionCredit(command, "alex@example.com"),
+    ).rejects.toMatchObject({ ambiguous: true });
+    await expect(
+      client.findSubscriptionCreditReceipt(command, "alex@example.com"),
+    ).resolves.toMatchObject({ creditId: "cbtxn_recovered", replayed: true });
+    expect(posts).toBe(1);
+  });
   it("maps a verified Customer, Checkout Session, line items and PaymentIntent with exact minor units", async () => {
     const calls: Request[] = [];
     const client = new StripeClient(config, async (request) => {

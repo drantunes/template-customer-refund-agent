@@ -65,7 +65,9 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
 
   const mastra = c.get("mastra");
   const resolveWorkflow = mastra.getWorkflow("resolveSupportCaseWorkflow");
-  const command = supportCase.metadata.refundCommand;
+  const command =
+    supportCase.metadata.refundCommand ??
+    supportCase.metadata.subscriptionCreditCommand;
   if (!command?.fingerprint)
     return c.json(
       errorResponseSchema.parse({
@@ -197,7 +199,11 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
     );
   }
   try {
-    if (approved && command.idempotencyKey) {
+    if (
+      approved &&
+      supportCase.metadata.refundCommand &&
+      command.idempotencyKey
+    ) {
       const currentCase = await caseStore.get(caseId);
       const reconciled = await reconcileApprovedRefundEffect({
         store: caseStore,

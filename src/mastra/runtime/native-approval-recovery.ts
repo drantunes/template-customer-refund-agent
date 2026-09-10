@@ -161,15 +161,16 @@ export async function recoverApprovedNativeDecisions(
       await lease.renew();
       if (lease.lostOwnership) continue;
       lease.start();
-      const reconciledBefore = item.approved
-        ? await reconcileApprovedRefundEffect({
-            store,
-            supportCase: item.supportCase,
-            dispatch,
-            fingerprint: item.fingerprint,
-            command,
-          })
-        : false;
+      const reconciledBefore =
+        item.approved && command
+          ? await reconcileApprovedRefundEffect({
+              store,
+              supportCase: item.supportCase,
+              dispatch,
+              fingerprint: item.fingerprint,
+              command,
+            })
+          : false;
       await withDispatchLeaseScope(
         {
           dispatchId: dispatch.id,
@@ -207,6 +208,7 @@ export async function recoverApprovedNativeDecisions(
       // can never legitimately emit an issued reply.
       if (
         item.approved &&
+        command &&
         (await hasFailedStripeRefundAttempt(
           store,
           item.caseId,
@@ -223,17 +225,19 @@ export async function recoverApprovedNativeDecisions(
         recovered += 1;
         continue;
       }
-      const finalized = item.approved
-        ? await reconcileApprovedRefundEffect({
-            store,
-            supportCase: (await store.get(item.caseId)) ?? item.supportCase,
-            dispatch,
-            fingerprint: item.fingerprint,
-            command,
-          })
-        : false;
+      const finalized =
+        item.approved && command
+          ? await reconcileApprovedRefundEffect({
+              store,
+              supportCase: (await store.get(item.caseId)) ?? item.supportCase,
+              dispatch,
+              fingerprint: item.fingerprint,
+              command,
+            })
+          : false;
       if (
         item.approved &&
+        command &&
         !finalized &&
         !(await hasPendingStripeRefundAttempt(
           store,

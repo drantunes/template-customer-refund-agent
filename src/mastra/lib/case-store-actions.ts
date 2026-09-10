@@ -119,7 +119,7 @@ export class CaseStoreActions {
     const tx = await this.client.transaction("write");
     try {
       const command = await tx.execute({
-        sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = 'refund-command' AND fingerprint = ?",
+        sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind IN ('refund-command', 'subscription-credit-command') AND fingerprint = ?",
         args: [input.caseId, input.commandFingerprint],
       });
       if (!command.rows[0])

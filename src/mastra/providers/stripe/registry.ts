@@ -12,6 +12,8 @@ import {
   type ProviderBinding,
   type ProviderRegistry,
   type RefundCommand,
+  type SubscriptionCreditCommand,
+  type SubscriptionCreditEffect,
   type SubscriptionCancellationCommand,
   type SubscriptionCancellationEffect,
   type SupportChannelProvider,
@@ -21,7 +23,11 @@ import { activePrincipalHasRole } from "../../server/auth";
 import { ownerIdForCustomer } from "../../server/auth";
 import { activeTrustedCancellationScope } from "../cancellation-execution";
 import { assertRefundPolicyEvidenceAtFirstEffect } from "../../lib/refund-policy-evidence-persistence";
-import { legacyAmountToMoney, structurallyEqual } from "../../lib/money";
+import {
+  legacyAmountToMoney,
+  structurallyEqual,
+  subscriptionCreditFingerprint,
+} from "../../lib/money";
 import { exceedsStandardRefundReviewLimit } from "../../domain/refund-review-limit";
 import type { StripeSandboxConfig } from "./config";
 import { StripeClient, StripeHttpError } from "./client";
@@ -96,6 +102,228 @@ export class StripeProviderRegistry
         "Stripe quote requires the case's persisted transaction binding.",
       );
     return this.client.quoteRefund(command, supportCase.customer.email);
+  }
+  async quoteSubscriptionCredit(command: SubscriptionCreditCommand) {
+    const supportCase = await caseStore.get(command.approvalCaseId);
+    if (
+      !supportCase ||
+      !structurallyEqual(
+        bindingsForCase(supportCase).transactions,
+        command.binding,
+      )
+    )
+      throw new Error(
+        "Stripe subscription credit requires the case's persisted transaction binding.",
+      );
+    return this.client.quoteSubscriptionCredit(
+      command,
+      supportCase.customer.email,
+    );
+  }
+  async issueSubscriptionCredit(
+    command: SubscriptionCreditCommand,
+    authorization?: NativeRefundExecutionAuthorization,
+  ): Promise<SubscriptionCreditEffect> {
+    this.assert(command.binding);
+    if (
+      !authorization ||
+      !hasNativeRefundExecutionAuthorization(authorization, {
+        nativeRunId: authorization.nativeRunId,
+        nativeToolCallId: authorization.nativeToolCallId,
+        commandFingerprint: command.fingerprint,
+        caseId: command.approvalCaseId,
+      }) ||
+      !(await caseStore.hasDispatchLease({
+        caseId: command.approvalCaseId,
+        turnId: authorization.turnId,
+        dispatchId: authorization.dispatchId,
+        leaseToken: authorization.leaseToken,
+      }))
+    )
+      throw new Error(
+        "Stripe subscription credit requires the approved native tool context and current dispatch lease.",
+      );
+    const supportCase = await caseStore.get(command.approvalCaseId);
+    const native = supportCase?.metadata.nativeApproval;
+    const decision = await caseStore.approvalDecision(
+      command.approvalCaseId,
+      authorization.turnId,
+    );
+    const immutable = await caseStore.getAction(
+      command.approvalCaseId,
+      "subscription-credit-command",
+      command.fingerprint,
+    );
+    const evidence = await caseStore.getAction(
+      command.approvalCaseId,
+      "refund-policy-evidence",
+      command.fingerprint,
+    );
+    if (
+      !supportCase?.approval?.approved ||
+      !native ||
+      native.runId !== authorization.nativeRunId ||
+      native.toolCallId !== authorization.nativeToolCallId ||
+      native.fingerprint !== command.fingerprint ||
+      !decision?.approved ||
+      decision.commandFingerprint !== command.fingerprint ||
+      !activePrincipalHasRole(
+        decision.principalId,
+        command.binding.tenantId,
+        "approver",
+      ) ||
+      subscriptionCreditFingerprint(command) !== command.fingerprint ||
+      !structurallyEqual(immutable, command) ||
+      !evidence ||
+      supportCase.draft?.requiresEscalation
+    )
+      throw new Error(
+        "Stripe subscription credit requires the durable authorized decision, immutable command, and policy evidence.",
+      );
+    const replay = await caseStore.idempotency(command.idempotencyKey);
+    if (replay) {
+      if (replay.fingerprint !== command.fingerprint)
+        throw new Error(
+          "Idempotency key was reused with another subscription credit.",
+        );
+      const effect = replay.effect as SubscriptionCreditEffect;
+      if (
+        effect.creditId &&
+        effect.subscriptionId === command.subscriptionId &&
+        effect.customerId === command.customerId
+      )
+        return { ...effect, replayed: true };
+      throw new Error(
+        "Subscription credit replay does not match the immutable command.",
+      );
+    }
+    const attempt = await caseStore.prepareStripeSubscriptionCreditAttempt({
+      caseId: command.approvalCaseId,
+      binding: command.binding,
+      fingerprint: command.fingerprint,
+      idempotencyKey: command.idempotencyKey,
+      dispatchId: authorization.dispatchId,
+      leaseToken: authorization.leaseToken,
+      turnId: authorization.turnId,
+      command,
+    });
+    const recoverReceipt = async () => {
+      const effect = attempt.creditId
+        ? await this.client.retrieveSubscriptionCredit(
+            command,
+            supportCase.customer.email,
+            attempt.creditId,
+          )
+        : await this.client.findSubscriptionCreditReceipt(
+            command,
+            supportCase.customer.email,
+          );
+      if (effect)
+        await caseStore.updateStripeSubscriptionCreditAttempt(
+          command.idempotencyKey,
+          {
+            status: "succeeded",
+            creditId: effect.creditId,
+            providerStatus: effect.providerStatus,
+          },
+        );
+      return effect;
+    };
+    // A prior durable prepare means this native snapshot has already crossed
+    // the financial boundary (or crashed immediately before it). Reconcile
+    // its immutable receipt only; never turn a bounded Stripe key expiry into
+    // a fresh POST.
+    if (!attempt.inserted) {
+      const recovered = await recoverReceipt();
+      if (recovered) return recovered;
+      await caseStore.updateStripeSubscriptionCreditAttempt(
+        command.idempotencyKey,
+        { status: "unknown", providerStatus: "receipt-not-observed" },
+      );
+      throw new StripeHttpError(0, true);
+    }
+    try {
+      const effect = await this.client.createSubscriptionCredit(
+        command,
+        supportCase.customer.email,
+        async () => {
+          if (
+            !(await caseStore.hasDispatchLease({
+              caseId: command.approvalCaseId,
+              turnId: authorization.turnId,
+              dispatchId: authorization.dispatchId,
+              leaseToken: authorization.leaseToken,
+            }))
+          )
+            throw new StripeFirstEffectAuthorizationError();
+        },
+      );
+      await caseStore.updateStripeSubscriptionCreditAttempt(
+        command.idempotencyKey,
+        {
+          status: "succeeded",
+          creditId: effect.creditId,
+          providerStatus: effect.providerStatus,
+        },
+      );
+      return effect;
+    } catch (error) {
+      // Any error after the durable pre-POST record is conservatively
+      // uncertain. A malformed/timeout response can still follow a remote
+      // effect, so recovery must inspect the provider ledger rather than POST.
+      await caseStore
+        .updateStripeSubscriptionCreditAttempt(command.idempotencyKey, {
+          status: "unknown",
+          providerStatus:
+            error instanceof StripeHttpError ? "transport" : "uncertain",
+        })
+        .catch(() => undefined);
+      throw error;
+    }
+  }
+  async retrieveSubscriptionCredit(command: SubscriptionCreditCommand) {
+    this.assert(command.binding);
+    const supportCase = await caseStore.get(command.approvalCaseId);
+    if (!supportCase) return undefined;
+    const effect = await caseStore.idempotency(command.idempotencyKey);
+    if (effect?.fingerprint === command.fingerprint) {
+      const saved = effect.effect as SubscriptionCreditEffect;
+      if (saved.creditId)
+        return this.client.retrieveSubscriptionCredit(
+          command,
+          supportCase.customer.email,
+          saved.creditId,
+        );
+    }
+    const attempt = await caseStore.stripeSubscriptionCreditAttempt(
+      command.idempotencyKey,
+    );
+    if (
+      !attempt ||
+      attempt.caseId !== command.approvalCaseId ||
+      attempt.fingerprint !== command.fingerprint
+    )
+      return undefined;
+    const recovered = attempt.creditId
+      ? await this.client.retrieveSubscriptionCredit(
+          command,
+          supportCase.customer.email,
+          attempt.creditId,
+        )
+      : await this.client.findSubscriptionCreditReceipt(
+          command,
+          supportCase.customer.email,
+        );
+    if (recovered)
+      await caseStore.updateStripeSubscriptionCreditAttempt(
+        command.idempotencyKey,
+        {
+          status: "succeeded",
+          creditId: recovered.creditId,
+          providerStatus: recovered.providerStatus,
+        },
+      );
+    return recovered;
   }
   async scheduleSubscriptionCancellation(
     command: SubscriptionCancellationCommand,

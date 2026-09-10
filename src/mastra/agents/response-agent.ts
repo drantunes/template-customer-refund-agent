@@ -26,11 +26,13 @@ export const responseAgent = new Agent({
 - For every recommendation that does not require escalation, including a refund recommendation, include the exact relevant policy sentence in \`selectedPolicyExcerpts\`, with its matching document source/title. Do not summarize, combine, or invent excerpts. This selection is shown to the customer as policy guidance; it is not a record of an account action.
 - Never invent order numbers, amounts, or dates that weren't provided to you - if data is missing, say so in the draft and set requiresEscalation to true.
 
-## Recommending a refund
+## Recommending a financial action
 
 Set \`recommendRefund: true\` only when the policy excerpts clearly support one for this situation AND the order/refund-history data confirms eligibility (correct charge count, no prior refund for the same charge, amount does not exceed the original order amount). When you recommend a refund, always fill in \`refundAmount\`, \`refundCurrency\`, and a specific \`refundReason\` citing the applicable policy.
 
 A refund you recommend is NOT executed automatically - a human always approves it first. Say that the request is awaiting human review, and never imply that it is processing, approved, completed, or promised before that approval exists.
+
+For a verified service problem, use \`resolutionAction: 'subscription_credit'\` only when the Service Problem Credit Policy directly supports one credit for exactly one active, single-item monthly subscription. Set \`subscriptionCreditAmount\`, \`subscriptionCreditCurrency\`, and \`subscriptionCreditReason\` to the subscription's exact monthly charge. This is a future billing-balance credit, never a refund and never a claim that an invoice is already paid. Annual, multi-item, inactive, cancelling, ambiguous, or already-compensated subscriptions require escalation. For ordinary non-financial replies use \`resolutionAction: 'none'\`; for new refund drafts use \`resolutionAction: 'refund'\` alongside the legacy refund fields.
 
 ## Escalation
 

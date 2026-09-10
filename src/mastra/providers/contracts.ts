@@ -96,6 +96,16 @@ export interface TransactionalActionProvider {
     command: RefundCommand,
     authorization?: import("./native-execution").NativeRefundExecutionAuthorization,
   ): Promise<RefundEffect>;
+  quoteSubscriptionCredit(
+    command: SubscriptionCreditCommand,
+  ): Promise<SubscriptionCreditQuote>;
+  issueSubscriptionCredit(
+    command: SubscriptionCreditCommand,
+    authorization?: import("./native-execution").NativeRefundExecutionAuthorization,
+  ): Promise<SubscriptionCreditEffect>;
+  retrieveSubscriptionCredit(
+    command: SubscriptionCreditCommand,
+  ): Promise<SubscriptionCreditEffect | undefined>;
   scheduleSubscriptionCancellation(
     command: SubscriptionCancellationCommand,
   ): Promise<SubscriptionCancellationEffect>;
@@ -136,6 +146,8 @@ export interface CommerceOrder {
 }
 export interface CommerceSubscription {
   subscriptionId: string;
+  /** Stable provider customer identity required for customer balance effects. */
+  customerId?: string;
   customerEmail: string;
   plan: string;
   amount: Money;
@@ -189,6 +201,35 @@ export interface RefundQuote {
   approvedAmount: Money;
   remainingAmount: Money;
   commandFingerprint: string;
+}
+/** A billing credit is a distinct financial action. It is available for a
+ * future finalized invoice; this receipt never claims invoice application. */
+export interface SubscriptionCreditCommand {
+  approvalCaseId: string;
+  binding: ProviderBinding;
+  customerId: string;
+  subscriptionId: string;
+  amount: Money;
+  reason: string;
+  idempotencyKey: string;
+  fingerprint: string;
+}
+export interface SubscriptionCreditQuote {
+  approvedAmount: Money;
+  commandFingerprint: string;
+}
+export interface SubscriptionCreditEffect {
+  creditId: string;
+  customerId: string;
+  subscriptionId: string;
+  amount: Money;
+  idempotencyKey: string;
+  executedAt: string;
+  replayed: boolean;
+  /** Created means balance credit exists. It is not proof of invoice use. */
+  status?: "pending" | "succeeded" | "failed" | "unknown";
+  providerStatus?: string;
+  providerRefs?: ProviderRef[];
 }
 /** The only non-refund cancellation supported by Phase 006: a verified owner
  * explicitly asks to cancel at period end and explicitly declines a refund. */

@@ -594,6 +594,9 @@ export class CaseStoreDispatch {
         draft: switchesTurn ? undefined : current.draft,
         approval: switchesTurn ? undefined : current.approval,
         refundResult: switchesTurn ? undefined : current.refundResult,
+        subscriptionCreditResult: switchesTurn
+          ? undefined
+          : current.subscriptionCreditResult,
         finalResponse: switchesTurn ? undefined : current.finalResponse,
         escalationReason: switchesTurn ? undefined : current.escalationReason,
         traceId: switchesTurn ? undefined : current.traceId,
@@ -606,8 +609,10 @@ export class CaseStoreDispatch {
           ...(switchesTurn
             ? {
                 refundCommand: undefined,
+                subscriptionCreditCommand: undefined,
                 nativeApproval: undefined,
                 refundEffects: undefined,
+                subscriptionCreditEffects: undefined,
               }
             : {}),
         },

@@ -79,11 +79,22 @@ export function scopedCaseDto(
         : undefined,
       metadata: {},
     } as PublicSupportCase;
-  const command = supportCase.metadata.refundCommand;
+  const refundCommand = supportCase.metadata.refundCommand;
+  const subscriptionCreditCommand =
+    supportCase.metadata.subscriptionCreditCommand;
   return {
     ...supportCase,
-    metadata: staffCaseMetadataSchema.parse(
-      command ? { refundCommand: { fingerprint: command.fingerprint } } : {},
-    ),
+    metadata: staffCaseMetadataSchema.parse({
+      ...(refundCommand
+        ? { refundCommand: { fingerprint: refundCommand.fingerprint } }
+        : {}),
+      ...(subscriptionCreditCommand
+        ? {
+            subscriptionCreditCommand: {
+              fingerprint: subscriptionCreditCommand.fingerprint,
+            },
+          }
+        : {}),
+    }),
   } as PublicSupportCase;
 }

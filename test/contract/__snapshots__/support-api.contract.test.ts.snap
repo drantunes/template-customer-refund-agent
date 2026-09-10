@@ -258,6 +258,14 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                               "requiresEscalation": {
                                 "type": "boolean",
                               },
+                              "resolutionAction": {
+                                "enum": [
+                                  "none",
+                                  "refund",
+                                  "subscription_credit",
+                                ],
+                                "type": "string",
+                              },
                               "selectedPolicyExcerpts": {
                                 "default": [],
                                 "description": "Exact, relevant excerpts from cited policy documents. These are rendered as policy guidance, never as a completed account effect.",
@@ -281,6 +289,15 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                                 },
                                 "maxItems": 3,
                                 "type": "array",
+                              },
+                              "subscriptionCreditAmount": {
+                                "type": "number",
+                              },
+                              "subscriptionCreditCurrency": {
+                                "type": "string",
+                              },
+                              "subscriptionCreditReason": {
+                                "type": "string",
                               },
                             },
                             "required": [
@@ -378,6 +395,19 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             "additionalProperties": false,
                             "properties": {
                               "refundCommand": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "fingerprint": {
+                                    "minLength": 1,
+                                    "type": "string",
+                                  },
+                                },
+                                "required": [
+                                  "fingerprint",
+                                ],
+                                "type": "object",
+                              },
+                              "subscriptionCreditCommand": {
                                 "additionalProperties": false,
                                 "properties": {
                                   "fingerprint": {
@@ -613,6 +643,52 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                           "subject": {
                             "type": "string",
                           },
+                          "subscriptionCreditResult": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "amount": {
+                                "type": "number",
+                              },
+                              "creditId": {
+                                "type": "string",
+                              },
+                              "currency": {
+                                "type": "string",
+                              },
+                              "customerId": {
+                                "type": "string",
+                              },
+                              "executedAt": {
+                                "type": "string",
+                              },
+                              "idempotencyKey": {
+                                "type": "string",
+                              },
+                              "status": {
+                                "enum": [
+                                  "executed",
+                                  "skipped",
+                                  "pending",
+                                  "failed",
+                                ],
+                                "type": "string",
+                              },
+                              "subscriptionId": {
+                                "type": "string",
+                              },
+                            },
+                            "required": [
+                              "creditId",
+                              "customerId",
+                              "subscriptionId",
+                              "amount",
+                              "currency",
+                              "status",
+                              "idempotencyKey",
+                              "executedAt",
+                            ],
+                            "type": "object",
+                          },
                           "subscriptionLookup": {
                             "additionalProperties": false,
                             "properties": {
@@ -625,12 +701,22 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                                   "amount": {
                                     "type": "number",
                                   },
+                                  "cancelAtPeriodEnd": {
+                                    "const": true,
+                                    "type": "boolean",
+                                  },
+                                  "cancelsAt": {
+                                    "type": "string",
+                                  },
                                   "currency": {
                                     "type": "string",
                                   },
                                   "customerEmail": {
                                     "format": "email",
                                     "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                                    "type": "string",
+                                  },
+                                  "customerId": {
                                     "type": "string",
                                   },
                                   "plan": {
@@ -690,6 +776,7 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                                   "cancellation",
                                   "damaged_item",
                                   "account_issue",
+                                  "service_problem",
                                   "other",
                                 ],
                                 "type": "string",
@@ -896,6 +983,14 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                         "requiresEscalation": {
                           "type": "boolean",
                         },
+                        "resolutionAction": {
+                          "enum": [
+                            "none",
+                            "refund",
+                            "subscription_credit",
+                          ],
+                          "type": "string",
+                        },
                         "selectedPolicyExcerpts": {
                           "default": [],
                           "description": "Exact, relevant excerpts from cited policy documents. These are rendered as policy guidance, never as a completed account effect.",
@@ -919,6 +1014,15 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                           },
                           "maxItems": 3,
                           "type": "array",
+                        },
+                        "subscriptionCreditAmount": {
+                          "type": "number",
+                        },
+                        "subscriptionCreditCurrency": {
+                          "type": "string",
+                        },
+                        "subscriptionCreditReason": {
+                          "type": "string",
                         },
                       },
                       "required": [
@@ -1016,6 +1120,19 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                       "additionalProperties": false,
                       "properties": {
                         "refundCommand": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "fingerprint": {
+                              "minLength": 1,
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "fingerprint",
+                          ],
+                          "type": "object",
+                        },
+                        "subscriptionCreditCommand": {
                           "additionalProperties": false,
                           "properties": {
                             "fingerprint": {
@@ -1251,6 +1368,52 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                     "subject": {
                       "type": "string",
                     },
+                    "subscriptionCreditResult": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "amount": {
+                          "type": "number",
+                        },
+                        "creditId": {
+                          "type": "string",
+                        },
+                        "currency": {
+                          "type": "string",
+                        },
+                        "customerId": {
+                          "type": "string",
+                        },
+                        "executedAt": {
+                          "type": "string",
+                        },
+                        "idempotencyKey": {
+                          "type": "string",
+                        },
+                        "status": {
+                          "enum": [
+                            "executed",
+                            "skipped",
+                            "pending",
+                            "failed",
+                          ],
+                          "type": "string",
+                        },
+                        "subscriptionId": {
+                          "type": "string",
+                        },
+                      },
+                      "required": [
+                        "creditId",
+                        "customerId",
+                        "subscriptionId",
+                        "amount",
+                        "currency",
+                        "status",
+                        "idempotencyKey",
+                        "executedAt",
+                      ],
+                      "type": "object",
+                    },
                     "subscriptionLookup": {
                       "additionalProperties": false,
                       "properties": {
@@ -1263,12 +1426,22 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             "amount": {
                               "type": "number",
                             },
+                            "cancelAtPeriodEnd": {
+                              "const": true,
+                              "type": "boolean",
+                            },
+                            "cancelsAt": {
+                              "type": "string",
+                            },
                             "currency": {
                               "type": "string",
                             },
                             "customerEmail": {
                               "format": "email",
                               "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                              "type": "string",
+                            },
+                            "customerId": {
                               "type": "string",
                             },
                             "plan": {
@@ -1328,6 +1501,7 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             "cancellation",
                             "damaged_item",
                             "account_issue",
+                            "service_problem",
                             "other",
                           ],
                           "type": "string",
@@ -1593,6 +1767,14 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                         "requiresEscalation": {
                           "type": "boolean",
                         },
+                        "resolutionAction": {
+                          "enum": [
+                            "none",
+                            "refund",
+                            "subscription_credit",
+                          ],
+                          "type": "string",
+                        },
                         "selectedPolicyExcerpts": {
                           "default": [],
                           "description": "Exact, relevant excerpts from cited policy documents. These are rendered as policy guidance, never as a completed account effect.",
@@ -1616,6 +1798,15 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                           },
                           "maxItems": 3,
                           "type": "array",
+                        },
+                        "subscriptionCreditAmount": {
+                          "type": "number",
+                        },
+                        "subscriptionCreditCurrency": {
+                          "type": "string",
+                        },
+                        "subscriptionCreditReason": {
+                          "type": "string",
                         },
                       },
                       "required": [
@@ -1713,6 +1904,19 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                       "additionalProperties": false,
                       "properties": {
                         "refundCommand": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "fingerprint": {
+                              "minLength": 1,
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "fingerprint",
+                          ],
+                          "type": "object",
+                        },
+                        "subscriptionCreditCommand": {
                           "additionalProperties": false,
                           "properties": {
                             "fingerprint": {
@@ -1948,6 +2152,52 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                     "subject": {
                       "type": "string",
                     },
+                    "subscriptionCreditResult": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "amount": {
+                          "type": "number",
+                        },
+                        "creditId": {
+                          "type": "string",
+                        },
+                        "currency": {
+                          "type": "string",
+                        },
+                        "customerId": {
+                          "type": "string",
+                        },
+                        "executedAt": {
+                          "type": "string",
+                        },
+                        "idempotencyKey": {
+                          "type": "string",
+                        },
+                        "status": {
+                          "enum": [
+                            "executed",
+                            "skipped",
+                            "pending",
+                            "failed",
+                          ],
+                          "type": "string",
+                        },
+                        "subscriptionId": {
+                          "type": "string",
+                        },
+                      },
+                      "required": [
+                        "creditId",
+                        "customerId",
+                        "subscriptionId",
+                        "amount",
+                        "currency",
+                        "status",
+                        "idempotencyKey",
+                        "executedAt",
+                      ],
+                      "type": "object",
+                    },
                     "subscriptionLookup": {
                       "additionalProperties": false,
                       "properties": {
@@ -1960,12 +2210,22 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             "amount": {
                               "type": "number",
                             },
+                            "cancelAtPeriodEnd": {
+                              "const": true,
+                              "type": "boolean",
+                            },
+                            "cancelsAt": {
+                              "type": "string",
+                            },
                             "currency": {
                               "type": "string",
                             },
                             "customerEmail": {
                               "format": "email",
                               "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                              "type": "string",
+                            },
+                            "customerId": {
                               "type": "string",
                             },
                             "plan": {
@@ -2025,6 +2285,7 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             "cancellation",
                             "damaged_item",
                             "account_issue",
+                            "service_problem",
                             "other",
                           ],
                           "type": "string",
@@ -2360,6 +2621,14 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                         "requiresEscalation": {
                           "type": "boolean",
                         },
+                        "resolutionAction": {
+                          "enum": [
+                            "none",
+                            "refund",
+                            "subscription_credit",
+                          ],
+                          "type": "string",
+                        },
                         "selectedPolicyExcerpts": {
                           "default": [],
                           "description": "Exact, relevant excerpts from cited policy documents. These are rendered as policy guidance, never as a completed account effect.",
@@ -2383,6 +2652,15 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                           },
                           "maxItems": 3,
                           "type": "array",
+                        },
+                        "subscriptionCreditAmount": {
+                          "type": "number",
+                        },
+                        "subscriptionCreditCurrency": {
+                          "type": "string",
+                        },
+                        "subscriptionCreditReason": {
+                          "type": "string",
                         },
                       },
                       "required": [
@@ -2480,6 +2758,19 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                       "additionalProperties": false,
                       "properties": {
                         "refundCommand": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "fingerprint": {
+                              "minLength": 1,
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "fingerprint",
+                          ],
+                          "type": "object",
+                        },
+                        "subscriptionCreditCommand": {
                           "additionalProperties": false,
                           "properties": {
                             "fingerprint": {
@@ -2715,6 +3006,52 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                     "subject": {
                       "type": "string",
                     },
+                    "subscriptionCreditResult": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "amount": {
+                          "type": "number",
+                        },
+                        "creditId": {
+                          "type": "string",
+                        },
+                        "currency": {
+                          "type": "string",
+                        },
+                        "customerId": {
+                          "type": "string",
+                        },
+                        "executedAt": {
+                          "type": "string",
+                        },
+                        "idempotencyKey": {
+                          "type": "string",
+                        },
+                        "status": {
+                          "enum": [
+                            "executed",
+                            "skipped",
+                            "pending",
+                            "failed",
+                          ],
+                          "type": "string",
+                        },
+                        "subscriptionId": {
+                          "type": "string",
+                        },
+                      },
+                      "required": [
+                        "creditId",
+                        "customerId",
+                        "subscriptionId",
+                        "amount",
+                        "currency",
+                        "status",
+                        "idempotencyKey",
+                        "executedAt",
+                      ],
+                      "type": "object",
+                    },
                     "subscriptionLookup": {
                       "additionalProperties": false,
                       "properties": {
@@ -2727,12 +3064,22 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             "amount": {
                               "type": "number",
                             },
+                            "cancelAtPeriodEnd": {
+                              "const": true,
+                              "type": "boolean",
+                            },
+                            "cancelsAt": {
+                              "type": "string",
+                            },
                             "currency": {
                               "type": "string",
                             },
                             "customerEmail": {
                               "format": "email",
                               "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                              "type": "string",
+                            },
+                            "customerId": {
                               "type": "string",
                             },
                             "plan": {
@@ -2792,6 +3139,7 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             "cancellation",
                             "damaged_item",
                             "account_issue",
+                            "service_problem",
                             "other",
                           ],
                           "type": "string",
@@ -3096,6 +3444,14 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                         "requiresEscalation": {
                           "type": "boolean",
                         },
+                        "resolutionAction": {
+                          "enum": [
+                            "none",
+                            "refund",
+                            "subscription_credit",
+                          ],
+                          "type": "string",
+                        },
                         "selectedPolicyExcerpts": {
                           "default": [],
                           "description": "Exact, relevant excerpts from cited policy documents. These are rendered as policy guidance, never as a completed account effect.",
@@ -3119,6 +3475,15 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                           },
                           "maxItems": 3,
                           "type": "array",
+                        },
+                        "subscriptionCreditAmount": {
+                          "type": "number",
+                        },
+                        "subscriptionCreditCurrency": {
+                          "type": "string",
+                        },
+                        "subscriptionCreditReason": {
+                          "type": "string",
                         },
                       },
                       "required": [
@@ -3216,6 +3581,19 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                       "additionalProperties": false,
                       "properties": {
                         "refundCommand": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "fingerprint": {
+                              "minLength": 1,
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "fingerprint",
+                          ],
+                          "type": "object",
+                        },
+                        "subscriptionCreditCommand": {
                           "additionalProperties": false,
                           "properties": {
                             "fingerprint": {
@@ -3451,6 +3829,52 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                     "subject": {
                       "type": "string",
                     },
+                    "subscriptionCreditResult": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "amount": {
+                          "type": "number",
+                        },
+                        "creditId": {
+                          "type": "string",
+                        },
+                        "currency": {
+                          "type": "string",
+                        },
+                        "customerId": {
+                          "type": "string",
+                        },
+                        "executedAt": {
+                          "type": "string",
+                        },
+                        "idempotencyKey": {
+                          "type": "string",
+                        },
+                        "status": {
+                          "enum": [
+                            "executed",
+                            "skipped",
+                            "pending",
+                            "failed",
+                          ],
+                          "type": "string",
+                        },
+                        "subscriptionId": {
+                          "type": "string",
+                        },
+                      },
+                      "required": [
+                        "creditId",
+                        "customerId",
+                        "subscriptionId",
+                        "amount",
+                        "currency",
+                        "status",
+                        "idempotencyKey",
+                        "executedAt",
+                      ],
+                      "type": "object",
+                    },
                     "subscriptionLookup": {
                       "additionalProperties": false,
                       "properties": {
@@ -3463,12 +3887,22 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             "amount": {
                               "type": "number",
                             },
+                            "cancelAtPeriodEnd": {
+                              "const": true,
+                              "type": "boolean",
+                            },
+                            "cancelsAt": {
+                              "type": "string",
+                            },
                             "currency": {
                               "type": "string",
                             },
                             "customerEmail": {
                               "format": "email",
                               "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                              "type": "string",
+                            },
+                            "customerId": {
                               "type": "string",
                             },
                             "plan": {
@@ -3528,6 +3962,7 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             "cancellation",
                             "damaged_item",
                             "account_issue",
+                            "service_problem",
                             "other",
                           ],
                           "type": "string",
@@ -3877,6 +4312,14 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                         "requiresEscalation": {
                           "type": "boolean",
                         },
+                        "resolutionAction": {
+                          "enum": [
+                            "none",
+                            "refund",
+                            "subscription_credit",
+                          ],
+                          "type": "string",
+                        },
                         "selectedPolicyExcerpts": {
                           "default": [],
                           "description": "Exact, relevant excerpts from cited policy documents. These are rendered as policy guidance, never as a completed account effect.",
@@ -3900,6 +4343,15 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                           },
                           "maxItems": 3,
                           "type": "array",
+                        },
+                        "subscriptionCreditAmount": {
+                          "type": "number",
+                        },
+                        "subscriptionCreditCurrency": {
+                          "type": "string",
+                        },
+                        "subscriptionCreditReason": {
+                          "type": "string",
                         },
                       },
                       "required": [
@@ -3997,6 +4449,19 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                       "additionalProperties": false,
                       "properties": {
                         "refundCommand": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "fingerprint": {
+                              "minLength": 1,
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "fingerprint",
+                          ],
+                          "type": "object",
+                        },
+                        "subscriptionCreditCommand": {
                           "additionalProperties": false,
                           "properties": {
                             "fingerprint": {
@@ -4232,6 +4697,52 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                     "subject": {
                       "type": "string",
                     },
+                    "subscriptionCreditResult": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "amount": {
+                          "type": "number",
+                        },
+                        "creditId": {
+                          "type": "string",
+                        },
+                        "currency": {
+                          "type": "string",
+                        },
+                        "customerId": {
+                          "type": "string",
+                        },
+                        "executedAt": {
+                          "type": "string",
+                        },
+                        "idempotencyKey": {
+                          "type": "string",
+                        },
+                        "status": {
+                          "enum": [
+                            "executed",
+                            "skipped",
+                            "pending",
+                            "failed",
+                          ],
+                          "type": "string",
+                        },
+                        "subscriptionId": {
+                          "type": "string",
+                        },
+                      },
+                      "required": [
+                        "creditId",
+                        "customerId",
+                        "subscriptionId",
+                        "amount",
+                        "currency",
+                        "status",
+                        "idempotencyKey",
+                        "executedAt",
+                      ],
+                      "type": "object",
+                    },
                     "subscriptionLookup": {
                       "additionalProperties": false,
                       "properties": {
@@ -4244,12 +4755,22 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             "amount": {
                               "type": "number",
                             },
+                            "cancelAtPeriodEnd": {
+                              "const": true,
+                              "type": "boolean",
+                            },
+                            "cancelsAt": {
+                              "type": "string",
+                            },
                             "currency": {
                               "type": "string",
                             },
                             "customerEmail": {
                               "format": "email",
                               "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                              "type": "string",
+                            },
+                            "customerId": {
                               "type": "string",
                             },
                             "plan": {
@@ -4309,6 +4830,7 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             "cancellation",
                             "damaged_item",
                             "account_issue",
+                            "service_problem",
                             "other",
                           ],
                           "type": "string",

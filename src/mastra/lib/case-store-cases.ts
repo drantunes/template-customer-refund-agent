@@ -349,8 +349,10 @@ export class CaseStoreCases {
             ? {
                 activeTurnId: undefined,
                 refundCommand: undefined,
+                subscriptionCreditCommand: undefined,
                 nativeApproval: undefined,
                 refundEffects: undefined,
+                subscriptionCreditEffects: undefined,
               }
             : {}),
         },

@@ -6,7 +6,7 @@ import { now, parseLegacyCase, caseBinding } from "./case-store-shared";
 
 export class CaseStoreMigrations {
   constructor(private readonly client: Client) {}
-  async migrate(target = 22): Promise<void> {
+  async migrate(target = 23): Promise<void> {
     await this.client.execute(
       "CREATE TABLE IF NOT EXISTS support_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
     );
@@ -14,7 +14,7 @@ export class CaseStoreMigrations {
       "SELECT version FROM support_schema_migrations ORDER BY version",
     );
     let version = Number(applied.rows.at(-1)?.version ?? 0);
-    if (!Number.isInteger(target) || target < 0 || target > 22)
+    if (!Number.isInteger(target) || target < 0 || target > 23)
       throw new Error("Unsupported support schema target version.");
     // Versions 6 through 8 introduced append-only turn, decision, and audit
     // records. Their inverse would discard or weaken durable financial/replay
@@ -127,6 +127,10 @@ export class CaseStoreMigrations {
     }
     if (version === 22) {
       await this.up22();
+      return;
+    }
+    if (version === 23) {
+      await this.up23();
       return;
     }
     if (version === 14) {
@@ -904,6 +908,37 @@ export class CaseStoreMigrations {
     `);
     await this.client.execute({
       sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (22, ?)",
+      args: [now()],
+    });
+  }
+  /** CREDIT is a separate financial action, but Stripe's bounded idempotency
+   * window creates the same crash boundary as refunds. Persist its exact
+   * command before POST so recovery can search the customer's balance ledger
+   * instead of ever issuing a second credit blindly. */
+  private async up23() {
+    await this.client.executeMultiple(`
+      CREATE TABLE IF NOT EXISTS support_stripe_subscription_credit_attempts (
+        id TEXT PRIMARY KEY,
+        case_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        provider_account_id TEXT NOT NULL,
+        command_fingerprint TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        dispatch_id TEXT NOT NULL,
+        lease_token TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        command_data TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('prepared','succeeded','unknown','quarantined')),
+        credit_id TEXT,
+        provider_status TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS support_stripe_credit_attempt_command
+        ON support_stripe_subscription_credit_attempts(case_id, command_fingerprint);
+    `);
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (23, ?)",
       args: [now()],
     });
   }

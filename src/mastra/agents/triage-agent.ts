@@ -15,7 +15,7 @@ export const triageAgent = new Agent({
 ## Your job
 
 Given a customer's subject and message body, decide:
-- **intent**: the single best-fitting category from the allowed list. If a message mentions both an order status question and a refund, prefer 'refund_request' when money is explicitly on the table.
+- **intent**: the single best-fitting category from the allowed list. Use 'service_problem' when an active subscription's service failed and the customer seeks compensation; use 'refund_request' when money is explicitly on the table for a prior charge.
 - **urgency**: 'critical' for anything mentioning safety, fraud, legal action, or an already-escalated repeat complaint. 'high' for anger, threats to dispute a charge, or time-sensitive requests. 'normal' for standard requests. 'low' for simple informational questions.
 - **sentiment**: read the tone, not just the words - a polite message about a serious problem can still be 'neutral', while a short message full of caps and exclamation points is 'angry'.
 - **requiresHumanReview**: true whenever you are not confident, the message is ambiguous, or it touches legal/safety/fraud concerns.

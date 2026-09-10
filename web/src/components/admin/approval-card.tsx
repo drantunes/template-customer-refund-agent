@@ -35,10 +35,21 @@ export function ApprovalCard({
   const [note, setNote] = useState("");
   const [pending, setPending] = useState<"approve" | "reject" | null>(null);
   const draft = supportCase.draft;
+  const isCredit = draft?.resolutionAction === "subscription_credit";
+  const metadata = supportCase.metadata as Record<string, unknown>;
   const commandFingerprint = (
-    (supportCase.metadata as Record<string, unknown>).refundCommand as
+    (isCredit ? metadata.subscriptionCreditCommand : metadata.refundCommand) as
       { fingerprint?: string } | undefined
   )?.fingerprint;
+  const amount = isCredit
+    ? draft?.subscriptionCreditAmount
+    : draft?.refundAmount;
+  const currency = isCredit
+    ? draft?.subscriptionCreditCurrency
+    : draft?.refundCurrency;
+  const reason = isCredit
+    ? draft?.subscriptionCreditReason
+    : draft?.refundReason;
   if (!draft) return null;
 
   async function handle(approved: boolean) {
@@ -57,10 +68,16 @@ export function ApprovalCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Refund approval requested</CardTitle>
+        <CardTitle className="text-base">
+          {isCredit
+            ? "Subscription credit approval requested"
+            : "Refund approval requested"}
+        </CardTitle>
         <CardDescription>
           Reviewing as <span className="font-medium">{approverId}</span>.
-          Nothing is charged or refunded until you decide.
+          {isCredit
+            ? "No billing balance is changed until you decide."
+            : "Nothing is charged or refunded until you decide."}
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
@@ -68,7 +85,7 @@ export function ApprovalCard({
           <div>
             <p className="text-muted-foreground">Amount</p>
             <p className="font-medium">
-              {draft.refundAmount} {draft.refundCurrency}
+              {amount} {currency}
             </p>
           </div>
           <div className="min-w-52">
@@ -81,14 +98,19 @@ export function ApprovalCard({
             </code>
           </div>
           <div>
-            <p className="text-muted-foreground">Order</p>
+            <p className="text-muted-foreground">
+              {isCredit ? "Subscription" : "Order"}
+            </p>
             <p className="font-medium">
-              {supportCase.orderLookup?.order?.orderId ?? "Not found"}
+              {isCredit
+                ? (supportCase.subscriptionLookup?.subscription
+                    ?.subscriptionId ?? "Not found")
+                : (supportCase.orderLookup?.order?.orderId ?? "Not found")}
             </p>
           </div>
           <div>
             <p className="text-muted-foreground">Reason</p>
-            <p className="font-medium">{draft.refundReason}</p>
+            <p className="font-medium">{reason}</p>
           </div>
         </div>
 
@@ -131,7 +153,7 @@ export function ApprovalCard({
             ) : (
               <CheckCircle2 data-icon="inline-start" />
             )}
-            Approve refund
+            {isCredit ? "Approve credit" : "Approve refund"}
           </Button>
           <Button
             onClick={() => handle(false)}
