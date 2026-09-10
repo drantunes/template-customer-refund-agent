@@ -305,9 +305,16 @@ export async function studioSupervisorMiddleware(
   // public auth/capabilities remains outside this middleware and reports
   // `enabled: false`, which is how Studio suppresses the login screen.
   if (isLocalStudioDevMode() && isBuiltInApi) {
-    const devPrincipal = studioPrincipalForRequest(c.req.raw.headers);
+    const devPrincipal = studioPrincipalForRequest(c.req.raw);
     if (!devPrincipal)
-      return c.json({ error: "Authentication required." }, 401);
+      return c.json(
+        {
+          error: c.req.raw.headers.has("authorization")
+            ? "Authentication required."
+            : "Anonymous Studio access requires direct loopback.",
+        },
+        c.req.raw.headers.has("authorization") ? 401 : 403,
+      );
     if (
       !canAccessBuiltInStudioRoute(devPrincipal, {
         method: c.req.method,
@@ -340,7 +347,7 @@ export async function studioSupervisorMiddleware(
   if (isNativeSupervisor && c.req.method !== "POST")
     return c.json({ error: "Method not allowed." }, 405);
 
-  const principal = studioPrincipalForRequest(c.req.raw.headers);
+  const principal = studioPrincipalForRequest(c.req.raw);
   if (!principal) return c.json({ error: "Authentication required." }, 401);
   if (
     principal.tenantId !== "local-demo" ||

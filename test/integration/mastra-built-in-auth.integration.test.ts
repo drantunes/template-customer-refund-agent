@@ -147,29 +147,45 @@ afterEach(async () => {
 describe("configured Mastra built-in API authorization", () => {
   it("admits only the loopback Studio surface without a login in the exact dev child", async () => {
     const { mastra, server } = await configuredServer({ localStudioDev: true });
+    const loopback = "http://localhost";
     expect(mastra.getServer()?.auth).toBeUndefined();
     expect(mastra.getServer()?.host).toBe("127.0.0.1");
     expect(mastra.getServer()?.studioHost).toBe("localhost");
 
     const capabilities = await server.request(
-      "http://support.test/api/auth/capabilities",
+      `${loopback}/api/auth/capabilities`,
     );
     expect(capabilities.status).toBe(200);
     expect(await capabilities.json()).toMatchObject({
       enabled: false,
       login: null,
     });
-    expect(
-      (await server.request("http://support.test/api/workflows")).status,
-    ).toBe(200);
+    expect((await server.request(`${loopback}/api/workflows`)).status).toBe(
+      200,
+    );
     expect(
       (
         await server.request(
-          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs",
+          `${loopback}/api/workflows/resolveSupportCaseWorkflow/runs`,
           { headers: { cookie: "mastra-token=stale-session" } },
         )
       ).status,
     ).toBe(200);
+
+    expect(
+      (await server.request("http://public.example/api/workflows")).status,
+    ).toBe(403);
+    for (const headers of [
+      { host: "public.example" },
+      { forwarded: "for=203.0.113.1;proto=https" },
+      { via: "1.1 proxy.example" },
+      { "x-forwarded-for": "203.0.113.1" },
+      { "x-forwarded-host": "public.example" },
+      { "x-forwarded-proto": "https" },
+    ])
+      expect(
+        (await server.request(`${loopback}/api/workflows`, { headers })).status,
+      ).toBe(403);
 
     for (const [headers, status] of [
       [{ authorization: "Bearer invalid-token" }, 401],
@@ -194,7 +210,7 @@ describe("configured Mastra built-in API authorization", () => {
     ] as const) {
       expect(
         (
-          await server.request("http://support.test/api/workflows", {
+          await server.request(`${loopback}/api/workflows`, {
             headers,
           })
         ).status,
@@ -202,9 +218,9 @@ describe("configured Mastra built-in API authorization", () => {
     }
 
     for (const url of [
-      "http://support.test/api/tools/issue_refund/execute",
-      "http://support.test/api/workflows/resolveSupportCaseWorkflow/start",
-      "http://support.test/api/agents/refund-execution-agent/stream",
+      `${loopback}/api/tools/issue_refund/execute`,
+      `${loopback}/api/workflows/resolveSupportCaseWorkflow/start`,
+      `${loopback}/api/agents/refund-execution-agent/stream`,
     ])
       expect(
         (

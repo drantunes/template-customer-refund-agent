@@ -333,15 +333,47 @@ export function localDemoStudioPrincipal(): SupportPrincipal {
 }
 
 /**
+ * A proxied request can reach a loopback listener, so URL loopback is a
+ * necessary but insufficient signal. Forwarding headers and a non-loopback
+ * Host are denial signals only; they never establish local authority.
+ */
+export function isDirectCanonicalLoopbackRequest(request: Request) {
+  const hostname = new URL(request.url).hostname.toLowerCase();
+  if (!new Set(["localhost", "127.0.0.1", "::1"]).has(hostname)) return false;
+  const host = request.headers.get("host");
+  if (host) {
+    try {
+      const parsed = new URL(`http://${host}`).hostname.toLowerCase();
+      if (!new Set(["localhost", "127.0.0.1", "::1"]).has(parsed)) return false;
+    } catch {
+      return false;
+    }
+  }
+  return ![...request.headers.keys()].some(
+    (name) =>
+      name === "forwarded" ||
+      name === "via" ||
+      name === "x-real-ip" ||
+      name === "x-client-ip" ||
+      name.startsWith("x-forwarded-") ||
+      name.startsWith("x-proxy-"),
+  );
+}
+
+/**
  * Resolves Studio identity without allowing a stale cookie to affect local
  * development. An explicit Authorization header always remains authoritative:
  * invalid, customer, approver, and foreign-tenant tokens cannot fall back to
  * the demo principal.
  */
-export function studioPrincipalForRequest(headers: Headers) {
-  if (isLocalStudioDevMode() && !headers.has("authorization"))
+export function studioPrincipalForRequest(request: Request) {
+  if (
+    isLocalStudioDevMode() &&
+    !request.headers.has("authorization") &&
+    isDirectCanonicalLoopbackRequest(request)
+  )
     return localDemoStudioPrincipal();
-  return studioPrincipalFromHeaders(headers);
+  return studioPrincipalFromHeaders(request.headers);
 }
 
 export type BuiltInStudioRequest = {

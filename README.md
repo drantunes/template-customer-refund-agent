@@ -44,7 +44,7 @@ npm run local:seed
 npm run dev
 ```
 
-Open [Mastra Studio](http://localhost:4111) in local development, select **Support Supervisor**, and send: `Check ORD-1001 and summarize the evidence.` The local loopback Studio opens without a login; support APIs and financial approvals still require their normal Bearer authorization.
+Open [Mastra Studio](http://localhost:4111) in local development, select **Support Supervisor**, and send: `Check ORD-1001 and summarize the evidence.` The supervisor reports recorded synthetic order evidence without issuing a refund. The local loopback Studio opens without a login; support APIs and financial approvals still require their normal Bearer authorization.
 
 ## Making it yours
 
