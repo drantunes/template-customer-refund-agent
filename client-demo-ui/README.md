@@ -25,3 +25,5 @@ npm run dev:support-demo
 ```
 
 The demo serves at `http://127.0.0.1:3000`. It forwards only Intercom and Stripe webhooks to the loopback backend, preserving signed bytes and headers within the 256 KiB limit; it does not provide a generic proxy.
+
+For a public client-demo session, tunnel the client port with `ngrok http 3000`. The public `/entrar` page belongs to port 3000; Studio on port 4111 remains local.

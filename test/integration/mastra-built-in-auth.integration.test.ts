@@ -465,6 +465,272 @@ describe("configured Mastra built-in API authorization", () => {
     ).toBe(404);
   });
 
+  it("deletes only terminal, case-scoped Studio snapshots on direct local dev loopback", async () => {
+    const { mastra, server } = await configuredServer({ localStudioDev: true });
+    const { caseStore } = await import("../../src/mastra/lib/case-store");
+    const createdAt = new Date("2026-09-10T00:00:00.000Z");
+    const localCase = {
+      id: "studio-delete-local",
+      externalId: "studio-delete-local-event",
+      source: "mock-email" as const,
+      customer: { email: "alex@example.com" },
+      subject: "synthetic deletion",
+      messages: [],
+      status: "resolved" as const,
+      createdAt: createdAt.toISOString(),
+      updatedAt: createdAt.toISOString(),
+      metadata: {
+        ownerId: "customer-alex",
+        providerBinding: {
+          tenantId: "local-demo",
+          providerKind: "local" as const,
+          providerAccountId: "delete-account",
+          externalConversationId: "delete-local",
+        },
+      },
+    };
+    await caseStore.create(localCase);
+    await caseStore.create({
+      ...localCase,
+      id: "studio-delete-foreign",
+      externalId: "studio-delete-foreign-event",
+      metadata: {
+        ...localCase.metadata,
+        ownerId: "other-tenant-agent",
+        providerBinding: {
+          ...localCase.metadata.providerBinding,
+          tenantId: "other-tenant",
+          externalConversationId: "delete-foreign",
+        },
+      },
+    });
+    const client = caseStore.getClient();
+    for (const [id, caseId, turnId, runId, state] of [
+      [
+        "studio-delete-dispatch",
+        localCase.id,
+        "studio-delete-turn",
+        "studio-delete-terminal",
+        "completed",
+      ],
+      [
+        "studio-delete-suspended",
+        localCase.id,
+        "studio-delete-turn-suspended",
+        "studio-delete-suspended-terminal",
+        "failed",
+      ],
+      [
+        "studio-delete-active",
+        localCase.id,
+        "studio-delete-turn-active",
+        "studio-delete-active",
+        "pending",
+      ],
+      [
+        "studio-delete-foreign",
+        "studio-delete-foreign",
+        "studio-delete-turn-foreign",
+        "studio-delete-foreign",
+        "completed",
+      ],
+      [
+        "studio-delete-unknown",
+        localCase.id,
+        "studio-delete-turn-unknown",
+        "studio-delete-unknown",
+        "completed",
+      ],
+    ])
+      await client.execute({
+        sql: "INSERT INTO support_dispatch(id, case_id, turn_id, run_id, state, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+        args: [
+          id,
+          caseId,
+          turnId,
+          runId,
+          state,
+          createdAt.toISOString(),
+          createdAt.toISOString(),
+        ],
+      });
+    await client.execute({
+      sql: "INSERT INTO support_turns(id, case_id, event_id, sequence, state, created_at, updated_at) VALUES (?, ?, ?, 1, 'pending', ?, ?)",
+      args: [
+        "studio-delete-turn-active",
+        localCase.id,
+        "studio-delete-event-active",
+        createdAt.toISOString(),
+        createdAt.toISOString(),
+      ],
+    });
+    await client.execute({
+      sql: "INSERT INTO support_decisions(id, case_id, turn_id, command_fingerprint, native_run_id, native_tool_call_id, principal_id, approved, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+      args: [
+        "studio-delete-pending-decision",
+        localCase.id,
+        "studio-delete-turn-active",
+        "studio-delete-fingerprint",
+        "studio-delete-active",
+        "studio-delete-tool-call",
+        "approver-demo",
+        "synthetic pending approval",
+        createdAt.toISOString(),
+      ],
+    });
+    await client.execute({
+      sql: "INSERT INTO support_stripe_refund_attempts(id, case_id, tenant_id, provider_account_id, command_fingerprint, idempotency_key, dispatch_id, lease_token, turn_id, command_data, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)",
+      args: [
+        "studio-delete-financial-attempt",
+        localCase.id,
+        "local-demo",
+        "synthetic-account",
+        "studio-delete-financial-fingerprint",
+        "studio-delete-financial-key",
+        "studio-delete-active",
+        "synthetic-lease-token",
+        "studio-delete-turn-active",
+        "{}",
+        createdAt.toISOString(),
+        createdAt.toISOString(),
+      ],
+    });
+    const workflowStore = (await mastra
+      .getStorage()!
+      .getStore("workflows")) as {
+      persistWorkflowSnapshot(input: {
+        workflowName: string;
+        runId: string;
+        snapshot: never;
+        createdAt: Date;
+        updatedAt: Date;
+      }): Promise<void>;
+    };
+    for (const [runId, status] of [
+      ["studio-delete-terminal", "failed"],
+      ["studio-delete-suspended-terminal", "suspended"],
+      ["studio-delete-active", "success"],
+      ["studio-delete-unknown", "unknown"],
+      ["studio-delete-foreign", "failed"],
+    ])
+      await workflowStore.persistWorkflowSnapshot({
+        workflowName: "resolve-support-case",
+        runId,
+        snapshot: { status } as never,
+        createdAt,
+        updatedAt: createdAt,
+      });
+    const runUrl = (runId: string) =>
+      `http://localhost/api/workflows/resolveSupportCaseWorkflow/runs/${runId}`;
+    const counts = async () =>
+      Promise.all(
+        [
+          "support_cases",
+          "support_turns",
+          "support_decisions",
+          "support_stripe_refund_attempts",
+          "support_dispatch",
+        ].map(async (table) =>
+          Number(
+            (await client.execute(`SELECT COUNT(*) AS count FROM ${table}`))
+              .rows[0].count,
+          ),
+        ),
+      );
+    const before = await counts();
+    const deleted = await server.request(runUrl("studio-delete-terminal"), {
+      method: "DELETE",
+      headers: { origin: "http://localhost" },
+    });
+    expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toEqual({ message: "Workflow run deleted" });
+    expect(
+      (
+        await server.request(runUrl("studio-delete-terminal"), {
+          headers: { origin: "http://localhost" },
+        })
+      ).status,
+    ).toBe(404);
+    expect(await counts()).toEqual(before);
+    expect(
+      (
+        await server.request(runUrl("studio-delete-suspended-terminal"), {
+          method: "DELETE",
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await server.request(runUrl("studio-delete-active"), {
+          method: "DELETE",
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await server.request(runUrl("studio-delete-unknown"), {
+          method: "DELETE",
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await server.request(runUrl("studio-delete-foreign"), {
+          method: "DELETE",
+        })
+      ).status,
+    ).toBe(404);
+    for (const id of ["customer-alex", "approver-demo", "other-tenant-agent"])
+      expect(
+        (
+          await server.request(runUrl("studio-delete-active"), {
+            method: "DELETE",
+            headers: {
+              authorization: `Bearer ${issueLocalSession({ id: id as "customer-alex" })}`,
+            },
+          })
+        ).status,
+      ).toBe(403);
+    expect(
+      (
+        await server.request(runUrl("studio-delete-active"), {
+          method: "DELETE",
+          headers: { authorization: "Bearer invalid" },
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await server.request(runUrl("studio-delete-active"), {
+          method: "DELETE",
+          headers: {
+            authorization: `Bearer ${issueLocalSession({ id: "support-agent-demo" })}`,
+            forwarded: "for=203.0.113.1",
+          },
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await server.request(runUrl("studio-delete-active"), {
+          method: "DELETE",
+          headers: { origin: "https://foreign.example" },
+        })
+      ).status,
+    ).toBe(403);
+    const production = await configuredServer();
+    expect(
+      (
+        await production.server.request(runUrl("studio-delete-active"), {
+          method: "DELETE",
+          headers: {
+            authorization: `Bearer ${issueLocalSession({ id: "support-agent-demo" })}`,
+          },
+        })
+      ).status,
+    ).toBe(403);
+  });
+
   it("requires bearer authentication for the OpenAPI contract it returns", async () => {
     const { server } = await configuredServer();
 

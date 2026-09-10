@@ -8,6 +8,7 @@ import {
   canAccessBuiltInStudioRoute,
   canAccessCase,
   hasRole,
+  isDirectCanonicalLoopbackRequest,
   isLocalStudioDevMode,
   isForeignCookieMutation,
   principalFromHeaders,
@@ -94,10 +95,66 @@ function snapshotStatus(snapshot: unknown): string | undefined {
     : undefined;
 }
 
+function hasMatchingOrigin(request: Request) {
+  const origin = request.headers.get("origin");
+  if (!origin) return true;
+  try {
+    return new URL(origin).origin === new URL(request.url).origin;
+  } catch {
+    return false;
+  }
+}
+
+const deletableWorkflowStatuses = new Set([
+  "success",
+  "failed",
+  "canceled",
+  "bailed",
+  "tripwire",
+  "skipped",
+]);
+const activeDispatchStates = new Set([
+  "pending",
+  "claimed",
+  "started",
+  "suspended",
+]);
+
+async function deleteScopedWorkflowRun(
+  c: ContextWithMastra,
+  workflow: { deleteWorkflowRunById(runId: string): Promise<void> },
+  runId: string,
+  snapshot: unknown,
+) {
+  const client = caseStore.getClient();
+  const linkedDispatches = await client.execute({
+    sql: "SELECT state FROM support_dispatch WHERE run_id = ?",
+    args: [runId],
+  });
+  const dispatchStates = linkedDispatches.rows.map((row) => String(row.state));
+  const status = snapshotStatus(snapshot);
+  if (dispatchStates.some((state) => activeDispatchStates.has(state)))
+    return c.json({ error: "Workflow run is still active." }, 409);
+  const suspendedTerminalDispatch =
+    status === "suspended" &&
+    dispatchStates.length > 0 &&
+    dispatchStates.every(
+      (state) => state === "completed" || state === "failed",
+    );
+  if (
+    !deletableWorkflowStatuses.has(status ?? "") &&
+    !suspendedTerminalDispatch
+  )
+    return c.json({ error: "Workflow run cannot be deleted." }, 409);
+  await workflow.deleteWorkflowRunById(runId);
+  return c.json({ message: "Workflow run deleted" });
+}
+
 async function studioHistoryResponse(
   c: ContextWithMastra,
   principal: NonNullable<ReturnType<typeof studioPrincipalForRequest>>,
   route: { workflowId: string; runId?: string },
+  deleteRun = false,
 ) {
   const allCases = await caseStore.list();
   const allowedCases = allCases.filter((supportCase) =>
@@ -150,9 +207,12 @@ async function studioHistoryResponse(
     // its durable list record first so legacy NULL-resource ingest runs retain
     // their case association without making arbitrary history visible.
     const stored = rawRuns.runs.find((run) => run.runId === route.runId);
-    const run = await workflow.getWorkflowRunById(route.runId);
-    if (!run || !stored || !allows(stored))
+    if (!stored || !allows(stored))
       return c.json({ error: "Workflow run not found." }, 404);
+    if (deleteRun)
+      return deleteScopedWorkflowRun(c, workflow, route.runId, stored.snapshot);
+    const run = await workflow.getWorkflowRunById(route.runId);
+    if (!run) return c.json({ error: "Workflow run not found." }, 404);
     return c.json(run);
   }
   const query = new URL(c.req.url).searchParams;
@@ -299,6 +359,22 @@ export async function studioSupervisorMiddleware(
   if (isForeignCookieMutation(c.req.raw))
     return c.json({ error: "Cross-origin cookie mutation denied." }, 403);
   const path = new URL(c.req.url).pathname;
+  const requestedHistory = historyRoute(path);
+  const requestedDelete =
+    c.req.method === "DELETE" && requestedHistory?.runId
+      ? { ...requestedHistory, runId: requestedHistory.runId }
+      : undefined;
+  if (requestedDelete) {
+    if (
+      !isLocalStudioDevMode() ||
+      !isDirectCanonicalLoopbackRequest(c.req.raw) ||
+      !hasMatchingOrigin(c.req.raw)
+    )
+      return c.json(
+        { error: "Studio deletion is only available on loopback." },
+        403,
+      );
+  }
   const isBuiltInApi = path.startsWith("/api/");
   // Without server.auth the framework permits its built-in routes by default.
   // In the exact CLI dev child, restore a fail-closed boundary here. Framework
@@ -316,6 +392,7 @@ export async function studioSupervisorMiddleware(
         c.req.raw.headers.has("authorization") ? 401 : 403,
       );
     if (
+      !requestedDelete &&
       !canAccessBuiltInStudioRoute(devPrincipal, {
         method: c.req.method,
         path,
@@ -337,12 +414,11 @@ export async function studioSupervisorMiddleware(
     !principalFromHeaders(c.req.raw.headers)
   )
     return c.json({ error: "Authentication required." }, 401);
-  const requestedHistory = historyRoute(path);
   const isNativeSupervisor = nativeSupervisorRoute.test(path);
   const isScopedMemory = scopedStudioMemoryRoute(path, c.req.method);
   if (!isNativeSupervisor && !isScopedMemory && !requestedHistory)
     return next();
-  if (requestedHistory && c.req.method !== "GET")
+  if (requestedHistory && c.req.method !== "GET" && !requestedDelete)
     return c.json({ error: "Method not allowed." }, 405);
   if (isNativeSupervisor && c.req.method !== "POST")
     return c.json({ error: "Method not allowed." }, 405);
@@ -355,6 +431,8 @@ export async function studioSupervisorMiddleware(
   )
     return c.json({ error: "Insufficient authority." }, 403);
 
+  if (requestedDelete)
+    return studioHistoryResponse(c, principal, requestedDelete, true);
   if (requestedHistory)
     return studioHistoryResponse(c, principal, requestedHistory);
 
