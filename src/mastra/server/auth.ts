@@ -14,6 +14,10 @@ export interface SupportPrincipal {
   tenantId: string;
   roles: SupportRole[];
   expiresAt: string;
+  /** Only present on a server-signed demo bridge session. This is a stable
+   * Intercom contact binding, never a browser supplied authorization field. */
+  intercomContactId?: string;
+  stripeCustomerId?: string;
 }
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
@@ -81,6 +85,60 @@ function safeEqual(left: string, right: string) {
   const a = Buffer.from(left);
   const b = Buffer.from(right);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+function demoBridgeSigningKey() {
+  const value = process.env.DEMO_AUTH_BRIDGE_SIGNING_KEY;
+  return value && value.length >= 32 ? value : undefined;
+}
+/** The Hono demo keeps this signed assertion on its server and sends it only
+ * to the loopback support API. It exists so the main service can retain its
+ * own exact owner checks without receiving demo passwords or sessions. */
+export function verifyDemoBridgeSession(
+  token: string,
+): SupportPrincipal | undefined {
+  const signingKey = demoBridgeSigningKey();
+  if (!signingKey) return undefined;
+  const [payload, provided] = token.split(".");
+  if (!payload || !provided) return undefined;
+  const expected = createHmac("sha256", signingKey)
+    .update(payload)
+    .digest("base64url");
+  if (!safeEqual(expected, provided)) return undefined;
+  try {
+    const value = JSON.parse(
+      Buffer.from(payload, "base64url").toString("utf8"),
+    ) as {
+      id?: string;
+      email?: string;
+      tenantId?: string;
+      roles?: string[];
+      expiresAt?: string;
+      intercomContactId?: string;
+      stripeCustomerId?: string;
+    };
+    const expires = Date.parse(value.expiresAt ?? "");
+    if (
+      !value.id ||
+      !value.email ||
+      !value.tenantId ||
+      !Number.isFinite(expires) ||
+      expires <= Date.now()
+    )
+      return undefined;
+    if (value.roles?.length !== 1 || value.roles[0] !== "customer")
+      return undefined;
+    return {
+      id: value.id,
+      email: value.email,
+      tenantId: value.tenantId,
+      roles: ["customer"],
+      expiresAt: new Date(expires).toISOString(),
+      intercomContactId: value.intercomContactId,
+      stripeCustomerId: value.stripeCustomerId,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 export function issueLocalSession(
@@ -151,7 +209,8 @@ export function principalFromHeaders(
 ): SupportPrincipal | undefined {
   const value = headers.get("authorization");
   if (!value?.startsWith("Bearer ")) return undefined;
-  return verifyLocalSession(value.slice("Bearer ".length));
+  const token = value.slice("Bearer ".length);
+  return verifyLocalSession(token) ?? verifyDemoBridgeSession(token);
 }
 
 function sessionFromCookie(headers: Headers) {
@@ -235,7 +294,12 @@ export function canAccessCase(
     )
   )
     return true;
-  return supportCase.metadata.ownerId === principal.id;
+  return (
+    supportCase.metadata.ownerId === principal.id ||
+    (principal.intercomContactId !== undefined &&
+      supportCase.metadata.ownerId ===
+        `intercom:${principal.tenantId}:contact:${principal.intercomContactId}`)
+  );
 }
 export function hasRole(principal: SupportPrincipal, role: SupportRole) {
   return principal.roles.includes(role);

@@ -4,12 +4,15 @@
   "description": "A template Mastra app demonstrating a customer support agent that triages inbound messages, drafts grounded responses from a policy knowledge base, and requests human approval before issuing refunds.",
   "private": true,
   "workspaces": [
-    "web"
+    "web",
+    "demo"
   ],
   "scripts": {
     "dev": "node --env-file-if-exists=.env --import ./scripts/database-env.mjs ./node_modules/mastra/dist/index.js dev",
     "build": "node --env-file-if-exists=.env --import ./scripts/database-env.mjs ./node_modules/mastra/dist/index.js build",
     "build:web": "npm run --workspace support-refund-agent-web build",
+    "dev:demo": "npm run --workspace support-customer-demo dev",
+    "build:demo": "npm run --workspace support-customer-demo build",
     "check:runtime": "node scripts/check-runtime.mjs",
     "start": "node --env-file-if-exists=.env --import ./scripts/database-env.mjs ./node_modules/mastra/dist/index.js start",
     "check:env": "node --env-file-if-exists=.env scripts/check-env.mjs",
