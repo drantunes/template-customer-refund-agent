@@ -185,7 +185,7 @@ async function studioHistoryResponse(
   if (perPage !== undefined && perPage <= 0)
     return c.json({ error: "Invalid pagination." }, 400);
   const status = query.get("status") ?? undefined;
-  if (status && !workflowRunStatuses.has(status))
+  if (status !== undefined && !workflowRunStatuses.has(status))
     return c.json({ error: "Invalid workflow status." }, 400);
   const parseDate = (value: string | null) =>
     value === null ? undefined : new Date(value);

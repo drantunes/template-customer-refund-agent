@@ -314,6 +314,14 @@ describe("configured Mastra built-in API authorization", () => {
       ).status,
     ).toBe(400);
     expect(
+      (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?status=",
+          { headers },
+        )
+      ).status,
+    ).toBe(400);
+    expect(
       await (
         await server.request(
           "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?fromDate=2026-09-11T00:00:00.000Z",
