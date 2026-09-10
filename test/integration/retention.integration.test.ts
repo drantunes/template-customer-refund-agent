@@ -23,6 +23,108 @@ afterEach(async () => {
 });
 
 describe("DEC-015 retention", () => {
+  it("does not let reconciliation claim a prepared refund while its approval dispatch is live, then recovers it after lease expiry", async () => {
+    const store = await storeForTest();
+    const client = store.getClient();
+    const createdAt = new Date().toISOString();
+    const liveUntil = new Date(Date.now() + 60_000).toISOString();
+    await client.execute({
+      sql: "INSERT INTO support_dispatch(id, case_id, turn_id, run_id, state, attempts, lease_until, lease_token, created_at, updated_at) VALUES (?, ?, ?, ?, 'started', 1, ?, ?, ?, ?)",
+      args: [
+        "dispatch-live-refund",
+        "lease-race-case",
+        "lease-race-turn",
+        "lease-race-run",
+        liveUntil,
+        "dispatch-lease-token",
+        createdAt,
+        createdAt,
+      ],
+    });
+    await client.execute({
+      sql: "INSERT INTO support_stripe_refund_attempts(id, case_id, tenant_id, provider_account_id, command_fingerprint, idempotency_key, dispatch_id, lease_token, turn_id, command_data, status, created_at, updated_at, next_attempt_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?, ?)",
+      args: [
+        "attempt-live-refund",
+        "lease-race-case",
+        "local-demo",
+        "acct",
+        "lease-race-fingerprint",
+        "lease-race-key",
+        "dispatch-live-refund",
+        "dispatch-lease-token",
+        "lease-race-turn",
+        "{}",
+        createdAt,
+        createdAt,
+        new Date(0).toISOString(),
+      ],
+    });
+    // This is the production interleaving: preparation completed, a
+    // reconciler polls before the dispatcher persists its Stripe request.
+    expect(await store.claimableStripeRefundAttempts()).toEqual([]);
+    await client.execute({
+      sql: "UPDATE support_dispatch SET state = 'claimed', lease_until = ? WHERE id = ?",
+      args: [new Date(0).toISOString(), "dispatch-live-refund"],
+    });
+    const reacquired = await store.claimDispatchForResume(
+      "lease-race-case",
+      "lease-race-run",
+      "lease-race-turn",
+    );
+    expect(reacquired).toMatchObject({ id: "dispatch-live-refund" });
+    expect(reacquired!.leaseToken).not.toBe("dispatch-lease-token");
+    // The attempt retains its original lease token. A fresh active dispatch
+    // generation for the same durable dispatch must still fence reconciliation.
+    expect(await store.claimableStripeRefundAttempts()).toEqual([]);
+    await client.execute({
+      sql: "UPDATE support_dispatch SET lease_until = ? WHERE id = ?",
+      args: [new Date(0).toISOString(), "dispatch-live-refund"],
+    });
+    const recovered = await store.claimableStripeRefundAttempts();
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({
+      idempotencyKey: "lease-race-key",
+      status: "prepared",
+    });
+    // The reverse race is just as important: a recovery resume cannot replace
+    // its dispatch token while reconciliation owns the prepared attempt.
+    await client.execute({
+      sql: "UPDATE support_dispatch SET state = 'suspended', lease_until = ? WHERE id = ?",
+      args: [new Date(0).toISOString(), "dispatch-live-refund"],
+    });
+    expect(
+      await store.claimDispatchForResume(
+        "lease-race-case",
+        "lease-race-run",
+        "lease-race-turn",
+      ),
+    ).toBeUndefined();
+    await client.execute({
+      sql: "UPDATE support_stripe_refund_attempts SET reconcile_lease_until = ? WHERE idempotency_key = ?",
+      args: [new Date(0).toISOString(), "lease-race-key"],
+    });
+    expect(
+      await client.execute({
+        sql: "SELECT state, lease_until, lease_token FROM support_dispatch WHERE id = ?",
+        args: ["dispatch-live-refund"],
+      }),
+    ).toMatchObject({ rows: [{ state: "suspended" }] });
+    expect(
+      await client.execute({
+        sql: "SELECT d.id FROM support_dispatch d WHERE d.case_id = ? AND d.state = 'suspended' AND d.turn_id = ? AND NOT EXISTS (SELECT 1 FROM support_stripe_refund_attempts r WHERE r.dispatch_id = d.id AND r.reconcile_lease_until > ?)",
+        args: ["lease-race-case", "lease-race-turn", new Date().toISOString()],
+      }),
+    ).toMatchObject({ rows: [{ id: "dispatch-live-refund" }] });
+    await expect(
+      store.claimDispatchForResume(
+        "lease-race-case",
+        "lease-race-run",
+        "lease-race-turn",
+      ),
+    ).resolves.toMatchObject({ id: "dispatch-live-refund" });
+    await store.close();
+  });
+
   it("migrates an existing credit attempt into the target reservation without losing its receipt", async () => {
     const path = temporaryDatabasePath("phase008-credit-migration");
     files.push(path, `${path}-shm`, `${path}-wal`);

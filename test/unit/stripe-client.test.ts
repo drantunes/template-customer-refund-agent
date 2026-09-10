@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { StripeClient } from "../../src/mastra/providers/stripe/client";
+import {
+  StripeClient,
+  StripeHttpError,
+} from "../../src/mastra/providers/stripe/client";
 import {
   STRIPE_API_VERSION,
   type StripeSandboxConfig,
@@ -22,6 +25,30 @@ const binding = {
 };
 
 describe("Stripe fetch mapping", () => {
+  it("keeps only allow-listed diagnostics from a hostile Stripe error body", async () => {
+    const client = new StripeClient(config, async () =>
+      Response.json(
+        {
+          error: {
+            code: "rk_test_synthetic",
+            type: "attacker-controlled-type",
+            message: "SYNTHETIC-PRIVATE-STRIPE-BODY",
+            payment_intent: "pi_private",
+          },
+        },
+        { status: 400, headers: { "request-id": "rk_test_header" } },
+      ),
+    );
+    await expect(
+      (
+        client as unknown as { request(path: string): Promise<unknown> }
+      ).request("/v1/private"),
+    ).rejects.toMatchObject<Partial<StripeHttpError>>({
+      status: 400,
+      diagnostic: {},
+    });
+  });
+
   it("creates one exact negative customer-balance transaction for a monthly subscription credit", async () => {
     const commandBase = {
       approvalCaseId: "case_credit",

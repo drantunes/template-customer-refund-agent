@@ -1121,6 +1121,7 @@ function nativeRefundStripeTransport(input: {
     accountGets: number;
     gets: string[];
     keys: string[];
+    failRefundHistory?: boolean;
   };
   firstPostThrows?: boolean;
   barrier?: (
@@ -1175,7 +1176,14 @@ function nativeRefundStripeTransport(input: {
     if (path === "/v1/subscriptions")
       return Response.json({ data: [], has_more: false });
     if (path === "/v1/refunds" && request.method === "GET")
-      return Response.json({ data: [], has_more: false });
+      if (input.observed.failRefundHistory)
+        return Response.json(
+          {
+            error: { code: "resource_missing", type: "invalid_request_error" },
+          },
+          { status: 400, headers: { "request-id": "req_NoIdTerminal123" } },
+        );
+      else return Response.json({ data: [], has_more: false });
     if (path === "/v1/refunds" && request.method === "POST") {
       input.observed.posts += 1;
       input.observed.keys.push(request.headers.get("idempotency-key") ?? "");
@@ -1201,6 +1209,154 @@ function nativeRefundStripeTransport(input: {
 }
 
 describe("native approval workflow recovery", () => {
+  it("keeps the active approval dispatch through a paused refund preflight so reconciliation cannot steal its prepared attempt", async () => {
+    const caseId = `native-refund-preflight-reconcile-${crypto.randomUUID()}`;
+    enableSyntheticStripe();
+    let fingerprint = "";
+    let releasePreflight!: () => void;
+    let preflightStarted!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releasePreflight = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      preflightStarted = resolve;
+    });
+    let holdRefundHistory = false;
+    const observed = {
+      posts: 0,
+      accountGets: 0,
+      gets: [] as string[],
+      keys: [] as string[],
+    };
+    vi.stubGlobal(
+      "fetch",
+      nativeRefundStripeTransport({
+        caseId,
+        fingerprint: () => fingerprint,
+        observed,
+        barrier: (path) =>
+          holdRefundHistory && path === "/v1/refunds"
+            ? { started: preflightStarted, release }
+            : undefined,
+      }),
+    );
+    const initial = await setup(caseId, undefined, undefined, undefined, {
+      providerBindings: syntheticStripeBindings(caseId),
+    });
+    const native = initial.native!;
+    fingerprint = native.fingerprint;
+    const command = (await initial.caseStore.getAction(
+      caseId,
+      "refund-command",
+      fingerprint,
+    )) as { idempotencyKey: string };
+    holdRefundHistory = true;
+    const approval = approveNativeRefund(initial.app, caseId, fingerprint);
+    await started;
+    expect(
+      await initial.caseStore.stripeRefundAttempt(command.idempotencyKey),
+    ).toMatchObject({ status: "prepared" });
+    const { reconcileStripeRefundAttempts } =
+      await import("../../src/mastra/providers/stripe/reconciliation");
+    expect(await reconcileStripeRefundAttempts(initial.caseStore)).toBe(0);
+    releasePreflight();
+    expect((await approval).status).toBe(200);
+    expect(observed.posts).toBe(1);
+    expect(await initial.caseStore.get(caseId)).toMatchObject({
+      status: "resolved",
+      refundResult: { status: "executed" },
+    });
+  });
+
+  it("recognizes a no-id terminal refund failure on restart before resuming its consumed native snapshot", async () => {
+    const caseId = `native-refund-no-id-restart-${crypto.randomUUID()}`;
+    enableSyntheticStripe();
+    let fingerprint = "";
+    const observed = {
+      posts: 0,
+      accountGets: 0,
+      gets: [] as string[],
+      keys: [] as string[],
+      failRefundHistory: false,
+    };
+    vi.stubGlobal(
+      "fetch",
+      nativeRefundStripeTransport({
+        caseId,
+        fingerprint: () => fingerprint,
+        observed,
+      }),
+    );
+    const initial = await setup(caseId, undefined, undefined, undefined, {
+      providerBindings: syntheticStripeBindings(caseId),
+    });
+    const native = initial.native!;
+    fingerprint = native.fingerprint;
+    const command = (await initial.caseStore.getAction(
+      caseId,
+      "refund-command",
+      fingerprint,
+    )) as { idempotencyKey: string };
+    observed.failRefundHistory = true;
+    expect(
+      (await approveNativeRefund(initial.app, caseId, fingerprint)).status,
+    ).toBe(200);
+    expect(
+      await initial.caseStore.stripeRefundAttempt(command.idempotencyKey),
+    ).toMatchObject({ status: "failed", refundId: undefined });
+    const workflowRunId = (await initial.caseStore.get(caseId))!.workflowRunId!;
+    expect(
+      await initial.mastra
+        .getWorkflow("resolveSupportCaseWorkflow")
+        .getWorkflowRunById(workflowRunId),
+    ).toMatchObject({ status: "canceled" });
+    const action = await initial.caseStore.getAction(
+      caseId,
+      "refund-failure",
+      fingerprint,
+    );
+    expect(action).toMatchObject({
+      classification: "confirmed-no-effect",
+      diagnostic: {
+        stage: "preflight",
+        status: 400,
+        code: "resource_missing",
+        type: "invalid_request_error",
+        requestId: "req_NoIdTerminal123",
+      },
+    });
+    // Model a process crash after durable finalization but before the worker
+    // records its terminal dispatch state. Recovery must not resume the tool.
+    await initial.caseStore.getClient().execute({
+      sql: "UPDATE support_dispatch SET state = 'suspended', lease_until = NULL, lease_token = NULL WHERE case_id = ?",
+      args: [caseId],
+    });
+    const resumeSpy = vi.spyOn(
+      await import("../../src/mastra/providers/native-execution"),
+      "resumeApprovedNativeTool",
+    );
+    await initial.recoverApprovedNativeDecisions(
+      initial.mastra,
+      initial.caseStore,
+      {
+        disableScorers: true,
+      },
+    );
+    expect(resumeSpy).not.toHaveBeenCalled();
+    expect(observed.posts).toBe(0);
+    expect(
+      await initial.mastra
+        .getWorkflow("resolveSupportCaseWorkflow")
+        .getWorkflowRunById(workflowRunId),
+    ).toMatchObject({ status: "canceled" });
+    expect(
+      await initial.caseStore.getClient().execute({
+        sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ? AND status = 'escalated'",
+        args: [caseId],
+      }),
+    ).toMatchObject({ rows: [{ total: 1 }] });
+  });
+
   it("suspends the real native CREDIT tool, executes one approved monthly credit, and declines without an effect", async () => {
     const policyExcerpt =
       "For a verified service problem on one active monthly subscription, support may propose one credit equal to that subscription's single monthly charge.";
@@ -7581,6 +7737,12 @@ describe("native approval workflow recovery", () => {
         case: { status: "escalated" },
         audit: { classification: "confirmed-no-effect" },
       });
+      const workflowRunId = (await caseStore.get(caseId))!.workflowRunId!;
+      expect(
+        await mastra
+          .getWorkflow("resolveSupportCaseWorkflow")
+          .getWorkflowRunById(workflowRunId),
+      ).toMatchObject({ status: "canceled" });
       const outbox = await caseStore.getClient().execute({
         sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ?",
         args: [caseId],

@@ -44,6 +44,11 @@ export class StripeHttpError extends Error {
   constructor(
     readonly status: number,
     readonly ambiguous = false,
+    readonly diagnostic?: {
+      code?: string;
+      type?: string;
+      requestId?: string;
+    },
   ) {
     super(`Stripe request failed with HTTP ${status}.`);
   }
@@ -139,10 +144,60 @@ export class StripeClient {
       }
       if (!response.ok) {
         // No provider body is propagated: it may contain customer/payment data.
+        let body: Record<string, unknown> | undefined;
+        try {
+          const parsed = await response.clone().json();
+          body =
+            parsed && typeof parsed === "object"
+              ? (parsed as Record<string, unknown>)
+              : undefined;
+        } catch {}
+        const error = body?.error;
+        const providerError =
+          error && typeof error === "object"
+            ? (error as Record<string, unknown>)
+            : undefined;
+        // These are deliberately allow-lists, not generic "safe string"
+        // checks. Error bodies can contain arbitrary provider echoes.
+        const code = (value: unknown) =>
+          typeof value === "string" &&
+          new Set([
+            "amount_too_large",
+            "charge_already_refunded",
+            "charge_disputed",
+            "charge_expired_for_capture",
+            "charge_not_refundable",
+            "idempotency_key_in_use",
+            "parameter_invalid_empty",
+            "parameter_invalid_integer",
+            "parameter_invalid_string_blank",
+            "resource_missing",
+          ]).has(value)
+            ? value
+            : undefined;
+        const type = (value: unknown) =>
+          typeof value === "string" &&
+          new Set([
+            "api_error",
+            "card_error",
+            "idempotency_error",
+            "invalid_request_error",
+          ]).has(value)
+            ? value
+            : undefined;
+        const requestId = (value: unknown) =>
+          typeof value === "string" && /^req_[A-Za-z0-9]{1,64}$/.test(value)
+            ? value
+            : undefined;
         throw new StripeHttpError(
           response.status,
           method === "POST" &&
             (response.status === 408 || response.status >= 500),
+          {
+            code: code(providerError?.code),
+            type: type(providerError?.type),
+            requestId: requestId(response.headers.get("request-id")),
+          },
         );
       }
       let body: unknown;

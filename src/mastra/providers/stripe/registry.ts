@@ -35,6 +35,25 @@ import { StripeClient, StripeHttpError } from "./client";
 
 const PROVIDER_IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
+function safeRefundFailureDiagnostic(
+  error: unknown,
+  stage: "preflight" | "post",
+) {
+  if (!(error instanceof StripeHttpError)) return { stage };
+  return {
+    stage,
+    ...(error.status >= 100 && error.status <= 599
+      ? { status: error.status }
+      : {}),
+    ambiguity: error.ambiguous,
+    ...(error.diagnostic?.code ? { code: error.diagnostic.code } : {}),
+    ...(error.diagnostic?.type ? { type: error.diagnostic.type } : {}),
+    ...(error.diagnostic?.requestId
+      ? { requestId: error.diagnostic.requestId }
+      : {}),
+  };
+}
+
 /** A retryable/possibly-replayed conflict cannot prove that Stripe made no
  * effect. Other non-ambiguous client refusals are terminal and never enter
  * unbounded receipt recovery. */
@@ -759,6 +778,7 @@ export class StripeProviderRegistry
       await caseStore.finalizeStripeRefundNoEffectFailure({
         idempotencyKey: command.idempotencyKey,
         fingerprint: command.fingerprint,
+        diagnostic: safeRefundFailureDiagnostic(error, "preflight"),
       });
       throw error;
     }
@@ -819,6 +839,7 @@ export class StripeProviderRegistry
         await caseStore.finalizeStripeRefundNoEffectFailure({
           idempotencyKey: command.idempotencyKey,
           fingerprint: command.fingerprint,
+          diagnostic: safeRefundFailureDiagnostic(error, "post"),
         });
       else
         await caseStore.updateStripeRefundAttempt(command.idempotencyKey, {

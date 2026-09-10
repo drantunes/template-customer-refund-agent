@@ -1094,6 +1094,14 @@ export class CaseStoreFinancial {
   async finalizeStripeRefundNoEffectFailure(input: {
     idempotencyKey: string;
     fingerprint: string;
+    diagnostic?: {
+      stage: "preflight" | "post";
+      status?: number;
+      ambiguity?: boolean;
+      code?: string;
+      type?: string;
+      requestId?: string;
+    };
   }) {
     const tx = await this.client.transaction("write");
     try {
@@ -1152,6 +1160,7 @@ export class CaseStoreFinancial {
           JSON.stringify({
             category: "provider",
             classification: "confirmed-no-effect",
+            ...(input.diagnostic ? { diagnostic: input.diagnostic } : {}),
           }),
           now(),
         ],
@@ -1226,15 +1235,27 @@ export class CaseStoreFinancial {
     const claimedAt = now();
     const leaseUntil = new Date(Date.now() + 30_000).toISOString();
     const rows = await this.client.execute({
-      sql: "SELECT * FROM support_stripe_refund_attempts WHERE status IN ('pending', 'unknown', 'prepared', 'succeeded') AND (next_attempt_at IS NULL OR next_attempt_at <= ?) AND (reconcile_lease_until IS NULL OR reconcile_lease_until < ?) ORDER BY updated_at LIMIT ?",
-      args: [claimedAt, claimedAt, limit],
+      // A prepared attempt belongs to the approval dispatch until its lease
+      // expires.  Reconciliation may inspect it afterwards, but must not turn
+      // it into `unknown` between preflight and persistence of the request.
+      sql: "SELECT * FROM support_stripe_refund_attempts WHERE status IN ('pending', 'unknown', 'prepared', 'succeeded') AND (next_attempt_at IS NULL OR next_attempt_at <= ?) AND (reconcile_lease_until IS NULL OR reconcile_lease_until < ?) AND NOT EXISTS (SELECT 1 FROM support_dispatch d WHERE d.id = support_stripe_refund_attempts.dispatch_id AND d.case_id = support_stripe_refund_attempts.case_id AND d.turn_id = support_stripe_refund_attempts.turn_id AND d.state IN ('claimed', 'started') AND d.lease_until > ?) ORDER BY updated_at LIMIT ?",
+      args: [claimedAt, claimedAt, claimedAt, limit],
     });
     const claimed = [];
     for (const row of rows.rows) {
       const token = crypto.randomUUID();
       const write = await this.client.execute({
-        sql: "UPDATE support_stripe_refund_attempts SET reconcile_lease_token = ?, reconcile_lease_until = ? WHERE id = ? AND status IN ('pending', 'unknown', 'prepared', 'succeeded') AND (reconcile_lease_until IS NULL OR reconcile_lease_until < ?) AND (next_attempt_at IS NULL OR next_attempt_at <= ?)",
-        args: [token, leaseUntil, String(row.id), claimedAt, claimedAt],
+        // Repeat the dispatch predicate in the CAS.  The candidate query is
+        // only an optimization; a dispatch can become active after it reads.
+        sql: "UPDATE support_stripe_refund_attempts SET reconcile_lease_token = ?, reconcile_lease_until = ? WHERE id = ? AND status IN ('pending', 'unknown', 'prepared', 'succeeded') AND (reconcile_lease_until IS NULL OR reconcile_lease_until < ?) AND (next_attempt_at IS NULL OR next_attempt_at <= ?) AND NOT EXISTS (SELECT 1 FROM support_dispatch d WHERE d.id = support_stripe_refund_attempts.dispatch_id AND d.case_id = support_stripe_refund_attempts.case_id AND d.turn_id = support_stripe_refund_attempts.turn_id AND d.state IN ('claimed', 'started') AND d.lease_until > ?)",
+        args: [
+          token,
+          leaseUntil,
+          String(row.id),
+          claimedAt,
+          claimedAt,
+          claimedAt,
+        ],
       });
       if (Number(write.rowsAffected ?? 0) === 1) {
         const claimedRow = await this.client.execute({

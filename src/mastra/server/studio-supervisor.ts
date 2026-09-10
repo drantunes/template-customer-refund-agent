@@ -24,6 +24,159 @@ const scopedStudioMemoryRoute = (path: string, method: string) =>
     )) ||
   (method === "POST" && path === "/api/memory/threads");
 
+const studioWorkflowIds = new Map([
+  ["ingestSupportCaseWorkflow", "ingestSupportCaseWorkflow"],
+  ["ingest-support-case", "ingestSupportCaseWorkflow"],
+  ["resolveSupportCaseWorkflow", "resolveSupportCaseWorkflow"],
+  ["resolve-support-case", "resolveSupportCaseWorkflow"],
+  ["indexSupportKnowledgeWorkflow", "indexSupportKnowledgeWorkflow"],
+  ["index-support-knowledge", "indexSupportKnowledgeWorkflow"],
+]);
+
+function historyRoute(path: string) {
+  const match = path.match(/^\/api\/workflows\/([^/]+)\/runs(?:\/([^/]+))?$/);
+  if (!match) return undefined;
+  const workflowId = studioWorkflowIds.get(match[1]);
+  return workflowId ? { workflowId, runId: match[2] } : undefined;
+}
+
+function snapshotCaseId(snapshot: unknown): string | undefined {
+  let value = snapshot;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return undefined;
+    }
+  }
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  // Legacy ingest snapshots have no resourceId. These are stable workflow
+  // outputs, not caller input, and bind directly to a durable support case.
+  const result = record.result as Record<string, unknown> | undefined;
+  if (typeof result?.caseId === "string") return result.caseId;
+  const context = record.context as Record<string, unknown> | undefined;
+  for (const step of ["normalize-inbound-message", "start-resolution"]) {
+    const stepState = context?.[step] as Record<string, unknown> | undefined;
+    const output = stepState?.output as Record<string, unknown> | undefined;
+    if (typeof output?.caseId === "string") return output.caseId;
+  }
+  return undefined;
+}
+
+function snapshotStatus(snapshot: unknown): string | undefined {
+  if (typeof snapshot === "string") {
+    try {
+      snapshot = JSON.parse(snapshot);
+    } catch {
+      return undefined;
+    }
+  }
+  return snapshot && typeof snapshot === "object"
+    ? ((snapshot as { status?: unknown }).status as string | undefined)
+    : undefined;
+}
+
+async function studioHistoryResponse(
+  c: ContextWithMastra,
+  principal: NonNullable<ReturnType<typeof studioPrincipalFromHeaders>>,
+  route: { workflowId: string; runId?: string },
+) {
+  const allCases = await caseStore.list();
+  const allowedCases = allCases.filter((supportCase) =>
+    canAccessCase(principal, supportCase),
+  );
+  const allowedCaseIds = new Set(
+    allowedCases.map((supportCase) => supportCase.id),
+  );
+  const allowedResourceIds = new Set(
+    allowedCases.flatMap((supportCase) => {
+      const ownerId = supportCase.metadata.ownerId;
+      const tenantId = supportCase.metadata.providerBinding?.tenantId;
+      return typeof ownerId === "string" && tenantId === principal.tenantId
+        ? [resourceIdForOwner(ownerId, tenantId)]
+        : [];
+    }),
+  );
+  const client = caseStore.getClient();
+  const dispatches = await client.execute({
+    // The tenant column is authoritative. Local-demo cases may legitimately
+    // use a non-local provider account, so account ids are never a history
+    // authorization filter.
+    sql: "SELECT d.run_id FROM support_dispatch d JOIN support_cases c ON c.id = d.case_id WHERE c.tenant_id = ?",
+    args: [principal.tenantId],
+  });
+  const allowedResolveRunIds = new Set(
+    dispatches.rows.map((row) => String(row.run_id)),
+  );
+  const workflow = c.get("mastra").getWorkflow(route.workflowId);
+  const allows = (run: {
+    runId: string;
+    resourceId?: string;
+    snapshot?: unknown;
+  }) => {
+    if (run.resourceId && allowedResourceIds.has(run.resourceId)) return true;
+    if (
+      route.workflowId === "resolveSupportCaseWorkflow" &&
+      allowedResolveRunIds.has(run.runId)
+    )
+      return true;
+    return (
+      route.workflowId === "ingestSupportCaseWorkflow" &&
+      !!snapshotCaseId(run.snapshot ?? (run as unknown)) &&
+      allowedCaseIds.has(snapshotCaseId(run.snapshot ?? (run as unknown))!)
+    );
+  };
+  const rawRuns = await workflow.listWorkflowRuns({ perPage: false });
+  if (route.runId) {
+    // Processed detail intentionally omits the raw snapshot envelope. Check
+    // its durable list record first so legacy NULL-resource ingest runs retain
+    // their case association without making arbitrary history visible.
+    const stored = rawRuns.runs.find((run) => run.runId === route.runId);
+    const run = await workflow.getWorkflowRunById(route.runId);
+    if (!run || !stored || !allows(stored))
+      return c.json({ error: "Workflow run not found." }, 404);
+    return c.json(run);
+  }
+  const query = new URL(c.req.url).searchParams;
+  const perPageValue = query.get("perPage") ?? query.get("limit");
+  const pageValue = query.get("page");
+  const perPage = perPageValue === null ? undefined : Number(perPageValue);
+  const page = pageValue === null ? 0 : Number(pageValue);
+  if (
+    (perPage !== undefined && (!Number.isInteger(perPage) || perPage <= 0)) ||
+    !Number.isInteger(page) ||
+    page < 0
+  )
+    return c.json({ error: "Invalid pagination." }, 400);
+  const status = query.get("status") ?? undefined;
+  const parseDate = (value: string | null) =>
+    value === null ? undefined : new Date(value);
+  const fromDate = parseDate(query.get("fromDate"));
+  const toDate = parseDate(query.get("toDate"));
+  if (
+    (fromDate && Number.isNaN(fromDate.getTime())) ||
+    (toDate && Number.isNaN(toDate.getTime()))
+  )
+    return c.json({ error: "Invalid date filter." }, 400);
+  const permitted = rawRuns.runs
+    .filter((run) => !status || snapshotStatus(run.snapshot) === status)
+    .filter((run) => !fromDate || run.createdAt >= fromDate)
+    .filter((run) => !toDate || run.createdAt <= toDate)
+    .filter(allows)
+    .sort(
+      (left, right) => right.createdAt.getTime() - left.createdAt.getTime(),
+    );
+  const start = perPage === undefined ? 0 : page * perPage;
+  return c.json({
+    runs:
+      perPage === undefined
+        ? permitted
+        : permitted.slice(start, start + perPage),
+    total: permitted.length,
+  });
+}
+
 type StudioExecutionBody = Record<string, unknown>;
 
 function bodyIsRecord(value: unknown): value is StudioExecutionBody {
@@ -105,9 +258,13 @@ export async function studioSupervisorMiddleware(
   if (isForeignCookieMutation(c.req.raw))
     return c.json({ error: "Cross-origin cookie mutation denied." }, 403);
   const path = new URL(c.req.url).pathname;
+  const requestedHistory = historyRoute(path);
   const isNativeSupervisor = nativeSupervisorRoute.test(path);
   const isScopedMemory = scopedStudioMemoryRoute(path, c.req.method);
-  if (!isNativeSupervisor && !isScopedMemory) return next();
+  if (!isNativeSupervisor && !isScopedMemory && !requestedHistory)
+    return next();
+  if (requestedHistory && c.req.method !== "GET")
+    return c.json({ error: "Method not allowed." }, 405);
   if (isNativeSupervisor && c.req.method !== "POST")
     return c.json({ error: "Method not allowed." }, 405);
 
@@ -118,6 +275,9 @@ export async function studioSupervisorMiddleware(
     (!hasRole(principal, "support-agent") && !hasRole(principal, "admin"))
   )
     return c.json({ error: "Insufficient authority." }, 403);
+
+  if (requestedHistory)
+    return studioHistoryResponse(c, principal, requestedHistory);
 
   if (isScopedMemory) {
     const agentId = new URL(c.req.url).searchParams.get("agentId");

@@ -409,6 +409,21 @@ export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipa
       user.roles.some((role) => role === "support-agent" || role === "admin")
     )
       return true;
+    // History is served by the Studio middleware. It derives tenant scope from
+    // durable case associations and deliberately ignores any requested
+    // resourceId; the framework's single-resource handler cannot represent
+    // the tenant-wide staff read scope safely.
+    const studioHistoryRoute =
+      method === "GET" &&
+      /^\/(?:api\/)?workflows\/(?:ingestSupportCaseWorkflow|resolveSupportCaseWorkflow|indexSupportKnowledgeWorkflow|ingest-support-case|resolve-support-case|index-support-knowledge)\/runs(?:\/[^/]+)?$/.test(
+        path,
+      );
+    if (
+      studioHistoryRoute &&
+      user.tenantId === "local-demo" &&
+      user.roles.some((role) => role === "support-agent" || role === "admin")
+    )
+      return true;
     const studioChromeMetadata = new Set([
       "/api/agents/providers",
       "/api/editor/builder/settings",

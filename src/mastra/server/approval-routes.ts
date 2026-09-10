@@ -250,14 +250,21 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
         attempt &&
         attempt.caseId === caseId &&
         attempt.fingerprint === command.fingerprint;
-      const failedStripeAttempt =
-        exactAttempt &&
-        attempt.status === "failed" &&
-        (isCredit || ("refundId" in attempt && Boolean(attempt.refundId)));
+      const failedStripeAttempt = exactAttempt && attempt.status === "failed";
       // The authoritative failure finalizer has already closed the immutable
       // turn and queued its one staff-review reply. An HTTP approval must not
       // turn a superseded success effect into a second native continuation.
       if (failedStripeAttempt) {
+        const terminalCase = (await caseStore.get(caseId))!;
+        // The financial failure is already finalized before this branch.  A
+        // cancellation makes the enclosing Studio history truthful without
+        // resuming the consumed approval tool or creating another reply.
+        if (terminalCase.workflowRunId) {
+          const terminalRun = await resolveWorkflow.createRun({
+            runId: terminalCase.workflowRunId,
+          });
+          await terminalRun.cancel();
+        }
         const completed = await caseStore.completeDispatch(
           dispatch.id,
           "completed",

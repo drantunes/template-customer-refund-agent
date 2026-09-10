@@ -336,9 +336,18 @@ async function hasFailedStripeRefundAttempt(
     attempt &&
     attempt.caseId === caseId &&
     attempt.fingerprint === fingerprint &&
-    attempt.refundId &&
     attempt.status === "failed",
   );
+}
+
+async function cancelTerminalRefundWorkflow(
+  mastra: NativeRecoveryMastra,
+  workflowRunId: string,
+) {
+  const run = await mastra
+    .getWorkflow("resolveSupportCaseWorkflow")
+    .createRun({ runId: workflowRunId });
+  await run.cancel();
 }
 
 export async function recoverApprovedNativeDecisions(
@@ -389,6 +398,29 @@ export async function recoverApprovedNativeDecisions(
                 command: refundCommand,
               })
           : false;
+      // A confirmed no-effect failure consumes the native approval snapshot.
+      // On restart, detect it before any resume attempt and close the enclosing
+      // run after the durable case/outbox projection already exists.
+      if (
+        item.approved &&
+        refundCommand &&
+        (await hasFailedStripeRefundAttempt(
+          store,
+          item.caseId,
+          item.fingerprint,
+          refundCommand,
+        ))
+      ) {
+        await cancelTerminalRefundWorkflow(mastra, item.workflowRunId);
+        await store.completeDispatch(
+          dispatch.id,
+          "completed",
+          undefined,
+          dispatch.leaseToken,
+        );
+        recovered += 1;
+        continue;
+      }
       await withDispatchLeaseScope(
         {
           dispatchId: dispatch.id,
@@ -434,6 +466,7 @@ export async function recoverApprovedNativeDecisions(
           refundCommand,
         ))
       ) {
+        await cancelTerminalRefundWorkflow(mastra, item.workflowRunId);
         await store.completeDispatch(
           dispatch.id,
           "completed",

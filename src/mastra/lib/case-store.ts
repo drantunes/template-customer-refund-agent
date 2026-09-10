@@ -668,6 +668,14 @@ export class CaseStore {
   async finalizeStripeRefundNoEffectFailure(input: {
     idempotencyKey: string;
     fingerprint: string;
+    diagnostic?: {
+      stage: "preflight" | "post";
+      status?: number;
+      ambiguity?: boolean;
+      code?: string;
+      type?: string;
+      requestId?: string;
+    };
   }) {
     await this.ensured();
     return this.financial.finalizeStripeRefundNoEffectFailure(input);

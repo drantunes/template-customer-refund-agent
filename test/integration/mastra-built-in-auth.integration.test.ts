@@ -136,6 +136,129 @@ afterEach(async () => {
 });
 
 describe("configured Mastra built-in API authorization", () => {
+  it("filters legacy NULL-resource workflow history before tenant totals, pagination, and detail", async () => {
+    const { mastra, server } = await configuredServer();
+    const { caseStore } = await import("../../src/mastra/lib/case-store");
+    const createdAt = new Date("2026-09-10T00:00:00.000Z");
+    const localCase = {
+      id: "studio-history-local",
+      externalId: "studio-history-local-event",
+      source: "mock-email" as const,
+      customer: { email: "alex@example.com" },
+      subject: "synthetic history",
+      messages: [],
+      status: "resolved" as const,
+      createdAt: createdAt.toISOString(),
+      updatedAt: createdAt.toISOString(),
+      metadata: {
+        ownerId: "customer-alex",
+        providerBinding: {
+          tenantId: "local-demo",
+          providerKind: "local" as const,
+          providerAccountId: "history-account",
+          externalConversationId: "history-local",
+        },
+      },
+    };
+    await caseStore.create(localCase);
+    await caseStore.create({
+      ...localCase,
+      id: "studio-history-foreign",
+      externalId: "studio-history-foreign-event",
+      metadata: {
+        ...localCase.metadata,
+        ownerId: "other-tenant-agent",
+        providerBinding: {
+          ...localCase.metadata.providerBinding,
+          tenantId: "other-tenant",
+          externalConversationId: "history-foreign",
+        },
+      },
+    });
+    await caseStore.getClient().execute({
+      sql: "INSERT INTO support_dispatch(id, case_id, turn_id, run_id, state, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, 'completed', 1, ?, ?)",
+      args: [
+        "studio-history-dispatch",
+        localCase.id,
+        "studio-history-turn",
+        "studio-history-authorized",
+        createdAt.toISOString(),
+        createdAt.toISOString(),
+      ],
+    });
+    const runs = [
+      {
+        workflowName: "resolveSupportCaseWorkflow",
+        runId: "studio-history-authorized",
+        snapshot: { status: "suspended" },
+        createdAt,
+        updatedAt: createdAt,
+      },
+      {
+        workflowName: "resolveSupportCaseWorkflow",
+        runId: "studio-history-foreign",
+        snapshot: { status: "suspended" },
+        createdAt: new Date(createdAt.getTime() + 1),
+        updatedAt: createdAt,
+      },
+    ];
+    const originalWorkflow = mastra.getWorkflow.bind(mastra);
+    vi.spyOn(mastra, "getWorkflow").mockImplementation((id) => {
+      if (id !== "resolveSupportCaseWorkflow") return originalWorkflow(id);
+      return {
+        listWorkflowRuns: async () => ({ runs, total: runs.length }),
+        getWorkflowRunById: async (runId: string) =>
+          runs.find((run) => run.runId === runId)
+            ? { runId, workflowName: id, status: "suspended" }
+            : null,
+      } as never;
+    });
+    const headers = {
+      authorization: `Bearer ${issueLocalSession({ id: "support-agent-demo" })}`,
+    };
+    const list = await server.request(
+      "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?perPage=1&page=0&resourceId=attacker&status=suspended",
+      { headers },
+    );
+    expect(list.status).toBe(200);
+    expect(await list.json()).toMatchObject({
+      total: 1,
+      runs: [{ runId: "studio-history-authorized" }],
+    });
+    expect(
+      await (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?fromDate=2026-09-11T00:00:00.000Z",
+          { headers },
+        )
+      ).json(),
+    ).toMatchObject({ total: 0, runs: [] });
+    expect(
+      (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?toDate=not-a-date",
+          { headers },
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs/studio-history-authorized",
+          { headers },
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs/studio-history-foreign",
+          { headers },
+        )
+      ).status,
+    ).toBe(404);
+  });
+
   it("requires bearer authentication for the OpenAPI contract it returns", async () => {
     const { server } = await configuredServer();
 
@@ -382,11 +505,24 @@ describe("configured Mastra built-in API authorization", () => {
       },
     );
     expect(otherTenant.status).toBe(403);
+    const staffHistory = await server.request(
+      "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?resourceId=attacker&perPage=1&page=0",
+      { headers: staffHeaders },
+    );
+    expect(staffHistory.status).toBe(200);
+    expect(await staffHistory.json()).toMatchObject({
+      runs: expect.any(Array),
+      total: expect.any(Number),
+    });
     expect(
       (
         await server.request(
           "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs",
-          { headers: staffHeaders },
+          {
+            headers: {
+              authorization: `Bearer ${issueLocalSession({ id: "customer-alex" })}`,
+            },
+          },
         )
       ).status,
     ).toBe(403);
