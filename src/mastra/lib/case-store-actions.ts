@@ -312,7 +312,7 @@ export class CaseStoreActions {
           t.id AS turn_id, d.approved AS approved, i.effect AS receipt,
           EXISTS(SELECT 1 FROM support_actions f WHERE f.case_id = a.case_id
             AND f.fingerprint = a.fingerprint
-            AND f.kind IN ('refund-failure', 'refund-uncertain')) AS failed
+            AND f.kind IN ('refund-failure', 'refund-uncertain', 'subscription-credit-failure')) AS failed
         FROM support_actions a
         JOIN support_turns t ON t.case_id = a.case_id
           AND t.command_fingerprint = a.fingerprint
@@ -425,7 +425,7 @@ export class CaseStoreActions {
       this.client.execute({
         // A workflow/delivery failure after a successful refund is not a
         // financial failure. Only an explicitly durable provider failure is.
-        sql: `SELECT COUNT(*) AS total FROM support_actions WHERE kind = 'refund-failure' AND case_id IN (${placeholders})`,
+        sql: `SELECT COUNT(*) AS total FROM support_actions WHERE kind IN ('refund-failure', 'subscription-credit-failure') AND case_id IN (${placeholders})`,
         args: caseIds,
       }),
       this.client.execute({
@@ -488,11 +488,20 @@ export class CaseStoreActions {
     // arrives, so never expose that stale row after the ledger terminalizes
     // failed/quarantined. Local effects have no Stripe attempt and retain the
     // original direct idempotency behavior.
-    const ledger = await this.client.execute({
+    const refundLedger = await this.client.execute({
       sql: "SELECT status FROM support_stripe_refund_attempts WHERE idempotency_key = ?",
       args: [key],
     });
-    if (ledger.rows[0] && String(ledger.rows[0].status) !== "succeeded")
+    const creditLedger = await this.client.execute({
+      sql: "SELECT status FROM support_stripe_subscription_credit_attempts WHERE idempotency_key = ?",
+      args: [key],
+    });
+    if (
+      (refundLedger.rows[0] &&
+        String(refundLedger.rows[0].status) !== "succeeded") ||
+      (creditLedger.rows[0] &&
+        String(creditLedger.rows[0].status) !== "succeeded")
+    )
       return undefined;
     const result = await this.client.execute({
       sql: "SELECT fingerprint, effect FROM support_idempotency WHERE idempotency_key = ?",

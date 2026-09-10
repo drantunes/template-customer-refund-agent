@@ -675,6 +675,7 @@ function syntheticStripeBindings(caseId: string): CaseProviderBindings {
 function creditResponseLossStripeTransport(input: {
   caseId: string;
   fingerprint: () => string;
+  postStatus?: number;
   observed: {
     posts: number;
     idempotencyKeys: string[];
@@ -792,6 +793,11 @@ function creditResponseLossStripeTransport(input: {
       input.observed.idempotencyKeys.push(
         request.headers.get("idempotency-key") ?? "",
       );
+      if (input.postStatus)
+        return Response.json(
+          { error: "synthetic" },
+          { status: input.postStatus },
+        );
       input.observed.remoteCommitted = true;
       throw new TypeError(
         "synthetic response loss after committed credit POST",
@@ -1401,6 +1407,122 @@ describe("native approval workflow recovery", () => {
     ).toBe(0);
     expect(observed.posts).toBe(1);
   });
+
+  it.each([400, 401, 403, 404, 422])(
+    "terminalizes a definite Stripe credit refusal HTTP %i once without entering receipt recovery",
+    async (postStatus) => {
+      const caseId = `native-credit-refusal-${crypto.randomUUID()}`;
+      enableSyntheticStripe();
+      let fingerprint = "";
+      const observed = {
+        posts: 0,
+        idempotencyKeys: [] as string[],
+        remoteCommitted: false,
+      };
+      vi.stubGlobal(
+        "fetch",
+        creditResponseLossStripeTransport({
+          caseId,
+          fingerprint: () => fingerprint,
+          postStatus,
+          observed,
+        }),
+      );
+      const initial = await setup(caseId, undefined, undefined, undefined, {
+        credit: true,
+        providerBindings: syntheticStripeBindings(caseId),
+        message: "Our service outage prevented me from using my subscription.",
+        triage: {
+          intent: "service_problem",
+          urgency: "normal",
+          sentiment: "negative",
+          requiresHumanReview: false,
+          confidence: 1,
+          rationale: "Verified service outage.",
+        },
+        responseModel: jsonModel({
+          draftResponse:
+            "After approval, we can add a credit to your next bill.",
+          citedSources: ["service-problem-credit-policy"],
+          selectedPolicyExcerpts: [
+            {
+              source: "service-problem-credit-policy",
+              excerpt:
+                "For a verified service problem on one active monthly subscription, support may propose one credit equal to that subscription's single monthly charge.",
+            },
+          ],
+          recommendRefund: false,
+          resolutionAction: "subscription_credit",
+          subscriptionCreditAmount: 49,
+          subscriptionCreditCurrency: "USD",
+          subscriptionCreditReason: "Verified service outage",
+          requiresEscalation: false,
+        }) as never,
+      });
+      const native = initial.native!;
+      fingerprint = native.fingerprint;
+      const command = (await initial.caseStore.getAction(
+        caseId,
+        "subscription-credit-command",
+        fingerprint,
+      )) as { idempotencyKey: string };
+      await initial.caseStore.recordApprovalDecision({
+        caseId,
+        turnId: native.turnId,
+        commandFingerprint: fingerprint,
+        principalId: "approver-demo",
+        approved: true,
+        nativeRunId: native.runId,
+        nativeToolCallId: native.toolCallId,
+      });
+      expect(
+        await initial.recoverApprovedNativeDecisions(
+          initial.mastra,
+          initial.caseStore,
+          { disableScorers: true },
+        ),
+      ).toBe(1);
+      expect(observed).toMatchObject({ posts: 1, remoteCommitted: false });
+      expect(
+        await initial.caseStore.stripeSubscriptionCreditAttempt(
+          command.idempotencyKey,
+        ),
+      ).toMatchObject({
+        status: "failed",
+        providerStatus: "confirmed-no-effect",
+        terminalAt: expect.any(String),
+      });
+      expect(
+        await initial.caseStore.getAction(
+          caseId,
+          "subscription-credit-failure",
+          fingerprint,
+        ),
+      ).toMatchObject({ classification: "confirmed-no-effect" });
+      const failedCase = await initial.caseStore.get(caseId);
+      expect(failedCase).toMatchObject({
+        status: "escalated",
+        finalResponse: expect.stringMatching(/additional review/i),
+      });
+      await expect(
+        initial.caseStore.customerFinancialRequests([caseId]),
+      ).resolves.toMatchObject([
+        { type: "subscription_credit", status: "failed" },
+      ]);
+      const { computeSubscriptionCreditMetrics } =
+        await import("../../src/mastra/lib/monitoring");
+      await expect(
+        computeSubscriptionCreditMetrics([failedCase!]),
+      ).resolves.toMatchObject({ failed: 1 });
+      expect(
+        await initial.recoverApprovedNativeDecisions(
+          initial.mastra,
+          initial.caseStore,
+          { disableScorers: true },
+        ),
+      ).toBe(0);
+    },
+  );
 
   it("escalates expired or replaced policy before a native Stripe credit can POST", async () => {
     for (const scenario of ["expired", "replaced"] as const) {

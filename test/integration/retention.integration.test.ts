@@ -23,6 +23,211 @@ afterEach(async () => {
 });
 
 describe("DEC-015 retention", () => {
+  it("migrates an existing credit attempt into the target reservation without losing its receipt", async () => {
+    const path = temporaryDatabasePath("phase008-credit-migration");
+    files.push(path, `${path}-shm`, `${path}-wal`);
+    const store = new CaseStore({ url: `file:${path}` });
+    await store.migrate(23);
+    const client = store.getClient();
+    const createdAt = "2026-09-01T00:00:00.000Z";
+    await client.execute({
+      sql: "INSERT INTO support_stripe_subscription_credit_attempts(id, case_id, tenant_id, provider_account_id, command_fingerprint, idempotency_key, dispatch_id, lease_token, turn_id, command_data, status, credit_id, provider_status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'succeeded', ?, ?, ?, ?)",
+      args: [
+        "migration-credit-attempt",
+        "migration-credit-case",
+        "tenant",
+        "acct",
+        "migration-credit-fingerprint",
+        "migration-credit-key",
+        "dispatch",
+        "lease",
+        "turn",
+        JSON.stringify({
+          customerId: "cus_migration",
+          subscriptionId: "sub_migration",
+          reason: "synthetic",
+        }),
+        "cbtxn_migration",
+        "created",
+        createdAt,
+        createdAt,
+      ],
+    });
+    await store.migrate(24);
+    expect(
+      await store.stripeSubscriptionCreditAttempt("migration-credit-key"),
+    ).toMatchObject({
+      status: "succeeded",
+      creditId: "cbtxn_migration",
+      terminalAt: createdAt,
+    });
+    await expect(
+      client.execute(
+        "SELECT tenant_id, provider_account_id, customer_id, subscription_id, idempotency_key, status FROM support_stripe_subscription_credit_reservations",
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          tenant_id: "tenant",
+          provider_account_id: "acct",
+          customer_id: "cus_migration",
+          subscription_id: "sub_migration",
+          idempotency_key: "migration-credit-key",
+          status: "succeeded",
+        },
+      ],
+    });
+    await store.close();
+  });
+
+  it("redacts and minimizes terminal credit attempts while retaining unknown recovery records", async () => {
+    const store = await storeForTest();
+    const client = store.getClient();
+    const now = new Date("2026-09-05T00:00:00.000Z");
+    const old = "2025-05-01T00:00:00.000Z";
+    await client.executeMultiple(`
+      CREATE TABLE IF NOT EXISTS local_subscription_credits (credit_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, customer_id TEXT NOT NULL, subscription_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, reason TEXT NOT NULL, issued_at TEXT NOT NULL);
+      INSERT INTO local_subscription_credits VALUES ('local-retention-credit', 'tenant', 'acct', 'cus_local', 'sub_local', 4900, 'USD', 'SYNTHETIC-CREDIT-REASON', '${old}');
+    `);
+    for (const status of ["succeeded", "unknown"] as const) {
+      const key = `${status}-credit-key`;
+      const fingerprint = `${status}-credit-fingerprint`;
+      await client.execute({
+        sql: "INSERT INTO support_stripe_subscription_credit_attempts(id, case_id, tenant_id, provider_account_id, command_fingerprint, idempotency_key, dispatch_id, lease_token, turn_id, command_data, status, credit_id, provider_status, terminal_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        args: [
+          `${status}-credit-attempt`,
+          `${status}-credit-case`,
+          "tenant",
+          "acct",
+          fingerprint,
+          key,
+          "dispatch",
+          "lease",
+          "turn",
+          JSON.stringify({
+            customerId: `cus_${status}`,
+            subscriptionId: `sub_${status}`,
+            reason: "SYNTHETIC-CREDIT-REASON",
+          }),
+          status,
+          status === "succeeded" ? "cbtxn_terminal" : null,
+          status,
+          status === "succeeded" ? old : null,
+          old,
+          old,
+        ],
+      });
+      await client.execute({
+        sql: "INSERT INTO support_stripe_subscription_credit_reservations(tenant_id, provider_account_id, customer_id, subscription_id, case_id, turn_id, command_fingerprint, idempotency_key, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        args: [
+          "tenant",
+          "acct",
+          `cus_${status}`,
+          `sub_${status}`,
+          `${status}-credit-case`,
+          "turn",
+          fingerprint,
+          key,
+          status,
+          old,
+          old,
+        ],
+      });
+      if (status === "succeeded") {
+        await store.recordEffect(key, fingerprint, {
+          creditId: "cbtxn_terminal",
+        });
+        await client.execute({
+          sql: "UPDATE support_idempotency SET created_at = ? WHERE idempotency_key = ?",
+          args: [old, key],
+        });
+      }
+    }
+    await store.enforceRetention(() => now);
+    const retained = await client.execute(
+      "SELECT status, command_data FROM support_stripe_subscription_credit_attempts ORDER BY idempotency_key",
+    );
+    expect(retained.rows).toEqual([
+      {
+        status: "unknown",
+        command_data: expect.stringContaining('"reason":"[redacted]"'),
+      },
+    ]);
+    expect(
+      await client.execute(
+        "SELECT reason FROM local_subscription_credits WHERE credit_id = 'local-retention-credit'",
+      ),
+    ).toMatchObject({ rows: [{ reason: "[redacted]" }] });
+    await expect(store.idempotency("succeeded-credit-key")).rejects.toThrow(
+      "tombstone",
+    );
+    expect(
+      await client.execute(
+        "SELECT COUNT(*) AS total FROM support_stripe_subscription_credit_reservations",
+      ),
+    ).toMatchObject({ rows: [{ total: 1 }] });
+    await store.close();
+  });
+
+  it("holds one durable subscription-credit reservation across concurrent case attempts", async () => {
+    const store = await storeForTest();
+    const binding = {
+      tenantId: "tenant",
+      providerKind: "stripe" as const,
+      providerAccountId: "acct",
+      externalConversationId: "synthetic-credit-reservation",
+    };
+    const prepare = (
+      caseId: string,
+      fingerprint: string,
+      idempotencyKey: string,
+    ) =>
+      store.prepareStripeSubscriptionCreditAttempt({
+        caseId,
+        binding,
+        customerId: "cus_shared",
+        subscriptionId: "sub_shared",
+        fingerprint,
+        idempotencyKey,
+        dispatchId: `${caseId}-dispatch`,
+        leaseToken: `${caseId}-lease`,
+        turnId: `${caseId}-turn`,
+        command: {
+          caseId,
+          customerId: "cus_shared",
+          subscriptionId: "sub_shared",
+        },
+      });
+    const [first, second] = await Promise.allSettled([
+      prepare("credit-case-a", "credit-fingerprint-a", "credit-key-a"),
+      prepare("credit-case-b", "credit-fingerprint-b", "credit-key-b"),
+    ]);
+    expect(
+      [first, second].filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      [first, second].find((result) => result.status === "rejected"),
+    ).toMatchObject({
+      reason: expect.objectContaining({
+        message: expect.stringContaining("already reserved"),
+      }),
+    });
+    expect(
+      await store
+        .getClient()
+        .execute(
+          "SELECT case_id, command_fingerprint FROM support_stripe_subscription_credit_reservations WHERE customer_id = 'cus_shared' AND subscription_id = 'sub_shared'",
+        ),
+    ).toMatchObject({
+      rows: [
+        expect.objectContaining({
+          case_id: expect.stringMatching(/^credit-case-/),
+        }),
+      ],
+    });
+    await store.close();
+  });
+
   it("rejects partial operational refund metadata before it reaches storage", async () => {
     const store = await storeForTest();
     const createdAt = "2026-09-05T00:00:00.000Z";

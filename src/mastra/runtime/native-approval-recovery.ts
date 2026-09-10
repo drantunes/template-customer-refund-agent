@@ -280,6 +280,26 @@ async function hasUnknownStripeSubscriptionCreditAttempt(
   );
 }
 
+/** A definite Stripe refusal is terminal and already has its one durable
+ * staff-review outcome. Do not resume the consumed native snapshot again. */
+async function hasFailedStripeSubscriptionCreditAttempt(
+  store: CaseStore,
+  caseId: string,
+  fingerprint: string,
+  command: PersistedSubscriptionCreditCommand | undefined,
+) {
+  if (!command?.idempotencyKey) return false;
+  const attempt = await store.stripeSubscriptionCreditAttempt(
+    command.idempotencyKey,
+  );
+  return Boolean(
+    attempt &&
+    attempt.caseId === caseId &&
+    attempt.fingerprint === fingerprint &&
+    attempt.status === "failed",
+  );
+}
+
 /** A native tool can legitimately finish with a Stripe refund in `pending`.
  * The approval snapshot has then been consumed, but settlement is still owned
  * by the durable attempt/reconciliation worker. Treat it as a valid native
@@ -412,6 +432,24 @@ export async function recoverApprovedNativeDecisions(
           item.caseId,
           item.fingerprint,
           refundCommand,
+        ))
+      ) {
+        await store.completeDispatch(
+          dispatch.id,
+          "completed",
+          undefined,
+          dispatch.leaseToken,
+        );
+        recovered += 1;
+        continue;
+      }
+      if (
+        isCredit &&
+        (await hasFailedStripeSubscriptionCreditAttempt(
+          store,
+          item.caseId,
+          item.fingerprint,
+          creditCommand,
         ))
       ) {
         await store.completeDispatch(

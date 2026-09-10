@@ -6,7 +6,7 @@ import { now, parseLegacyCase, caseBinding } from "./case-store-shared";
 
 export class CaseStoreMigrations {
   constructor(private readonly client: Client) {}
-  async migrate(target = 23): Promise<void> {
+  async migrate(target = 24): Promise<void> {
     await this.client.execute(
       "CREATE TABLE IF NOT EXISTS support_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
     );
@@ -14,7 +14,7 @@ export class CaseStoreMigrations {
       "SELECT version FROM support_schema_migrations ORDER BY version",
     );
     let version = Number(applied.rows.at(-1)?.version ?? 0);
-    if (!Number.isInteger(target) || target < 0 || target > 23)
+    if (!Number.isInteger(target) || target < 0 || target > 24)
       throw new Error("Unsupported support schema target version.");
     // Versions 6 through 8 introduced append-only turn, decision, and audit
     // records. Their inverse would discard or weaken durable financial/replay
@@ -131,6 +131,10 @@ export class CaseStoreMigrations {
     }
     if (version === 23) {
       await this.up23();
+      return;
+    }
+    if (version === 24) {
+      await this.up24();
       return;
     }
     if (version === 14) {
@@ -941,6 +945,76 @@ export class CaseStoreMigrations {
       sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (23, ?)",
       args: [now()],
     });
+  }
+  /** A customer/subscription credit is compensation, not a per-case effect.
+   * Reserve that target before any provider preflight so separately approved
+   * cases cannot both observe an empty Stripe ledger and post twice. */
+  private async up24() {
+    const tx = await this.client.transaction("write");
+    try {
+      await tx.executeMultiple(`
+      CREATE TABLE support_stripe_subscription_credit_attempts_v24 (
+        id TEXT PRIMARY KEY,
+        case_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        provider_account_id TEXT NOT NULL,
+        command_fingerprint TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        dispatch_id TEXT NOT NULL,
+        lease_token TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        command_data TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('prepared','succeeded','unknown','failed','quarantined')),
+        credit_id TEXT,
+        provider_status TEXT,
+        terminal_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO support_stripe_subscription_credit_attempts_v24(id, case_id, tenant_id, provider_account_id, command_fingerprint, idempotency_key, dispatch_id, lease_token, turn_id, command_data, status, credit_id, provider_status, terminal_at, created_at, updated_at)
+        SELECT id, case_id, tenant_id, provider_account_id, command_fingerprint, idempotency_key, dispatch_id, lease_token, turn_id, command_data, status, credit_id, provider_status,
+          CASE WHEN status IN ('succeeded','quarantined') THEN updated_at ELSE NULL END,
+          created_at, updated_at
+        FROM support_stripe_subscription_credit_attempts;
+      DROP TABLE support_stripe_subscription_credit_attempts;
+      ALTER TABLE support_stripe_subscription_credit_attempts_v24 RENAME TO support_stripe_subscription_credit_attempts;
+      CREATE UNIQUE INDEX support_stripe_credit_attempt_command
+        ON support_stripe_subscription_credit_attempts(case_id, command_fingerprint);
+      CREATE TABLE IF NOT EXISTS support_stripe_subscription_credit_reservations (
+        tenant_id TEXT NOT NULL,
+        provider_account_id TEXT NOT NULL,
+        customer_id TEXT NOT NULL,
+        subscription_id TEXT NOT NULL,
+        case_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        command_fingerprint TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL CHECK(status IN ('prepared','succeeded','unknown','failed','quarantined')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(tenant_id, provider_account_id, customer_id, subscription_id)
+      );
+      CREATE INDEX IF NOT EXISTS support_stripe_credit_reservation_retention
+        ON support_stripe_subscription_credit_reservations(status, updated_at);
+      INSERT OR IGNORE INTO support_stripe_subscription_credit_reservations(tenant_id, provider_account_id, customer_id, subscription_id, case_id, turn_id, command_fingerprint, idempotency_key, status, created_at, updated_at)
+        SELECT tenant_id, provider_account_id,
+          json_extract(command_data, '$.customerId'), json_extract(command_data, '$.subscriptionId'),
+          case_id, turn_id, command_fingerprint, idempotency_key, status, created_at, updated_at
+        FROM support_stripe_subscription_credit_attempts
+        WHERE json_extract(command_data, '$.customerId') IS NOT NULL
+          AND json_extract(command_data, '$.subscriptionId') IS NOT NULL;
+      `);
+      await tx.execute({
+        sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (24, ?)",
+        args: [now()],
+      });
+      await tx.commit();
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
   }
   private async down(version: number) {
     if (version === 3) {

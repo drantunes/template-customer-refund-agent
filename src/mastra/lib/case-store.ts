@@ -123,7 +123,7 @@ export class CaseStore {
     await this.ready;
   }
 
-  async migrate(target = 23): Promise<void> {
+  async migrate(target = 24): Promise<void> {
     await this.migrations.migrate(target);
   }
 
@@ -560,6 +560,8 @@ export class CaseStore {
   async prepareStripeSubscriptionCreditAttempt(input: {
     caseId: string;
     binding: ProviderBinding;
+    customerId: string;
+    subscriptionId: string;
     fingerprint: string;
     idempotencyKey: string;
     dispatchId: string;
@@ -570,11 +572,20 @@ export class CaseStore {
     await this.ensured();
     return this.financial.prepareStripeSubscriptionCreditAttempt(input);
   }
+  async finalizeStripeSubscriptionCreditNoEffectFailure(input: {
+    idempotencyKey: string;
+    fingerprint: string;
+  }) {
+    await this.ensured();
+    return this.financial.finalizeStripeSubscriptionCreditNoEffectFailure(
+      input,
+    );
+  }
 
   async updateStripeSubscriptionCreditAttempt(
     idempotencyKey: string,
     update: {
-      status: "succeeded" | "unknown" | "quarantined";
+      status: "succeeded" | "unknown" | "failed" | "quarantined";
       creditId?: string;
       providerStatus?: string;
     },

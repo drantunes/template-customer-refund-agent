@@ -35,6 +35,19 @@ import { StripeClient, StripeHttpError } from "./client";
 
 const PROVIDER_IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
+/** A retryable/possibly-replayed conflict cannot prove that Stripe made no
+ * effect. Other non-ambiguous client refusals are terminal and never enter
+ * unbounded receipt recovery. */
+function isDefiniteCreditNoEffect(error: unknown) {
+  return (
+    error instanceof StripeHttpError &&
+    !error.ambiguous &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    ![408, 409, 429].includes(error.status)
+  );
+}
+
 /** A failed final fence proves that this worker made no provider mutation.
  * Keep it distinct from an ambiguous transport failure so callers cannot
  * overwrite a newer worker's recovery claim as if a POST had happened. */
@@ -201,6 +214,8 @@ export class StripeProviderRegistry
     const attempt = await caseStore.prepareStripeSubscriptionCreditAttempt({
       caseId: command.approvalCaseId,
       binding: command.binding,
+      customerId: command.customerId,
+      subscriptionId: command.subscriptionId,
       fingerprint: command.fingerprint,
       idempotencyKey: command.idempotencyKey,
       dispatchId: authorization.dispatchId,
@@ -290,6 +305,15 @@ export class StripeProviderRegistry
           .updateStripeSubscriptionCreditAttempt(command.idempotencyKey, {
             status: "quarantined",
             providerStatus: "pre-dispatch-policy-denied",
+          })
+          .catch(() => undefined);
+        throw error;
+      }
+      if (isDefiniteCreditNoEffect(error)) {
+        await caseStore
+          .finalizeStripeSubscriptionCreditNoEffectFailure({
+            idempotencyKey: command.idempotencyKey,
+            fingerprint: command.fingerprint,
           })
           .catch(() => undefined);
         throw error;

@@ -100,7 +100,7 @@ describe("Stripe fetch mapping", () => {
     expect(posted?.get("currency")).toBe("usd");
   });
 
-  it("rechecks Stripe's balance ledger immediately before a credit POST", async () => {
+  it("fences the credit POST after the final blocked balance-ledger GET", async () => {
     const commandBase = {
       approvalCaseId: "case_credit_preflight",
       binding,
@@ -114,7 +114,92 @@ describe("Stripe fetch mapping", () => {
       ...commandBase,
       fingerprint: subscriptionCreditFingerprint(commandBase),
     };
-    let priorCreditAppeared = false;
+    let releaseLedger!: () => void;
+    let ledgerStarted!: () => void;
+    let policyReplaced = false;
+    let posts = 0;
+    const ledgerStartedPromise = new Promise<void>((resolve) => {
+      ledgerStarted = resolve;
+    });
+    const ledgerRelease = new Promise<void>((resolve) => {
+      releaseLedger = resolve;
+    });
+    const client = new StripeClient(config, async (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/v1/account")
+        return Response.json({ id: config.accountId });
+      if (path === "/v1/subscriptions/sub_1")
+        return Response.json({
+          id: "sub_1",
+          customer: "cus_1",
+          livemode: false,
+          status: "active",
+          cancel_at_period_end: false,
+          items: {
+            data: [
+              {
+                quantity: 1,
+                price: {
+                  currency: "usd",
+                  unit_amount: 4900,
+                  recurring: { interval: "month", interval_count: 1 },
+                },
+              },
+            ],
+          },
+        });
+      if (path === "/v1/customers/cus_1")
+        return Response.json({
+          id: "cus_1",
+          email: "alex@example.com",
+          livemode: false,
+        });
+      if (path === "/v1/customers/cus_1/balance_transactions") {
+        if (request.method === "POST") posts += 1;
+        if (request.method === "GET") {
+          ledgerStarted();
+          await ledgerRelease;
+        }
+        return Response.json({
+          data: [],
+          has_more: false,
+        });
+      }
+      throw new Error(`unexpected ${request.method} ${path}`);
+    });
+
+    const create = client.createSubscriptionCredit(
+      command,
+      "alex@example.com",
+      async () => {
+        if (!policyReplaced)
+          throw new Error("policy fence was evaluated before final ledger GET");
+        throw new Error("policy evidence is no longer current");
+      },
+    );
+    await ledgerStartedPromise;
+    policyReplaced = true;
+    releaseLedger();
+    await expect(create).rejects.toThrow(
+      "policy evidence is no longer current",
+    );
+    expect(posts).toBe(0);
+  });
+
+  it("blocks a prior subscription credit even when its amount differs", async () => {
+    const commandBase = {
+      approvalCaseId: "case_credit_prior_partial",
+      binding,
+      customerId: "cus_1",
+      subscriptionId: "sub_1",
+      amount: { currency: "USD", minor: 4900 },
+      reason: "Verified outage credit",
+      idempotencyKey: "case_credit_prior_partial:turn_1:subscription-credit",
+    };
+    const command = {
+      ...commandBase,
+      fingerprint: subscriptionCreditFingerprint(commandBase),
+    };
     let posts = 0;
     const client = new StripeClient(config, async (request) => {
       const path = new URL(request.url).pathname;
@@ -149,31 +234,26 @@ describe("Stripe fetch mapping", () => {
       if (path === "/v1/customers/cus_1/balance_transactions") {
         if (request.method === "POST") posts += 1;
         return Response.json({
-          data: priorCreditAppeared
-            ? [
-                {
-                  id: "cbtxn_prior",
-                  customer: "cus_1",
-                  livemode: false,
-                  amount: -4900,
-                  currency: "usd",
-                  metadata: {
-                    subscription_id: "sub_1",
-                    command_fingerprint: "another-approved-command",
-                  },
-                },
-              ]
-            : [],
+          data: [
+            {
+              id: "cbtxn_partial",
+              customer: "cus_1",
+              livemode: false,
+              amount: -1200,
+              currency: "eur",
+              metadata: {
+                subscription_id: "sub_1",
+                command_fingerprint: "prior-different-amount",
+              },
+            },
+          ],
           has_more: false,
         });
       }
       throw new Error(`unexpected ${request.method} ${path}`);
     });
-
     await expect(
-      client.createSubscriptionCredit(command, "alex@example.com", async () => {
-        priorCreditAppeared = true;
-      }),
+      client.createSubscriptionCredit(command, "alex@example.com"),
     ).rejects.toThrow("prior Stripe subscription credit");
     expect(posts).toBe(0);
   });

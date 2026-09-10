@@ -649,8 +649,6 @@ export class StripeClient {
       const metadata = value.metadata;
       return (
         value.livemode === false &&
-        value.amount === -command.amount.minor &&
-        String(value.currency).toUpperCase() === command.amount.currency &&
         metadata !== null &&
         typeof metadata === "object" &&
         !Array.isArray(metadata) &&
@@ -692,11 +690,14 @@ export class StripeClient {
         "Subscription credit command fingerprint was tampered with.",
       );
     const target = await this.subscriptionCreditTarget(command, email);
-    await beforeDispatch?.();
     // A separate case can be approved after its quote. Re-read the durable
     // ledger immediately before the provider mutation so it cannot issue a
     // second compensation for the same customer and subscription.
     await this.assertNoPriorSubscriptionCredit(target.customerId, command);
+    // This is deliberately after every awaited preflight and immediately
+    // before the POST. The durable authorization must still be current at the
+    // financial boundary, not merely before a slow ledger lookup.
+    await beforeDispatch?.();
     const response = await this.request(
       `/v1/customers/${encodeURIComponent(target.customerId)}/balance_transactions`,
       {
