@@ -256,6 +256,9 @@ export class LocalRuntime
           customerId: `local:${binding.tenantId}:${text(row.customer_email).toLowerCase()}`,
           customerEmail: text(row.customer_email),
           plan: text(row.plan),
+          recurringInterval: text(row.recurring_interval) as "month" | "year",
+          recurringIntervalCount: Number(row.recurring_interval_count),
+          quantity: Number(row.quantity),
           amount: {
             minor: Number(row.amount_minor),
             currency: text(row.currency),
@@ -535,14 +538,28 @@ export class LocalRuntime
       subscription.customerId !== command.customerId ||
       subscription.status !== "active" ||
       subscription.cancelAtPeriodEnd ||
+      subscription.recurringInterval !== "month" ||
+      subscription.recurringIntervalCount !== 1 ||
+      subscription.quantity !== 1 ||
       subscription.amount.currency !== command.amount.currency ||
       subscription.amount.minor !== command.amount.minor
     )
       throw new Error(
         "Subscription credit requires one verified active monthly subscription with its exact monthly charge.",
       );
-    if (!/monthly/i.test(subscription.plan))
-      throw new Error("Subscription credit requires a monthly subscription.");
+    const prior = await this.client.execute({
+      sql: "SELECT 1 FROM local_subscription_credits WHERE tenant_id = ? AND provider_account_id = ? AND customer_id = ? AND subscription_id = ? LIMIT 1",
+      args: [
+        command.binding.tenantId,
+        command.binding.providerAccountId,
+        command.customerId,
+        command.subscriptionId,
+      ],
+    });
+    if (prior.rows[0])
+      throw new Error(
+        "A prior subscription credit exists for this customer and subscription and requires specialist review.",
+      );
     return {
       approvedAmount: command.amount,
       commandFingerprint: fingerprint,
@@ -683,12 +700,27 @@ export class LocalRuntime
         command.customerId !== `local:${command.binding.tenantId}:${email}` ||
         text(subscription.status) !== "active" ||
         Number(subscription.cancel_at_period_end) === 1 ||
-        !/monthly/i.test(text(subscription.plan)) ||
+        text(subscription.recurring_interval) !== "month" ||
+        Number(subscription.recurring_interval_count) !== 1 ||
+        Number(subscription.quantity) !== 1 ||
         text(subscription.currency) !== command.amount.currency ||
         Number(subscription.amount_minor) !== command.amount.minor
       )
         throw new Error(
           "Subscription credit requires an exact verified active monthly subscription.",
+        );
+      const priorCredit = await tx.execute({
+        sql: "SELECT 1 FROM local_subscription_credits WHERE tenant_id = ? AND provider_account_id = ? AND customer_id = ? AND subscription_id = ? LIMIT 1",
+        args: [
+          command.binding.tenantId,
+          command.binding.providerAccountId,
+          command.customerId,
+          command.subscriptionId,
+        ],
+      });
+      if (priorCredit.rows[0])
+        throw new Error(
+          "A prior subscription credit exists for this customer and subscription and requires specialist review.",
         );
       const executedAt = new Date().toISOString();
       const effect: SubscriptionCreditEffect = {

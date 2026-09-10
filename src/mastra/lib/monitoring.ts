@@ -90,6 +90,7 @@ export interface MonitoringSummary {
   casesConsidered: number;
   funnel: CaseFunnelMetrics;
   refunds: RefundApprovalMetrics;
+  credits: RefundApprovalMetrics;
   feedback: FeedbackMetrics;
   telemetry: {
     observedTraces: number;
@@ -366,6 +367,40 @@ function refundResult(value: unknown) {
 export async function computeRefundApprovalMetrics(
   cases: SupportCase[],
 ): Promise<RefundApprovalMetrics> {
+  return computeFinancialApprovalMetrics(cases, {
+    actionKind: "refund-command",
+    failureKind: "refund",
+    recommended: (draft) => draft?.recommendRefund === true,
+    resultKey: "refundResult",
+    effectsKey: "refundEffects",
+  });
+}
+
+/** Credits have their own immutable command and receipt projection. Keeping
+ * them separate prevents a credit approval or provider failure from changing
+ * the refund rate shown to operators. */
+export async function computeSubscriptionCreditMetrics(
+  cases: SupportCase[],
+): Promise<RefundApprovalMetrics> {
+  return computeFinancialApprovalMetrics(cases, {
+    actionKind: "subscription-credit-command",
+    failureKind: "subscription-credit",
+    recommended: (draft) => draft?.resolutionAction === "subscription_credit",
+    resultKey: "subscriptionCreditResult",
+    effectsKey: "subscriptionCreditEffects",
+  });
+}
+
+async function computeFinancialApprovalMetrics(
+  cases: SupportCase[],
+  options: {
+    actionKind: string;
+    failureKind: string;
+    recommended: (draft: Record<string, unknown> | undefined) => boolean;
+    resultKey: "refundResult" | "subscriptionCreditResult";
+    effectsKey: "refundEffects" | "subscriptionCreditEffects";
+  },
+): Promise<RefundApprovalMetrics> {
   let recommended = 0,
     autoEscalated = 0,
     executed = 0;
@@ -378,14 +413,14 @@ export async function computeRefundApprovalMetrics(
       const draft =
         recordAt(turn.outcome?.draft) ??
         (activeTurnId === turn.id ? recordAt(supportCase.draft) : undefined);
-      if (draft?.recommendRefund === true) recommended += 1;
+      if (options.recommended(draft)) recommended += 1;
       if (
         turn.outcome?.status === "escalated" &&
-        draft?.recommendRefund === true &&
+        options.recommended(draft) &&
         !recordAt(turn.outcome?.approval)
       )
         autoEscalated += 1;
-      const result = refundResult(turn.outcome?.refundResult);
+      const result = refundResult(turn.outcome?.[options.resultKey]);
       if (result?.status === "executed") {
         const key = String(result.idempotencyKey ?? turn.id);
         if (!effectKeys.has(key)) {
@@ -398,7 +433,7 @@ export async function computeRefundApprovalMetrics(
         }
       }
     }
-    const effects = recordAt(supportCase.metadata.refundEffects);
+    const effects = recordAt(supportCase.metadata[options.effectsKey]);
     for (const effect of Object.values(effects ?? {})) {
       const result = refundResult(effect);
       const key = String(result?.idempotencyKey ?? "");
@@ -411,10 +446,12 @@ export async function computeRefundApprovalMetrics(
         );
       }
     }
-    if (!turns.length && supportCase.draft?.recommendRefund) recommended += 1;
+    if (!turns.length && options.recommended(recordAt(supportCase.draft)))
+      recommended += 1;
   }
   const decisions = await caseStore.monitoringDecisions(
     cases.map((item) => item.id),
+    options.actionKind,
   );
   const approved = decisions.filter((item) => item.approved).length;
   const rejected = decisions.filter((item) => !item.approved).length;
@@ -425,6 +462,7 @@ export async function computeRefundApprovalMetrics(
     executed,
     failed: await caseStore.monitoringFinancialFailures(
       cases.map((item) => item.id),
+      options.failureKind,
     ),
     autoEscalated,
     approvalRate: approved + rejected ? approved / (approved + rejected) : null,
@@ -509,6 +547,7 @@ export async function computeMonitoringSummary(
     casesConsidered: cases.length,
     funnel: computeCaseFunnelMetrics(cases),
     refunds: await computeRefundApprovalMetrics(cases),
+    credits: await computeSubscriptionCreditMetrics(cases),
     feedback: await computeHistoricalFeedbackMetrics(cases),
     telemetry,
     failures,

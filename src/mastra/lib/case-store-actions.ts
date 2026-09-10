@@ -228,13 +228,13 @@ export class CaseStoreActions {
   }
   /** Monitoring reads immutable decision rows rather than a mutable case
    * projection, so a later follow-up cannot erase earlier approval outcomes. */
-  async monitoringDecisions(caseIds: string[]) {
+  async monitoringDecisions(caseIds: string[], actionKind = "refund-command") {
     if (!caseIds.length)
       return [] as Array<{ caseId: string; turnId: string; approved: boolean }>;
     const placeholders = caseIds.map(() => "?").join(", ");
     const result = await this.client.execute({
-      sql: `SELECT case_id, turn_id, approved FROM support_decisions WHERE case_id IN (${placeholders}) ORDER BY created_at`,
-      args: caseIds,
+      sql: `SELECT d.case_id, d.turn_id, d.approved FROM support_decisions d JOIN support_turns t ON t.case_id = d.case_id AND t.id = d.turn_id JOIN support_actions a ON a.case_id = d.case_id AND a.fingerprint = t.command_fingerprint WHERE d.case_id IN (${placeholders}) AND a.kind = ? ORDER BY d.created_at`,
+      args: [...caseIds, actionKind],
     });
     return result.rows.map((row) => ({
       caseId: String(row.case_id),
@@ -279,11 +279,11 @@ export class CaseStoreActions {
       delivery: total(delivery),
     };
   }
-  async monitoringFinancialFailures(caseIds: string[]) {
+  async monitoringFinancialFailures(caseIds: string[], actionKind = "refund") {
     if (!caseIds.length) return 0;
     const result = await this.client.execute({
-      sql: `SELECT COUNT(*) AS total FROM support_actions WHERE kind = 'refund-failure' AND case_id IN (${caseIds.map(() => "?").join(", ")})`,
-      args: caseIds,
+      sql: `SELECT COUNT(*) AS total FROM support_actions WHERE kind = ? AND case_id IN (${caseIds.map(() => "?").join(", ")})`,
+      args: [`${actionKind}-failure`, ...caseIds],
     });
     return Number(result.rows[0]?.total ?? 0);
   }

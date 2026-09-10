@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  computeSubscriptionCreditMetrics,
   computeFeedbackMetrics,
   computeRefundApprovalMetrics,
 } from "../../src/mastra/lib/monitoring";
@@ -138,5 +139,76 @@ describe("monitoring aggregates", () => {
     expect(JSON.stringify(computeFeedbackMetrics([supportCase]))).not.toContain(
       "private feedback",
     );
+  });
+
+  it("keeps mixed credit and refund turns in their own approval and total metrics", async () => {
+    const supportCase = fixture("mixed-financial-actions");
+    supportCase.metadata.activeTurnId = "credit-turn";
+    supportCase.subscriptionCreditResult = {
+      creditId: "credit_1",
+      customerId: "customer_1",
+      subscriptionId: "sub_1",
+      amount: 49,
+      currency: "USD",
+      status: "executed",
+      idempotencyKey: "credit-effect",
+      executedAt: "2026-01-01T00:01:00.000Z",
+    };
+    supportCase.metadata.subscriptionCreditEffects = {
+      credit: supportCase.subscriptionCreditResult,
+    };
+    vi.spyOn(caseStore, "turns").mockResolvedValue([
+      {
+        id: "refund-turn",
+        eventId: "refund-event",
+        sequence: 1,
+        state: "resolved",
+        outcome: {
+          draft: { recommendRefund: true },
+          refundResult: {
+            amount: 20,
+            currency: "USD",
+            status: "executed",
+            idempotencyKey: "refund-effect",
+          },
+        },
+      },
+      {
+        id: "credit-turn",
+        eventId: "credit-event",
+        sequence: 2,
+        state: "resolved",
+        outcome: {
+          draft: { resolutionAction: "subscription_credit" },
+          subscriptionCreditResult: supportCase.subscriptionCreditResult,
+        },
+      },
+    ]);
+    const decisions = vi.spyOn(caseStore, "monitoringDecisions");
+    decisions.mockImplementation(async (_caseIds, actionKind) =>
+      actionKind === "subscription-credit-command"
+        ? [{ caseId: supportCase.id, turnId: "credit-turn", approved: true }]
+        : [{ caseId: supportCase.id, turnId: "refund-turn", approved: false }],
+    );
+    vi.spyOn(caseStore, "monitoringFinancialFailures").mockResolvedValue(0);
+
+    await expect(
+      computeRefundApprovalMetrics([supportCase]),
+    ).resolves.toMatchObject({
+      recommended: 1,
+      approved: 0,
+      rejected: 1,
+      executed: 1,
+      executedTotals: [{ currency: "USD", minor: 2000 }],
+    });
+    await expect(
+      computeSubscriptionCreditMetrics([supportCase]),
+    ).resolves.toMatchObject({
+      recommended: 1,
+      approved: 1,
+      rejected: 0,
+      executed: 1,
+      executedTotals: [{ currency: "USD", minor: 4900 }],
+    });
   });
 });

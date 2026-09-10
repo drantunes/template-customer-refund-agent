@@ -54,8 +54,9 @@ describe("Stripe fetch mapping", () => {
                 price: {
                   currency: "usd",
                   unit_amount: 4900,
-                  recurring: { interval: "month" },
+                  recurring: { interval: "month", interval_count: 1 },
                 },
+                quantity: 1,
               },
             ],
           },
@@ -67,6 +68,8 @@ describe("Stripe fetch mapping", () => {
           livemode: false,
         });
       if (url.pathname === "/v1/customers/cus_1/balance_transactions") {
+        if (request.method === "GET")
+          return Response.json({ data: [], has_more: false });
         posted = new URLSearchParams(await request.text());
         return Response.json({
           id: "cbtxn_1",
@@ -96,6 +99,85 @@ describe("Stripe fetch mapping", () => {
     expect(posted?.get("amount")).toBe("-4900");
     expect(posted?.get("currency")).toBe("usd");
   });
+
+  it("rechecks Stripe's balance ledger immediately before a credit POST", async () => {
+    const commandBase = {
+      approvalCaseId: "case_credit_preflight",
+      binding,
+      customerId: "cus_1",
+      subscriptionId: "sub_1",
+      amount: { currency: "USD", minor: 4900 },
+      reason: "Verified outage credit",
+      idempotencyKey: "case_credit_preflight:turn_1:subscription-credit",
+    };
+    const command = {
+      ...commandBase,
+      fingerprint: subscriptionCreditFingerprint(commandBase),
+    };
+    let priorCreditAppeared = false;
+    let posts = 0;
+    const client = new StripeClient(config, async (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/v1/account")
+        return Response.json({ id: config.accountId });
+      if (path === "/v1/subscriptions/sub_1")
+        return Response.json({
+          id: "sub_1",
+          customer: "cus_1",
+          livemode: false,
+          status: "active",
+          cancel_at_period_end: false,
+          items: {
+            data: [
+              {
+                quantity: 1,
+                price: {
+                  currency: "usd",
+                  unit_amount: 4900,
+                  recurring: { interval: "month", interval_count: 1 },
+                },
+              },
+            ],
+          },
+        });
+      if (path === "/v1/customers/cus_1")
+        return Response.json({
+          id: "cus_1",
+          email: "alex@example.com",
+          livemode: false,
+        });
+      if (path === "/v1/customers/cus_1/balance_transactions") {
+        if (request.method === "POST") posts += 1;
+        return Response.json({
+          data: priorCreditAppeared
+            ? [
+                {
+                  id: "cbtxn_prior",
+                  customer: "cus_1",
+                  livemode: false,
+                  amount: -4900,
+                  currency: "usd",
+                  metadata: {
+                    subscription_id: "sub_1",
+                    command_fingerprint: "another-approved-command",
+                  },
+                },
+              ]
+            : [],
+          has_more: false,
+        });
+      }
+      throw new Error(`unexpected ${request.method} ${path}`);
+    });
+
+    await expect(
+      client.createSubscriptionCredit(command, "alex@example.com", async () => {
+        priorCreditAppeared = true;
+      }),
+    ).rejects.toThrow("prior Stripe subscription credit");
+    expect(posts).toBe(0);
+  });
+
   it("recovers a timeout-after-remote-credit from immutable balance metadata without posting again", async () => {
     const commandBase = {
       approvalCaseId: "case_credit_recovery",
@@ -141,8 +223,9 @@ describe("Stripe fetch mapping", () => {
                 price: {
                   currency: "usd",
                   unit_amount: 4900,
-                  recurring: { interval: "month" },
+                  recurring: { interval: "month", interval_count: 1 },
                 },
+                quantity: 1,
               },
             ],
           },
@@ -299,7 +382,9 @@ describe("Stripe fetch mapping", () => {
                       nickname: "Synthetic recurring",
                       currency: "usd",
                       unit_amount: 1299,
+                      recurring: { interval: "month", interval_count: 1 },
                     },
+                    quantity: 1,
                   },
                 ],
               },
@@ -616,7 +701,9 @@ describe("Stripe fetch mapping", () => {
                         id: "price_1",
                         currency: "usd",
                         unit_amount: 1000,
+                        recurring: { interval: "month", interval_count: 1 },
                       },
+                      quantity: 1,
                     },
                   ],
                 },

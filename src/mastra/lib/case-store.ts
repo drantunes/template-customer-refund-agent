@@ -472,9 +472,9 @@ export class CaseStore {
     return this.actions.approvalDecision(caseId, turnId);
   }
 
-  async monitoringDecisions(caseIds: string[]) {
+  async monitoringDecisions(caseIds: string[], actionKind?: string) {
     await this.ensured();
-    return this.actions.monitoringDecisions(caseIds);
+    return this.actions.monitoringDecisions(caseIds, actionKind);
   }
 
   async monitoringOperationalFailures(caseIds: string[]) {
@@ -482,9 +482,9 @@ export class CaseStore {
     return this.actions.monitoringOperationalFailures(caseIds);
   }
 
-  async monitoringFinancialFailures(caseIds: string[]) {
+  async monitoringFinancialFailures(caseIds: string[], actionKind?: string) {
     await this.ensured();
-    return this.actions.monitoringFinancialFailures(caseIds);
+    return this.actions.monitoringFinancialFailures(caseIds, actionKind);
   }
 
   async nativeDecisionsNeedingRecovery(limit = 10) {

@@ -251,7 +251,9 @@ export const requestApprovalStep = createStep({
           !customerId ||
           subscription.status !== "active" ||
           subscription.cancelAtPeriodEnd ||
-          !/monthly/i.test(subscription.plan) ||
+          subscription.recurringInterval !== "month" ||
+          subscription.recurringIntervalCount !== 1 ||
+          subscription.quantity !== 1 ||
           subscription.currency !== currency ||
           subscription.amount !== amount
         )

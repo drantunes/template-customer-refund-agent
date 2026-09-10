@@ -150,6 +150,11 @@ export interface CommerceSubscription {
   customerId?: string;
   customerEmail: string;
   plan: string;
+  /** Provider-normalized billing terms.  A plan nickname is presentation
+   * data, never authority to issue a financial credit. */
+  recurringInterval: "month" | "year";
+  recurringIntervalCount: number;
+  quantity: number;
   amount: Money;
   status: "active" | "cancelled" | "past_due";
   renewsAt: string;

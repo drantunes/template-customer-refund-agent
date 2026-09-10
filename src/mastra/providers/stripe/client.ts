@@ -481,12 +481,24 @@ export class StripeClient {
       throw new Error("Stripe subscription price mapping is ambiguous.");
     const item = asObject(items[0], "subscription item");
     const price = asObject(item.price, "subscription price");
+    const recurring = asObject(price.recurring, "subscription price recurring");
+    if (
+      (recurring.interval !== "month" && recurring.interval !== "year") ||
+      !Number.isSafeInteger(recurring.interval_count ?? 1) ||
+      Number(recurring.interval_count ?? 1) <= 0 ||
+      !Number.isSafeInteger(item.quantity ?? 1) ||
+      Number(item.quantity ?? 1) <= 0
+    )
+      throw new Error("Stripe subscription billing terms are malformed.");
     const cancelAtPeriodEnd = subscription.cancel_at_period_end === true;
     return {
       subscriptionId: asId(subscription, "Subscription"),
       customerId: asId(customer[0], "Customer"),
       customerEmail: String(customer[0].email).toLowerCase(),
       plan: String(price.nickname ?? price.id ?? "Stripe subscription"),
+      recurringInterval: recurring.interval,
+      recurringIntervalCount: Number(recurring.interval_count ?? 1),
+      quantity: Number(item.quantity ?? 1),
       amount: supportedMoney(price.currency, price.unit_amount),
       status:
         status(subscription.status) === "active"
@@ -580,28 +592,19 @@ export class StripeClient {
       throw new Error(
         "Subscription credit customer does not match its immutable command.",
       );
-    const customer = await this.request(
-      `/v1/customers/${encodeURIComponent(customerId)}`,
-    );
-    if (
-      customer.livemode !== false ||
-      String(customer.email ?? "").toLowerCase() !== email.toLowerCase()
-    )
-      throw new Error(
-        "Stripe subscription does not belong to the verified customer.",
-      );
+    const customer = await this.subscriptionCreditCustomer(command, email);
     const items = asObject(subscription.items, "subscription items").data;
     if (!Array.isArray(items) || items.length !== 1)
       throw new Error(
         "Subscription credit requires exactly one subscription item.",
       );
-    const price = asObject(
-      asObject(items[0], "subscription item").price,
-      "subscription price",
-    );
+    const item = asObject(items[0], "subscription item");
+    const price = asObject(item.price, "subscription price");
     const recurring = asObject(price.recurring, "subscription price recurring");
     if (
       recurring.interval !== "month" ||
+      (recurring.interval_count ?? 1) !== 1 ||
+      (item.quantity ?? 1) !== 1 ||
       price.currency !== command.amount.currency.toLowerCase() ||
       price.unit_amount !== command.amount.minor
     )
@@ -609,6 +612,58 @@ export class StripeClient {
         "Subscription credit must equal one monthly subscription charge.",
       );
     return { customerId, subscription, customer };
+  }
+
+  /** Recovery validates the durable customer and immutable balance receipt,
+   * not a subscription's current lifecycle.  The subscription may be
+   * cancelled or otherwise changed after a successful remote POST. */
+  private async subscriptionCreditCustomer(
+    command: SubscriptionCreditCommand,
+    email: string,
+  ) {
+    this.assertBinding(command.binding);
+    await this.assertConfiguredAccount();
+    const customer = await this.request(
+      `/v1/customers/${encodeURIComponent(command.customerId)}`,
+    );
+    if (
+      customer.livemode !== false ||
+      asId(customer, "Customer") !== command.customerId ||
+      String(customer.email ?? "").toLowerCase() !== email.toLowerCase()
+    )
+      throw new Error(
+        "Stripe subscription credit does not belong to the verified customer.",
+      );
+    return customer;
+  }
+
+  private async assertNoPriorSubscriptionCredit(
+    customerId: string,
+    command: SubscriptionCreditCommand,
+  ) {
+    const transactions = await this.list(
+      `/v1/customers/${encodeURIComponent(customerId)}/balance_transactions`,
+      new URLSearchParams(),
+    );
+    const prior = transactions.some((value) => {
+      const metadata = value.metadata;
+      return (
+        value.livemode === false &&
+        value.amount === -command.amount.minor &&
+        String(value.currency).toUpperCase() === command.amount.currency &&
+        metadata !== null &&
+        typeof metadata === "object" &&
+        !Array.isArray(metadata) &&
+        (metadata as Record<string, unknown>).subscription_id ===
+          command.subscriptionId &&
+        (metadata as Record<string, unknown>).command_fingerprint !==
+          command.fingerprint
+      );
+    });
+    if (prior)
+      throw new Error(
+        "A prior Stripe subscription credit exists for this customer and subscription and requires specialist review.",
+      );
   }
 
   async quoteSubscriptionCredit(
@@ -619,7 +674,8 @@ export class StripeClient {
       throw new Error(
         "Subscription credit command fingerprint was tampered with.",
       );
-    await this.subscriptionCreditTarget(command, email);
+    const target = await this.subscriptionCreditTarget(command, email);
+    await this.assertNoPriorSubscriptionCredit(target.customerId, command);
     return {
       approvedAmount: command.amount,
       commandFingerprint: command.fingerprint,
@@ -637,6 +693,10 @@ export class StripeClient {
       );
     const target = await this.subscriptionCreditTarget(command, email);
     await beforeDispatch?.();
+    // A separate case can be approved after its quote. Re-read the durable
+    // ledger immediately before the provider mutation so it cannot issue a
+    // second compensation for the same customer and subscription.
+    await this.assertNoPriorSubscriptionCredit(target.customerId, command);
     const response = await this.request(
       `/v1/customers/${encodeURIComponent(target.customerId)}/balance_transactions`,
       {
@@ -698,9 +758,9 @@ export class StripeClient {
     email: string,
     creditId: string,
   ): Promise<SubscriptionCreditEffect> {
-    const target = await this.subscriptionCreditTarget(command, email);
+    await this.subscriptionCreditCustomer(command, email);
     const response = await this.request(
-      `/v1/customers/${encodeURIComponent(target.customerId)}/balance_transactions/${encodeURIComponent(creditId)}`,
+      `/v1/customers/${encodeURIComponent(command.customerId)}/balance_transactions/${encodeURIComponent(creditId)}`,
     );
     const metadata = asObject(
       response.metadata ?? {},
@@ -710,7 +770,7 @@ export class StripeClient {
       response.livemode !== false ||
       asId(response, "Customer balance transaction") !== creditId ||
       asId(response.customer, "Customer balance transaction customer") !==
-        target.customerId ||
+        command.customerId ||
       response.amount !== -command.amount.minor ||
       String(response.currency).toUpperCase() !== command.amount.currency ||
       metadata.support_case_id !== command.approvalCaseId ||
@@ -722,7 +782,7 @@ export class StripeClient {
       );
     return {
       creditId,
-      customerId: target.customerId,
+      customerId: command.customerId,
       subscriptionId: command.subscriptionId,
       amount: command.amount,
       idempotencyKey: command.idempotencyKey,
@@ -741,9 +801,9 @@ export class StripeClient {
     command: SubscriptionCreditCommand,
     email: string,
   ): Promise<SubscriptionCreditEffect | undefined> {
-    const target = await this.subscriptionCreditTarget(command, email);
+    await this.subscriptionCreditCustomer(command, email);
     const transactions = await this.list(
-      `/v1/customers/${encodeURIComponent(target.customerId)}/balance_transactions`,
+      `/v1/customers/${encodeURIComponent(command.customerId)}/balance_transactions`,
       new URLSearchParams(),
     );
     const matches = transactions.filter((value) => {
@@ -751,7 +811,7 @@ export class StripeClient {
       return (
         value.livemode === false &&
         asId(value.customer, "Customer balance transaction customer") ===
-          target.customerId &&
+          command.customerId &&
         value.amount === -command.amount.minor &&
         String(value.currency).toUpperCase() === command.amount.currency &&
         metadata !== null &&

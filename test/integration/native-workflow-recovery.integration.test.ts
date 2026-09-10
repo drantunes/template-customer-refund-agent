@@ -668,6 +668,146 @@ function syntheticStripeBindings(caseId: string): CaseProviderBindings {
   };
 }
 
+/** The credit fixture includes the full subscription payment chain used by
+ * lookup. Its first balance POST is committed into the synthetic remote ledger
+ * and then loses the response, so a restarted runtime must recover that one
+ * receipt instead of issuing a second credit. */
+function creditResponseLossStripeTransport(input: {
+  caseId: string;
+  fingerprint: () => string;
+  observed: {
+    posts: number;
+    idempotencyKeys: string[];
+    remoteCommitted: boolean;
+  };
+}) {
+  const transaction = () => ({
+    id: "cbtxn_credit_restart",
+    customer: "cus_credit_restart",
+    livemode: false,
+    amount: -4900,
+    currency: "usd",
+    created: 2,
+    metadata: {
+      support_case_id: input.caseId,
+      command_fingerprint: input.fingerprint(),
+      subscription_id: "sub_credit_restart",
+    },
+  });
+  const subscription = () => ({
+    id: "sub_credit_restart",
+    customer: "cus_credit_restart",
+    latest_invoice: "in_credit_restart",
+    livemode: false,
+    // Once the provider has committed the credit, model a lifecycle change to
+    // ensure receipt recovery does not require an active subscription.
+    status: input.observed.remoteCommitted ? "canceled" : "active",
+    cancel_at_period_end: false,
+    items: {
+      data: [
+        {
+          current_period_end: 2,
+          quantity: 1,
+          price: {
+            id: "price_credit_restart",
+            nickname: "Pro",
+            currency: "usd",
+            unit_amount: 4900,
+            recurring: { interval: "month", interval_count: 1 },
+          },
+        },
+      ],
+    },
+  });
+  return async (request: Request) => {
+    const path = new URL(request.url).pathname;
+    if (path === "/v1/account")
+      return Response.json({ id: "acct_test_123", livemode: false });
+    if (path === "/v1/customers")
+      return Response.json({
+        data: [
+          {
+            id: "cus_credit_restart",
+            email: "alex@example.com",
+            livemode: false,
+          },
+        ],
+        has_more: false,
+      });
+    if (path === "/v1/customers/cus_credit_restart")
+      return Response.json({
+        id: "cus_credit_restart",
+        email: "alex@example.com",
+        livemode: false,
+      });
+    if (path === "/v1/checkout/sessions")
+      return Response.json({ data: [], has_more: false });
+    if (path === "/v1/subscriptions")
+      return Response.json({ data: [subscription()], has_more: false });
+    if (path === "/v1/subscriptions/sub_credit_restart")
+      return Response.json(subscription());
+    if (path === "/v1/invoices/in_credit_restart")
+      return Response.json({
+        id: "in_credit_restart",
+        customer: "cus_credit_restart",
+        status: "paid",
+        paid: true,
+        created: 1,
+        livemode: false,
+      });
+    if (path === "/v1/invoice_payments")
+      return Response.json({
+        data: [
+          {
+            id: "inpay_credit_restart",
+            invoice: "in_credit_restart",
+            status: "paid",
+            paid: true,
+            livemode: false,
+            payment: {
+              type: "payment_intent",
+              payment_intent: "pi_credit_restart",
+            },
+          },
+        ],
+        has_more: false,
+      });
+    if (path === "/v1/payment_intents/pi_credit_restart")
+      return Response.json({
+        id: "pi_credit_restart",
+        amount_received: 4900,
+        currency: "usd",
+        status: "succeeded",
+        livemode: false,
+      });
+    if (path === "/v1/refunds" && request.method === "GET")
+      return Response.json({ data: [], has_more: false });
+    if (path === "/v1/customers/cus_credit_restart/balance_transactions") {
+      if (request.method === "GET")
+        return Response.json({
+          data: input.observed.remoteCommitted ? [transaction()] : [],
+          has_more: false,
+        });
+      input.observed.posts += 1;
+      input.observed.idempotencyKeys.push(
+        request.headers.get("idempotency-key") ?? "",
+      );
+      input.observed.remoteCommitted = true;
+      throw new TypeError(
+        "synthetic response loss after committed credit POST",
+      );
+    }
+    if (
+      path ===
+      "/v1/customers/cus_credit_restart/balance_transactions/cbtxn_credit_restart"
+    )
+      return Response.json(transaction());
+    throw new Error(
+      `Unexpected credit restart Stripe request ${request.method} ${path}`,
+    );
+  };
+}
+
 function signedStripeEvent(event: Record<string, unknown>) {
   const body = JSON.stringify(event);
   const timestamp = Math.floor(Date.now() / 1_000);
@@ -717,7 +857,9 @@ function cancellationStripeTransport(
             currency: "usd",
             unit_amount: 4900,
             nickname: "Pro",
+            recurring: { interval: "month", interval_count: 1 },
           },
+          quantity: 1,
         },
       ],
     },
@@ -1068,6 +1210,186 @@ describe("native approval workflow recovery", () => {
     expect(
       (await rejected.caseStore.get(rejectedCaseId))?.subscriptionCreditResult,
     ).toBeUndefined();
+    const rejectedCommand = await rejected.caseStore.getAction(
+      rejectedCaseId,
+      "subscription-credit-command",
+      rejectedNative.fingerprint,
+    );
+    const { issueSubscriptionCreditTool } =
+      await import("../../src/mastra/tools/issue-subscription-credit");
+    await expect(
+      issueSubscriptionCreditTool.execute!(
+        {
+          caseId: rejectedCaseId,
+          customerId: String(rejectedCommand!.customerId),
+          subscriptionId: String(rejectedCommand!.subscriptionId),
+          amount: Number(rejectedCommand!.amount.minor) / 100,
+          currency: String(rejectedCommand!.amount.currency),
+          reason: String(rejectedCommand!.reason),
+          idempotencyKey: String(rejectedCommand!.idempotencyKey),
+          fingerprint: rejectedNative.fingerprint,
+        },
+        {} as never,
+      ),
+    ).rejects.toThrow("current authorized decision");
+    const directEffects = await rejected.caseStore.getClient().execute({
+      sql: "SELECT COUNT(*) AS total FROM local_subscription_credits WHERE tenant_id = ? AND provider_account_id = ?",
+      args: ["local-demo", "local-demo"],
+    });
+    expect(Number(directEffects.rows[0]?.total)).toBe(0);
+  });
+
+  it("recovers one approved native Stripe credit after its committed POST loses the response and the SQLite runtime restarts", async () => {
+    const caseId = `native-credit-restart-${crypto.randomUUID()}`;
+    enableSyntheticStripe();
+    let fingerprint = "";
+    const observed = {
+      posts: 0,
+      idempotencyKeys: [] as string[],
+      remoteCommitted: false,
+    };
+    vi.stubGlobal(
+      "fetch",
+      creditResponseLossStripeTransport({
+        caseId,
+        fingerprint: () => fingerprint,
+        observed,
+      }),
+    );
+    const creditResponse = jsonModel({
+      draftResponse: "After approval, we can add a credit to your next bill.",
+      citedSources: ["service-problem-credit-policy"],
+      selectedPolicyExcerpts: [
+        {
+          source: "service-problem-credit-policy",
+          excerpt:
+            "For a verified service problem on one active monthly subscription, support may propose one credit equal to that subscription's single monthly charge.",
+        },
+      ],
+      recommendRefund: false,
+      resolutionAction: "subscription_credit",
+      subscriptionCreditAmount: 49,
+      subscriptionCreditCurrency: "USD",
+      subscriptionCreditReason: "Verified service outage",
+      requiresEscalation: false,
+    }) as never;
+    const initial = await setup(caseId, undefined, undefined, undefined, {
+      credit: true,
+      providerBindings: syntheticStripeBindings(caseId),
+      message: "Our service outage prevented me from using my subscription.",
+      triage: {
+        intent: "service_problem",
+        urgency: "normal",
+        sentiment: "negative",
+        requiresHumanReview: false,
+        confidence: 1,
+        rationale: "Verified service outage.",
+      },
+      responseModel: creditResponse,
+    });
+    const native = initial.native!;
+    fingerprint = native.fingerprint;
+    const command = await initial.caseStore.getAction(
+      caseId,
+      "subscription-credit-command",
+      fingerprint,
+    );
+    expect(command).toMatchObject({
+      customerId: "cus_credit_restart",
+      subscriptionId: "sub_credit_restart",
+      amount: { currency: "USD", minor: 4900 },
+    });
+    await initial.caseStore.recordApprovalDecision({
+      caseId,
+      turnId: native.turnId,
+      commandFingerprint: fingerprint,
+      principalId: "approver-demo",
+      approved: true,
+      nativeRunId: native.runId,
+      nativeToolCallId: native.toolCallId,
+    });
+    // The native tool reaches Stripe once, persists an unknown attempt, and
+    // leaves its suspended snapshot for a process that has lost the response.
+    expect(
+      await initial.recoverApprovedNativeDecisions(
+        initial.mastra,
+        initial.caseStore,
+        { disableScorers: true },
+      ),
+    ).toBe(0);
+    expect(observed).toMatchObject({ posts: 1, remoteCommitted: true });
+    expect(
+      await initial.caseStore.stripeSubscriptionCreditAttempt(
+        String(command!.idempotencyKey),
+      ),
+    ).toMatchObject({ status: "unknown" });
+    expect(
+      (await initial.caseStore.get(caseId))?.subscriptionCreditResult,
+    ).toBeUndefined();
+    const initialDispatch = await initial.caseStore.getClient().execute({
+      sql: "SELECT state, lease_until FROM support_dispatch WHERE case_id = ?",
+      args: [caseId],
+    });
+    expect(initialDispatch.rows).toEqual([
+      expect.objectContaining({ state: "suspended" }),
+    ]);
+    const databasePath = initial.databasePath!;
+    await initial.mastra.shutdown();
+    runtimes.splice(runtimes.indexOf(initial.mastra), 1);
+
+    // Recreate Mastra and reopen the same durable SQLite DB. The provider now
+    // exposes its committed receipt while the subscription is cancelled.
+    const restarted = await setup(caseId, undefined, undefined, undefined, {
+      credit: true,
+      databasePath,
+      existingCase: true,
+      providerBindings: syntheticStripeBindings(caseId),
+      responseModel: creditResponse,
+    });
+    const project = vi.spyOn(
+      restarted.caseStore,
+      "projectSubscriptionCreditToolExecution",
+    );
+    expect(
+      await restarted.recoverApprovedNativeDecisions(
+        restarted.mastra,
+        restarted.caseStore,
+        { disableScorers: true },
+      ),
+    ).toBe(1);
+    expect(observed.posts).toBe(1);
+    expect(observed.idempotencyKeys).toEqual([command!.idempotencyKey]);
+    expect(project).toHaveBeenCalledTimes(1);
+    expect(
+      await restarted.caseStore.stripeSubscriptionCreditAttempt(
+        String(command!.idempotencyKey),
+      ),
+    ).toMatchObject({
+      status: "succeeded",
+      creditId: "cbtxn_credit_restart",
+    });
+    expect(
+      await restarted.caseStore.idempotency(String(command!.idempotencyKey)),
+    ).toMatchObject({
+      fingerprint,
+      effect: { creditId: "cbtxn_credit_restart", status: "succeeded" },
+    });
+    expect(await restarted.caseStore.get(caseId)).toMatchObject({
+      status: "resolved",
+      subscriptionCreditResult: {
+        creditId: "cbtxn_credit_restart",
+        status: "skipped",
+      },
+      finalResponse: expect.stringMatching(/future invoice/i),
+    });
+    expect(
+      await restarted.recoverApprovedNativeDecisions(
+        restarted.mastra,
+        restarted.caseStore,
+        { disableScorers: true },
+      ),
+    ).toBe(0);
+    expect(observed.posts).toBe(1);
   });
 
   it("rejects tampered retrieved vector text before it can create an approval or financial effect", async () => {
@@ -4156,7 +4478,9 @@ describe("native approval workflow recovery", () => {
                       currency: "usd",
                       unit_amount: 4900,
                       nickname: "Pro",
+                      recurring: { interval: "month", interval_count: 1 },
                     },
+                    quantity: 1,
                   },
                 ],
               },
@@ -4560,7 +4884,9 @@ describe("native approval workflow recovery", () => {
                         nickname: "Renewal",
                         currency: "usd",
                         unit_amount: 100000,
+                        recurring: { interval: "month", interval_count: 1 },
                       },
+                      quantity: 1,
                     },
                   ],
                 },

@@ -722,6 +722,23 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                                   "plan": {
                                     "type": "string",
                                   },
+                                  "quantity": {
+                                    "exclusiveMinimum": 0,
+                                    "maximum": 9007199254740991,
+                                    "type": "integer",
+                                  },
+                                  "recurringInterval": {
+                                    "enum": [
+                                      "month",
+                                      "year",
+                                    ],
+                                    "type": "string",
+                                  },
+                                  "recurringIntervalCount": {
+                                    "exclusiveMinimum": 0,
+                                    "maximum": 9007199254740991,
+                                    "type": "integer",
+                                  },
                                   "refundOrderId": {
                                     "type": "string",
                                   },
@@ -1446,6 +1463,23 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             },
                             "plan": {
                               "type": "string",
+                            },
+                            "quantity": {
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991,
+                              "type": "integer",
+                            },
+                            "recurringInterval": {
+                              "enum": [
+                                "month",
+                                "year",
+                              ],
+                              "type": "string",
+                            },
+                            "recurringIntervalCount": {
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991,
+                              "type": "integer",
                             },
                             "refundOrderId": {
                               "type": "string",
@@ -2230,6 +2264,23 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             },
                             "plan": {
                               "type": "string",
+                            },
+                            "quantity": {
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991,
+                              "type": "integer",
+                            },
+                            "recurringInterval": {
+                              "enum": [
+                                "month",
+                                "year",
+                              ],
+                              "type": "string",
+                            },
+                            "recurringIntervalCount": {
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991,
+                              "type": "integer",
                             },
                             "refundOrderId": {
                               "type": "string",
@@ -3085,6 +3136,23 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             "plan": {
                               "type": "string",
                             },
+                            "quantity": {
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991,
+                              "type": "integer",
+                            },
+                            "recurringInterval": {
+                              "enum": [
+                                "month",
+                                "year",
+                              ],
+                              "type": "string",
+                            },
+                            "recurringIntervalCount": {
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991,
+                              "type": "integer",
+                            },
                             "refundOrderId": {
                               "type": "string",
                             },
@@ -3907,6 +3975,23 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             },
                             "plan": {
                               "type": "string",
+                            },
+                            "quantity": {
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991,
+                              "type": "integer",
+                            },
+                            "recurringInterval": {
+                              "enum": [
+                                "month",
+                                "year",
+                              ],
+                              "type": "string",
+                            },
+                            "recurringIntervalCount": {
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991,
+                              "type": "integer",
                             },
                             "refundOrderId": {
                               "type": "string",
@@ -4775,6 +4860,23 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                             },
                             "plan": {
                               "type": "string",
+                            },
+                            "quantity": {
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991,
+                              "type": "integer",
+                            },
+                            "recurringInterval": {
+                              "enum": [
+                                "month",
+                                "year",
+                              ],
+                              "type": "string",
+                            },
+                            "recurringIntervalCount": {
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991,
+                              "type": "integer",
                             },
                             "refundOrderId": {
                               "type": "string",
