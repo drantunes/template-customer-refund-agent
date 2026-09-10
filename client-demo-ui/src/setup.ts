@@ -54,6 +54,7 @@ async function json(
   const target = new URL(path, `${origin}/`);
   if (target.origin !== origin)
     throw new Error("Provider destination is invalid.");
+  const method = (init.method ?? "GET").toUpperCase();
   const response = await fetchImpl(target, {
     ...init,
     redirect: "error",
@@ -62,7 +63,7 @@ async function json(
   });
   if (!response.ok)
     throw new Error(
-      `Provider setup request failed with HTTP ${response.status}.`,
+      `${origin === stripeOrigin ? "Stripe" : "Intercom"} ${method} ${target.pathname} failed with HTTP ${response.status}.`,
     );
   const value: unknown = await response.json();
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -377,6 +378,7 @@ export async function runSetup({ fetchImpl = fetch } = {}) {
         customer: alex.stripeCustomerId,
         auto_advance: false,
         collection_method: "charge_automatically",
+        description: "Northstar Toolkit",
         "metadata[demo_run]": run,
         "metadata[demo_id]": alex.id,
       }),

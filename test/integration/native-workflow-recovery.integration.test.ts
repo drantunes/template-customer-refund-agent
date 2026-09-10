@@ -794,6 +794,24 @@ function creditResponseLossStripeTransport(input: {
       });
     if (path === "/v1/checkout/sessions")
       return Response.json({ data: [], has_more: false });
+    if (path === "/v1/invoices")
+      return Response.json({
+        data: [
+          {
+            id: "in_credit_restart",
+            customer: "cus_credit_restart",
+            livemode: false,
+            status: "paid",
+            paid: true,
+            billing_reason: "subscription_cycle",
+            subscription: "sub_credit_restart",
+            parent: {
+              subscription_details: { subscription: "sub_credit_restart" },
+            },
+          },
+        ],
+        has_more: false,
+      });
     if (path === "/v1/subscriptions")
       return Response.json({ data: [subscription()], has_more: false });
     if (path === "/v1/subscriptions/sub_credit_restart")
@@ -5529,6 +5547,24 @@ describe("native approval workflow recovery", () => {
         // target is its paid InvoicePayment's PaymentIntent.
         if (path === "/v1/checkout/sessions")
           return Response.json({ data: [], has_more: false });
+        if (path === "/v1/invoices")
+          return Response.json({
+            data: [
+              {
+                id: "in_renewal",
+                customer: "cus_renewal",
+                livemode: false,
+                status: "paid",
+                paid: true,
+                billing_reason: "subscription_cycle",
+                subscription: "sub_renewal",
+                parent: {
+                  subscription_details: { subscription: "sub_renewal" },
+                },
+              },
+            ],
+            has_more: false,
+          });
         if (path === "/v1/subscriptions")
           return Response.json({
             data: [
