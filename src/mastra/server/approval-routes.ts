@@ -6,7 +6,10 @@ import {
 } from "../lib/dispatch-lease-scope";
 import { isRefundPolicyEvidenceError } from "../lib/refund-policy-evidence";
 import { resumeApprovedNativeTool } from "../providers/native-execution";
-import { reconcileApprovedRefundEffect } from "../runtime/native-approval-recovery";
+import {
+  reconcileApprovedRefundEffect,
+  reconcileApprovedSubscriptionCreditEffect,
+} from "../runtime/native-approval-recovery";
 import { REQUEST_APPROVAL_STEP_ID } from "../workflows/resolve-support-case";
 import { canAccessCase } from "./auth";
 import { approvalRequestSchema, errorResponseSchema } from "./contracts";
@@ -199,29 +202,41 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
     );
   }
   try {
-    if (
-      approved &&
-      supportCase.metadata.refundCommand &&
-      command.idempotencyKey
-    ) {
+    if (approved && command.idempotencyKey) {
       const currentCase = await caseStore.get(caseId);
-      const reconciled = await reconcileApprovedRefundEffect({
-        store: caseStore,
-        supportCase: currentCase ?? supportCase,
-        dispatch,
-        fingerprint: command.fingerprint,
-        command: currentCase?.metadata.refundCommand,
-      });
-      const pendingStripeAttempt =
-        !reconciled &&
-        (await caseStore.stripeRefundAttempt(command.idempotencyKey));
+      const creditCommand = currentCase?.metadata.subscriptionCreditCommand;
+      const refundCommand = currentCase?.metadata.refundCommand;
+      const isCredit = Boolean(creditCommand && !refundCommand);
+      const reconciled = isCredit
+        ? await reconcileApprovedSubscriptionCreditEffect({
+            store: caseStore,
+            supportCase: currentCase ?? supportCase,
+            dispatch,
+            fingerprint: command.fingerprint,
+            command: creditCommand,
+          })
+        : await reconcileApprovedRefundEffect({
+            store: caseStore,
+            supportCase: currentCase ?? supportCase,
+            dispatch,
+            fingerprint: command.fingerprint,
+            command: refundCommand,
+          });
+      const attempt = !reconciled
+        ? isCredit
+          ? await caseStore.stripeSubscriptionCreditAttempt(
+              command.idempotencyKey,
+            )
+          : await caseStore.stripeRefundAttempt(command.idempotencyKey)
+        : undefined;
+      const exactAttempt =
+        attempt &&
+        attempt.caseId === caseId &&
+        attempt.fingerprint === command.fingerprint;
       const failedStripeAttempt =
-        !reconciled &&
-        pendingStripeAttempt &&
-        pendingStripeAttempt.caseId === caseId &&
-        pendingStripeAttempt.fingerprint === command.fingerprint &&
-        pendingStripeAttempt.refundId &&
-        pendingStripeAttempt.status === "failed";
+        exactAttempt &&
+        attempt.status === "failed" &&
+        (isCredit || ("refundId" in attempt && Boolean(attempt.refundId)));
       // The authoritative failure finalizer has already closed the immutable
       // turn and queued its one staff-review reply. An HTTP approval must not
       // turn a superseded success effect into a second native continuation.
@@ -242,16 +257,37 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
           );
         return c.json(scopedCaseDto((await caseStore.get(caseId))!, current));
       }
-      if (
-        !reconciled &&
-        !(
-          pendingStripeAttempt &&
-          pendingStripeAttempt.caseId === caseId &&
-          pendingStripeAttempt.fingerprint === command.fingerprint &&
-          pendingStripeAttempt.refundId &&
-          pendingStripeAttempt.status === "pending"
-        )
-      ) {
+      const awaitingStripeSettlement =
+        exactAttempt &&
+        (attempt.status === "unknown" ||
+          (!isCredit &&
+            "refundId" in attempt &&
+            Boolean(attempt.refundId) &&
+            attempt.status === "pending"));
+      if (awaitingStripeSettlement) {
+        // A tool can return normally after recording an unknown provider POST.
+        // Do not resume the enclosing workflow into an escalation: retain its
+        // suspended dispatch so a restarted recovery worker can retrieve and
+        // project the same immutable receipt without another approval or POST.
+        const suspended = await caseStore.completeDispatch(
+          dispatch.id,
+          "suspended",
+          isCredit
+            ? "Subscription credit receipt is awaiting durable provider recovery."
+            : "Refund receipt is awaiting durable provider recovery.",
+          dispatch.leaseToken,
+        );
+        if (!suspended)
+          return c.json(
+            {
+              error:
+                "Approval resume lost its dispatch lease; reload the case.",
+            },
+            409,
+          );
+        return c.json(scopedCaseDto((await caseStore.get(caseId))!, current));
+      }
+      if (!reconciled) {
         // A normally resolved native transition with no exact provider effect
         // is a completed tool failure. Transport/snapshot errors take the
         // earlier catch path and remain recoverable; do not loop forever on a
@@ -259,7 +295,9 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
         const failed = await caseStore.failDispatchAndCase(
           dispatch.id,
           caseId,
-          "Native approval completed without a durable refund effect.",
+          isCredit
+            ? "Native approval completed without a durable subscription credit receipt."
+            : "Native approval completed without a durable refund effect.",
           dispatch.leaseToken,
           "escalated",
         );
@@ -272,7 +310,11 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
             409,
           );
         return c.json(
-          { error: "Approval completed without a durable refund effect." },
+          {
+            error: isCredit
+              ? "Approval completed without a durable subscription credit receipt."
+              : "Approval completed without a durable refund effect.",
+          },
           500,
         );
       }

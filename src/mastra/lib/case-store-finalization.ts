@@ -158,6 +158,7 @@ export class CaseStoreFinalization {
             escalationReason: input.escalationReason,
             approval: updated.approval,
             refundResult: updated.refundResult,
+            subscriptionCreditResult: updated.subscriptionCreditResult,
             draft: updated.draft,
           }),
           now(),

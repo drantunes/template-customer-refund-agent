@@ -181,6 +181,20 @@ describe("PHASE-007 environment validation", () => {
 });
 
 describe("PHASE-007 documentation validation", () => {
+  it("documents the restricted Customers: Write capability required for approved credits", async () => {
+    const [environment, adapters] = await Promise.all([
+      readFile(resolve(root, ".env.example"), "utf8"),
+      readFile(resolve(root, "docs/external-adapters.md"), "utf8"),
+    ]);
+    for (const document of [environment, adapters]) {
+      expect(document).toContain("Customers: Write");
+      expect(document).toContain("customer balance transaction");
+      expect(document).not.toContain(
+        "credits, and invoice changes are not performed",
+      );
+    }
+  });
+
   it("accepts a complete synthetic fixture and rejects each release-documentation failure", async () => {
     const repository = await documentationFixture();
     expect(run(join(repository, "scripts/check-docs.mjs"), [], {}).status).toBe(

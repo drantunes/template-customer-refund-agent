@@ -1305,24 +1305,21 @@ describe("native approval workflow recovery", () => {
       subscriptionId: "sub_credit_restart",
       amount: { currency: "USD", minor: 4900 },
     });
-    await initial.caseStore.recordApprovalDecision({
-      caseId,
-      turnId: native.turnId,
-      commandFingerprint: fingerprint,
-      principalId: "approver-demo",
-      approved: true,
-      nativeRunId: native.runId,
-      nativeToolCallId: native.toolCallId,
-    });
-    // The native tool reaches Stripe once, persists an unknown attempt, and
-    // leaves its suspended snapshot for a process that has lost the response.
-    expect(
-      await initial.recoverApprovedNativeDecisions(
-        initial.mastra,
-        initial.caseStore,
-        { disableScorers: true },
-      ),
-    ).toBe(0);
+    // Exercise the registered HTTP route. The native tool reaches Stripe once,
+    // records an unknown attempt after response loss, and the route must leave
+    // its dispatch suspended instead of completing the enclosing workflow.
+    const approval = await initial.app.request(
+      `http://support.test/support/cases/${caseId}/approve`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${issueLocalSession({ id: "approver-demo" })}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ commandFingerprint: fingerprint }),
+      },
+    );
+    expect(approval.status).toBe(200);
     expect(observed).toMatchObject({ posts: 1, remoteCommitted: true });
     expect(
       await initial.caseStore.stripeSubscriptionCreditAttempt(
@@ -1332,6 +1329,11 @@ describe("native approval workflow recovery", () => {
     expect(
       (await initial.caseStore.get(caseId))?.subscriptionCreditResult,
     ).toBeUndefined();
+    await expect(
+      initial.caseStore.customerFinancialRequests([caseId]),
+    ).resolves.toMatchObject([
+      { type: "subscription_credit", status: "unknown" },
+    ]);
     const initialDispatch = await initial.caseStore.getClient().execute({
       sql: "SELECT state, lease_until FROM support_dispatch WHERE case_id = ?",
       args: [caseId],
@@ -1388,8 +1390,34 @@ describe("native approval workflow recovery", () => {
       },
       finalResponse: expect.stringMatching(/future invoice/i),
     });
+    const followUp = await restarted.caseStore.appendFollowUp({
+      caseId,
+      eventId: `credit-follow-up-${crypto.randomUUID()}`,
+      runId: `credit-follow-up-run-${crypto.randomUUID()}`,
+      message: {
+        id: `credit-follow-up-message-${crypto.randomUUID()}`,
+        author: "customer",
+        body: "When will my next invoice reflect the credit?",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    expect(followUp.appended).toBe(true);
+    const [followUpDispatch] = await restarted.caseStore.claimDispatch();
+    expect(followUpDispatch?.turnId).toBe(followUp.turnId);
+    expect(await restarted.caseStore.activateDispatch(followUpDispatch!)).toBe(
+      true,
+    );
     const recoveredCase = await restarted.caseStore.get(caseId);
     expect(recoveredCase).toBeDefined();
+    expect(recoveredCase?.subscriptionCreditResult).toBeUndefined();
+    expect((await restarted.caseStore.turns(caseId))[0]?.outcome).toMatchObject(
+      {
+        subscriptionCreditResult: {
+          creditId: "cbtxn_credit_restart",
+          status: "skipped",
+        },
+      },
+    );
     const { computeSubscriptionCreditMetrics } =
       await import("../../src/mastra/lib/monitoring");
     await expect(
@@ -3794,6 +3822,9 @@ describe("native approval workflow recovery", () => {
       caseStore.getAction(caseId, "refund-failure", native.fingerprint),
     ).resolves.toBeUndefined();
     await expect(
+      caseStore.customerFinancialRequests([caseId]),
+    ).resolves.toMatchObject([{ type: "refund", status: "unknown" }]);
+    await expect(
       caseStore.monitoringOperationalFailures([caseId]),
     ).resolves.toMatchObject({ financial: 0, workflow: 1 });
     expect(await caseStore.get(caseId)).toMatchObject({ status: "escalated" });
@@ -4287,41 +4318,45 @@ describe("native approval workflow recovery", () => {
       providerAccountId: "acct_test_123",
       externalConversationId: `conversation-${caseId}`,
     };
-    const { caseStore, mastra, native, recoverApprovedNativeDecisions } =
-      await setup(caseId, undefined, undefined, undefined, {
+    const { app, caseStore, native } = await setup(
+      caseId,
+      undefined,
+      undefined,
+      undefined,
+      {
         providerBindings: {
           support: local,
           commerce: stripe,
           transactions: stripe,
           knowledge: local,
         },
-      });
+      },
+    );
     const command = (await caseStore.getAction(
       caseId,
       "refund-command",
       native.fingerprint,
     )) as { fingerprint: string; idempotencyKey: string };
     approvedFingerprint = command.fingerprint;
-    await caseStore.recordApprovalDecision({
-      caseId,
-      turnId: native.turnId,
-      commandFingerprint: native.fingerprint,
-      principalId: "approver-demo",
-      approved: true,
-      nativeRunId: native.runId,
-      nativeToolCallId: native.toolCallId,
-    });
-    const recovered = await recoverApprovedNativeDecisions(mastra, caseStore, {
-      disableScorers: true,
-    });
-    expect({
-      recovered,
-      supportCase: await caseStore.get(caseId),
-    }).toMatchObject({ recovered: 1 });
+    const approval = await app.request(
+      `http://support.test/support/cases/${caseId}/approve`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${issueLocalSession({ id: "approver-demo" })}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ commandFingerprint: native.fingerprint }),
+      },
+    );
+    expect(approval.status).toBe(200);
     expect(posts).toBe(1);
     expect(await caseStore.get(caseId)).toMatchObject({
       refundResult: { status: "pending" },
     });
+    await expect(
+      caseStore.customerFinancialRequests([caseId]),
+    ).resolves.toMatchObject([{ type: "refund", status: "processing" }]);
     await expect(
       caseStore.getClient().execute({
         sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ?",
@@ -4391,6 +4426,18 @@ describe("native approval workflow recovery", () => {
       args: [caseId],
     });
     expect(Number((failures.rows[0] as { total: number }).total)).toBe(1);
+    // An earlier transport marker remains audit history, but the exact Stripe
+    // attempt has since established a provider failure and must win the
+    // customer-facing projection.
+    await caseStore.saveAction(
+      caseId,
+      "refund-uncertain",
+      command.fingerprint,
+      { classification: "uncertain" },
+    );
+    await expect(
+      caseStore.customerFinancialRequests([caseId]),
+    ).resolves.toMatchObject([{ type: "refund", status: "failed" }]);
   });
 
   it.each([
@@ -6209,7 +6256,7 @@ describe("native approval workflow recovery", () => {
     fingerprint = command.fingerprint;
     expect(
       (await approveNativeRefund(app, caseId, native.fingerprint)).status,
-    ).toBe(500);
+    ).toBe(200);
     expect(
       await caseStore.stripeRefundAttempt(command.idempotencyKey),
     ).toMatchObject({

@@ -300,6 +300,7 @@ export class CaseStoreCases {
               draft: current.draft,
               approval: current.approval,
               refundResult: current.refundResult,
+              subscriptionCreditResult: current.subscriptionCreditResult,
               finalResponse: current.finalResponse,
               escalationReason: current.escalationReason,
               workflowRunId: current.workflowRunId,
@@ -331,6 +332,9 @@ export class CaseStoreCases {
         draft: resetProjection ? undefined : current.draft,
         approval: resetProjection ? undefined : current.approval,
         refundResult: resetProjection ? undefined : current.refundResult,
+        subscriptionCreditResult: resetProjection
+          ? undefined
+          : current.subscriptionCreditResult,
         finalResponse: resetProjection ? undefined : current.finalResponse,
         escalationReason: resetProjection
           ? undefined

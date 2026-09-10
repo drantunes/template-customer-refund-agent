@@ -8,6 +8,7 @@ import {
   financialRetentionTombstoneError,
   StaleCaseWriteError,
 } from "./case-store-shared";
+import { legacyAmountToMoney, money, moneyToLegacyAmount } from "./money";
 
 type FinancialCommand = {
   binding?: { providerKind?: unknown };
@@ -45,24 +46,31 @@ export function customerReceiptState(
   if (providerStatus === "pending") return undefined;
   if (providerStatus === "unknown") return "unknown";
   const amount = command.amount;
-  const expectedAmount =
-    typeof amount === "object" && amount !== null
-      ? amount.minor
-      : typeof amount === "number"
-        ? Math.round(amount * 100)
-        : undefined;
   const expectedCurrency =
     typeof amount === "object" && amount !== null
       ? amount.currency
       : command.currency;
+  let expected;
+  try {
+    expected =
+      typeof amount === "object" && amount !== null
+        ? typeof amount.minor === "number" &&
+          typeof expectedCurrency === "string"
+          ? money(expectedCurrency, amount.minor)
+          : undefined
+        : typeof amount === "number" && typeof expectedCurrency === "string"
+          ? legacyAmountToMoney(amount, expectedCurrency)
+          : undefined;
+  } catch {
+    return "unknown";
+  }
   const receivedAmount = receipt.amount as
     { minor?: unknown; currency?: unknown } | undefined;
   const matchingMoney =
-    typeof expectedAmount === "number" &&
-    typeof expectedCurrency === "string" &&
+    expected !== undefined &&
     typeof receivedAmount?.minor === "number" &&
-    receivedAmount.minor === expectedAmount &&
-    receivedAmount.currency === expectedCurrency;
+    receivedAmount.minor === expected.minor &&
+    receivedAmount.currency === expected.currency;
   const matchingRequest =
     receipt.idempotencyKey === command.idempotencyKey &&
     (kind === "refund-command"
@@ -310,15 +318,25 @@ export class CaseStoreActions {
     const rows = await this.client.execute({
       sql: `SELECT a.case_id, a.kind, a.fingerprint, a.data, a.created_at,
           t.id AS turn_id, d.approved AS approved, i.effect AS receipt,
+          r.status AS refund_attempt_status, r.idempotency_key AS refund_attempt_key,
+          c.status AS credit_attempt_status, c.idempotency_key AS credit_attempt_key,
           EXISTS(SELECT 1 FROM support_actions f WHERE f.case_id = a.case_id
             AND f.fingerprint = a.fingerprint
-            AND f.kind IN ('refund-failure', 'refund-uncertain', 'subscription-credit-failure')) AS failed
+            AND f.kind IN ('refund-failure', 'subscription-credit-failure')) AS failed,
+          EXISTS(SELECT 1 FROM support_actions u WHERE u.case_id = a.case_id
+            AND u.fingerprint = a.fingerprint AND u.kind = 'refund-uncertain') AS uncertain
         FROM support_actions a
         JOIN support_turns t ON t.case_id = a.case_id
           AND t.command_fingerprint = a.fingerprint
         LEFT JOIN support_decisions d ON d.case_id = a.case_id
           AND d.turn_id = t.id AND d.command_fingerprint = a.fingerprint
         LEFT JOIN support_idempotency i ON i.fingerprint = a.fingerprint
+        LEFT JOIN support_stripe_refund_attempts r ON a.kind = 'refund-command'
+          AND r.case_id = a.case_id AND r.turn_id = t.id
+          AND r.command_fingerprint = a.fingerprint
+        LEFT JOIN support_stripe_subscription_credit_attempts c
+          ON a.kind = 'subscription-credit-command' AND c.case_id = a.case_id
+          AND c.turn_id = t.id AND c.command_fingerprint = a.fingerprint
         WHERE a.case_id IN (${placeholders})
           AND a.kind IN ('refund-command', 'subscription-credit-command')
         ORDER BY a.created_at DESC`,
@@ -338,27 +356,45 @@ export class CaseStoreActions {
           command.amount <= 0)
       )
         return [];
-      const money = command.amount as
+      const commandAmount = command.amount as
         number | { minor?: unknown; currency?: unknown };
-      const amount =
-        typeof money === "number"
-          ? money
-          : typeof money.minor === "number"
-            ? money.minor / 100
-            : undefined;
       const currency =
         typeof command.currency === "string"
           ? command.currency
-          : typeof money === "object" && typeof money.currency === "string"
-            ? money.currency
+          : typeof commandAmount === "object" &&
+              typeof commandAmount.currency === "string"
+            ? commandAmount.currency
             : undefined;
-      if (!amount || !currency) return [];
+      let amount: number | undefined;
+      try {
+        amount =
+          typeof commandAmount === "number"
+            ? currency
+              ? moneyToLegacyAmount(
+                  legacyAmountToMoney(commandAmount, currency),
+                )
+              : undefined
+            : typeof commandAmount.minor === "number" && currency
+              ? moneyToLegacyAmount(money(currency, commandAmount.minor))
+              : undefined;
+      } catch {
+        return [];
+      }
+      if (amount === undefined || !currency) return [];
       const receipt = safeReceipt(row.receipt);
       const receiptStatus = customerReceiptState(
         String(row.kind),
         command,
         receipt,
       );
+      const exactAttemptStatus =
+        String(row.kind) === "refund-command"
+          ? row.refund_attempt_key === command.idempotencyKey
+            ? String(row.refund_attempt_status ?? "")
+            : undefined
+          : row.credit_attempt_key === command.idempotencyKey
+            ? String(row.credit_attempt_status ?? "")
+            : undefined;
       const status =
         row.approved === null || row.approved === undefined
           ? "pending_approval"
@@ -370,9 +406,16 @@ export class CaseStoreActions {
                 ? "failed"
                 : receiptStatus === "unknown"
                   ? "unknown"
-                  : Number(row.failed) > 0
+                  : exactAttemptStatus === "failed"
                     ? "failed"
-                    : "processing";
+                    : exactAttemptStatus === "unknown" ||
+                        exactAttemptStatus === "quarantined"
+                      ? "unknown"
+                      : Number(row.uncertain) > 0
+                        ? "unknown"
+                        : Number(row.failed) > 0
+                          ? "failed"
+                          : "processing";
       return [
         {
           caseId: String(row.case_id),
