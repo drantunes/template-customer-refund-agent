@@ -103,7 +103,12 @@ async function loadCharacterizationRuntime(
   });
   const runId = `characterization-run-${crypto.randomUUID()}`;
   const accepted = await caseStore.acceptInbound(
-    { id: `case_${crypto.randomUUID()}`, status: "new", ...normalized },
+    {
+      id: `case_${crypto.randomUUID()}`,
+      status: "new",
+      ...normalized,
+      metadata: { ...normalized.metadata, ownerId: "customer-alex" },
+    },
     `event_${crypto.randomUUID()}`,
     runId,
   );
@@ -230,16 +235,32 @@ describe("resolve support case WIP characterization", () => {
       });
     const caseId = `recovery_${crypto.randomUUID()}`;
     const runId = `run_${crypto.randomUUID()}`;
+    const externalId = `recovery-event-${crypto.randomUUID()}`;
+    const bindings = supportCase.metadata.providerBindings as {
+      support: ProviderBinding;
+      commerce: ProviderBinding;
+      transactions: ProviderBinding;
+      knowledge: ProviderBinding;
+    };
+    const binding = {
+      ...bindings.support,
+      externalConversationId: externalId,
+    };
     await caseStore.acceptInbound(
       {
         ...supportCase,
         id: caseId,
-        externalId: `recovery-event-${crypto.randomUUID()}`,
+        externalId,
         messages: supportCase.messages.map((message) => ({
           ...message,
           id: `message_${crypto.randomUUID()}`,
         })),
-        metadata: { ...supportCase.metadata, ownerId: "customer-alex" },
+        metadata: {
+          ...supportCase.metadata,
+          ownerId: "customer-alex",
+          providerBinding: binding,
+          providerBindings: { ...bindings, support: binding },
+        },
       },
       `event_${crypto.randomUUID()}`,
       runId,

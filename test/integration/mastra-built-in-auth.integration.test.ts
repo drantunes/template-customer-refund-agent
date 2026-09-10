@@ -726,15 +726,20 @@ describe("configured Mastra built-in API authorization", () => {
       await import("../../src/mastra/lib/monitoring");
     const { defaultLocalBinding, deliverOutbox, localRuntime } =
       await import("../../src/mastra/runtime/local-runtime");
-    const binding = defaultLocalBinding("operational-span-conversation");
-    await localRuntime.seed(binding);
+    const slowBinding = defaultLocalBinding("operational-span-slow");
+    const failingBinding = defaultLocalBinding("operational-span-failure");
+    await localRuntime.seed(slowBinding);
+    await localRuntime.seed(failingBinding);
     const observability = mastra.observability.getSelectedInstance({})!;
     const root = observability.startSpan({
       name: "phase004-operational-test",
       type: SpanType.WORKFLOW_RUN,
     });
     const createdAt = new Date().toISOString();
-    const makeCase = (id: string) => ({
+    const makeCase = (
+      id: string,
+      binding: ReturnType<typeof defaultLocalBinding>,
+    ) => ({
       id,
       externalId: id,
       source: "mock-email" as const,
@@ -747,14 +752,14 @@ describe("configured Mastra built-in API authorization", () => {
       traceId: root.traceId,
       metadata: { ownerId: "customer-alex", providerBinding: binding },
     });
-    const slowCase = makeCase("operational-span-slow");
-    const failingCase = makeCase("operational-span-failure");
+    const slowCase = makeCase("operational-span-slow", slowBinding);
+    const failingCase = makeCase("operational-span-failure", failingBinding);
     await caseStore.create(slowCase);
     await caseStore.create(failingCase);
     await caseStore.enqueueDelivery({
       id: "operational-span-slow-outbox",
       caseId: slowCase.id,
-      binding,
+      binding: slowBinding,
       body: "slow synthetic delivery",
       status: "resolved",
       originatingTurnId: "operational-span-slow-turn",
@@ -765,7 +770,7 @@ describe("configured Mastra built-in API authorization", () => {
     await caseStore.enqueueDelivery({
       id: "operational-span-failure-outbox",
       caseId: failingCase.id,
-      binding,
+      binding: failingBinding,
       body: "failing synthetic delivery",
       status: "resolved",
       originatingTurnId: "operational-span-failure-turn",
@@ -773,7 +778,7 @@ describe("configured Mastra built-in API authorization", () => {
       originatingTraceId: root.traceId,
       correlationState: "known",
     });
-    const support = localRuntime.support(binding);
+    const support = localRuntime.support(slowBinding);
     const registry = {
       support: () => ({
         kind: "local" as const,
@@ -819,7 +824,10 @@ describe("configured Mastra built-in API authorization", () => {
     root.end();
     await mastra.observability.flush();
 
-    const summary = await computeMonitoringSummary(mastra, binding.tenantId);
+    const summary = await computeMonitoringSummary(
+      mastra,
+      slowBinding.tenantId,
+    );
     expect(summary.telemetry.providerCalls).toContainEqual({
       operation: "support.deliver",
       calls: 2,
@@ -1039,7 +1047,7 @@ describe("configured Mastra built-in API authorization", () => {
       await import("../../src/mastra/lib/monitoring");
     const { defaultLocalBinding } =
       await import("../../src/mastra/runtime/local-runtime");
-    const binding = defaultLocalBinding("fulfilled-null-trace");
+    const tenantId = defaultLocalBinding("retained-trace-case").tenantId;
     const root = mastra.observability.getSelectedInstance({})!.startSpan({
       name: "retained-tenant-trace",
       type: SpanType.WORKFLOW_RUN,
@@ -1050,7 +1058,8 @@ describe("configured Mastra built-in API authorization", () => {
     for (const [id, traceId] of [
       ["retained-trace-case", root.traceId],
       ["missing-trace-case", "retained-and-purged-trace"],
-    ])
+    ]) {
+      const binding = defaultLocalBinding(id);
       await caseStore.create({
         id,
         externalId: id,
@@ -1064,6 +1073,7 @@ describe("configured Mastra built-in API authorization", () => {
         traceId,
         metadata: { ownerId: "customer-alex", providerBinding: binding },
       });
+    }
     const storage = (await mastra.getStorage()!.getStore("observability")) as {
       getTrace(args: { traceId: string }): Promise<unknown>;
     };
@@ -1073,7 +1083,7 @@ describe("configured Mastra built-in API authorization", () => {
         ? Promise.resolve(null)
         : getTrace({ traceId }),
     );
-    const summary = await computeMonitoringSummary(mastra, binding.tenantId);
+    const summary = await computeMonitoringSummary(mastra, tenantId);
     expect(summary.telemetry.observedTraces).toBe(1);
     expect(summary.telemetry.unavailable).toContain("partial-trace-read");
   });
