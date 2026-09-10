@@ -24,6 +24,7 @@ import type {
   ProviderBinding,
   RefundCommand,
   SubscriptionCancellationCommand,
+  SubscriptionCreditCommand,
 } from "../providers/contracts";
 import type { DispatchLeaseScope } from "./dispatch-lease-scope";
 import {
@@ -240,6 +241,17 @@ export class CaseStore {
   }) {
     await this.ensured();
     return this.dispatch.authorizeStripeRefundFirstEffect(input);
+  }
+
+  async authorizeStripeSubscriptionCreditFirstEffect(input: {
+    command: SubscriptionCreditCommand;
+    dispatch: DispatchLeaseScope;
+    validatePolicy: (
+      tx: Awaited<ReturnType<Client["transaction"]>>,
+    ) => Promise<void>;
+  }) {
+    await this.ensured();
+    return this.dispatch.authorizeStripeSubscriptionCreditFirstEffect(input);
   }
 
   async authorizeSubscriptionCancellationFirstEffect(input: {

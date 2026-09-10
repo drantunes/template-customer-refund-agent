@@ -4,6 +4,7 @@ import {
   bindingsForCase,
   type RefundCommand,
   type SubscriptionCancellationCommand,
+  type SubscriptionCreditCommand,
 } from "../providers/contracts";
 import { ownerIdForCustomer } from "../server/auth";
 import type { DispatchLeaseScope } from "./dispatch-lease-scope";
@@ -257,6 +258,102 @@ export class CaseStoreDispatch {
       // in flight. A stale worker must observe that current prohibition at
       // the same transaction boundary as its lease and command checks.
       if (supportCase.draft?.requiresEscalation) {
+        await tx.rollback();
+        return false;
+      }
+      await input.validatePolicy(tx);
+      await tx.commit();
+      return true;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
+  /**
+   * The credit ledger is written before Stripe's balance-transaction POST so a
+   * lost response can be reconciled safely. That durable preparation is not
+   * authority for a new effect: re-check the immutable command, current lease,
+   * and published policy in one transaction immediately before that first POST.
+   */
+  async authorizeStripeSubscriptionCreditFirstEffect(input: {
+    command: SubscriptionCreditCommand;
+    dispatch: DispatchLeaseScope;
+    validatePolicy: (
+      tx: Awaited<ReturnType<Client["transaction"]>>,
+    ) => Promise<void>;
+  }) {
+    const tx = await this.client.transaction("write");
+    try {
+      const command = input.command;
+      const attemptResult = await tx.execute({
+        sql: "SELECT * FROM support_stripe_subscription_credit_attempts WHERE idempotency_key = ? AND command_fingerprint = ?",
+        args: [command.idempotencyKey, command.fingerprint],
+      });
+      const attempt = attemptResult.rows[0] as
+        Record<string, unknown> | undefined;
+      const caseResult = await tx.execute({
+        sql: "SELECT data FROM support_cases WHERE id = ?",
+        args: [command.approvalCaseId],
+      });
+      const supportCase = caseResult.rows[0]
+        ? parse({ data: caseResult.rows[0].data })
+        : undefined;
+      const actionResult = await tx.execute({
+        sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = 'subscription-credit-command' AND fingerprint = ?",
+        args: [command.approvalCaseId, command.fingerprint],
+      });
+      const immutable = actionResult.rows[0]
+        ? JSON.parse(String(actionResult.rows[0].data))
+        : undefined;
+      const turnResult = await tx.execute({
+        sql: "SELECT command_fingerprint FROM support_turns WHERE id = ? AND case_id = ?",
+        args: [String(attempt?.turn_id ?? ""), command.approvalCaseId],
+      });
+      const dispatch = await tx.execute({
+        sql: "SELECT id FROM support_dispatch WHERE id = ? AND case_id = ? AND turn_id = ? AND lease_token = ? AND state IN ('claimed', 'started') AND lease_until > ?",
+        args: [
+          input.dispatch.dispatchId,
+          input.dispatch.caseId,
+          input.dispatch.turnId,
+          input.dispatch.leaseToken,
+          now(),
+        ],
+      });
+      const commandCurrent =
+        attempt &&
+        String(attempt.status) === "prepared" &&
+        String(attempt.case_id) === command.approvalCaseId &&
+        String(attempt.tenant_id) === command.binding.tenantId &&
+        String(attempt.provider_account_id) ===
+          command.binding.providerAccountId &&
+        String(attempt.command_fingerprint) === command.fingerprint &&
+        structurallyEqual(
+          attempt.command_data
+            ? JSON.parse(String(attempt.command_data))
+            : undefined,
+          command,
+        ) &&
+        structurallyEqual(immutable, command) &&
+        String(turnResult.rows[0]?.command_fingerprint ?? "") ===
+          command.fingerprint &&
+        supportCase !== undefined &&
+        structurallyEqual(
+          bindingsForCase(supportCase).transactions,
+          command.binding,
+        );
+      const leaseCurrent =
+        Boolean(dispatch.rows[0]) &&
+        String(attempt?.dispatch_id ?? "") === input.dispatch.dispatchId &&
+        String(attempt?.lease_token ?? "") === input.dispatch.leaseToken &&
+        String(attempt?.turn_id ?? "") === input.dispatch.turnId &&
+        supportCase?.metadata.activeTurnId === input.dispatch.turnId;
+      if (
+        !commandCurrent ||
+        !leaseCurrent ||
+        supportCase.draft?.requiresEscalation
+      ) {
         await tx.rollback();
         return false;
       }

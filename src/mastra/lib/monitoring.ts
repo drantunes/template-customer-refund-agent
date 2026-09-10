@@ -358,11 +358,35 @@ function refundResult(value: unknown) {
     return {
       status: item.status,
       idempotencyKey: item.idempotencyKey,
+      creditId: item.creditId,
+      customerId: item.customerId,
+      subscriptionId: item.subscriptionId,
+      executedAt: item.executedAt,
       ...legacyAmountToMoney(item.amount, item.currency),
     };
   } catch {
     return undefined;
   }
+}
+
+async function confirmedRecoveredEffect(
+  result: ReturnType<typeof refundResult>,
+) {
+  if (result?.status !== "skipped" || !result.idempotencyKey) return false;
+  const durable = await caseStore.idempotency(String(result.idempotencyKey));
+  const effect = recordAt(durable?.effect);
+  return (
+    Boolean(effect) &&
+    effect?.status === "succeeded" &&
+    typeof effect?.creditId === "string" &&
+    effect.creditId === result.creditId &&
+    effect.customerId === result.customerId &&
+    effect.subscriptionId === result.subscriptionId &&
+    effect.idempotencyKey === result.idempotencyKey &&
+    effect.executedAt === result.executedAt &&
+    recordAt(effect.amount)?.currency === result.currency &&
+    recordAt(effect.amount)?.minor === result.minor
+  );
 }
 export async function computeRefundApprovalMetrics(
   cases: SupportCase[],
@@ -421,7 +445,11 @@ async function computeFinancialApprovalMetrics(
       )
         autoEscalated += 1;
       const result = refundResult(turn.outcome?.[options.resultKey]);
-      if (result?.status === "executed") {
+      if (
+        result &&
+        (result.status === "executed" ||
+          (await confirmedRecoveredEffect(result)))
+      ) {
         const key = String(result.idempotencyKey ?? turn.id);
         if (!effectKeys.has(key)) {
           effectKeys.add(key);
@@ -437,7 +465,13 @@ async function computeFinancialApprovalMetrics(
     for (const effect of Object.values(effects ?? {})) {
       const result = refundResult(effect);
       const key = String(result?.idempotencyKey ?? "");
-      if (result?.status === "executed" && key && !effectKeys.has(key)) {
+      if (
+        result &&
+        (result.status === "executed" ||
+          (await confirmedRecoveredEffect(result))) &&
+        key &&
+        !effectKeys.has(key)
+      ) {
         effectKeys.add(key);
         executed += 1;
         totals.set(

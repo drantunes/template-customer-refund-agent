@@ -211,4 +211,128 @@ describe("monitoring aggregates", () => {
       executedTotals: [{ currency: "USD", minor: 4900 }],
     });
   });
+
+  it("counts a durable recovered credit receipt once across projections, never arbitrary skipped results", async () => {
+    const supportCase = fixture("recovered-credit-metrics");
+    const recovered = {
+      creditId: "credit_recovered",
+      customerId: "customer_1",
+      subscriptionId: "sub_1",
+      amount: 49,
+      currency: "USD",
+      status: "skipped" as const,
+      idempotencyKey: "recovered-credit-effect",
+      executedAt: "2026-01-01T00:01:00.000Z",
+    };
+    const skippedProjection = (idempotencyKey: string, creditId: string) => ({
+      ...recovered,
+      creditId,
+      idempotencyKey,
+    });
+    const pending = skippedProjection(
+      "pending-credit-effect",
+      "credit_pending",
+    );
+    const failed = skippedProjection("failed-credit-effect", "credit_failed");
+    const unknown = skippedProjection(
+      "unknown-credit-effect",
+      "credit_unknown",
+    );
+    const amountMismatch = skippedProjection(
+      "amount-mismatch-credit-effect",
+      "credit_amount_mismatch",
+    );
+    const customerMismatch = skippedProjection(
+      "customer-mismatch-credit-effect",
+      "credit_customer_mismatch",
+    );
+    supportCase.metadata.subscriptionCreditEffects = {
+      recovered,
+      pending,
+      failed,
+      unknown,
+      amountMismatch,
+      customerMismatch,
+    };
+    vi.spyOn(caseStore, "turns").mockResolvedValue([
+      {
+        id: "recovered-turn",
+        eventId: "recovered-event",
+        sequence: 1,
+        state: "resolved",
+        outcome: {
+          draft: { resolutionAction: "subscription_credit" },
+          subscriptionCreditResult: recovered,
+        },
+      },
+      {
+        id: "duplicate-recovery-turn",
+        eventId: "duplicate-recovery-event",
+        sequence: 2,
+        state: "resolved",
+        outcome: {
+          draft: { resolutionAction: "subscription_credit" },
+          subscriptionCreditResult: recovered,
+        },
+      },
+      ...[pending, failed, unknown, amountMismatch, customerMismatch].map(
+        (result, index) => ({
+          id: `unconfirmed-turn-${index}`,
+          eventId: `unconfirmed-event-${index}`,
+          sequence: index + 3,
+          state: "escalated" as const,
+          outcome: {
+            draft: { resolutionAction: "subscription_credit" },
+            subscriptionCreditResult: result,
+          },
+        }),
+      ),
+    ]);
+    const receipt = (
+      projection: typeof recovered,
+      changes: Record<string, unknown> = {},
+    ) => ({
+      creditId: projection.creditId,
+      customerId: projection.customerId,
+      subscriptionId: projection.subscriptionId,
+      amount: { currency: "USD", minor: 4900 },
+      idempotencyKey: projection.idempotencyKey,
+      executedAt: projection.executedAt,
+      replayed: true,
+      status: "succeeded",
+      providerStatus: "recovered",
+      providerRefs: [],
+      ...changes,
+    });
+    const receipts = new Map([
+      [recovered.idempotencyKey, receipt(recovered)],
+      [pending.idempotencyKey, receipt(pending, { status: "pending" })],
+      [failed.idempotencyKey, receipt(failed, { status: "failed" })],
+      [unknown.idempotencyKey, receipt(unknown, { status: "unknown" })],
+      [
+        amountMismatch.idempotencyKey,
+        receipt(amountMismatch, { amount: { currency: "USD", minor: 4800 } }),
+      ],
+      [
+        customerMismatch.idempotencyKey,
+        receipt(customerMismatch, { customerId: "customer_other" }),
+      ],
+    ]);
+    vi.spyOn(caseStore, "idempotency").mockImplementation(async (key) => {
+      const effect = receipts.get(key);
+      return effect
+        ? { fingerprint: "recovered-fingerprint", effect }
+        : undefined;
+    });
+    vi.spyOn(caseStore, "monitoringDecisions").mockResolvedValue([]);
+    vi.spyOn(caseStore, "monitoringFinancialFailures").mockResolvedValue(0);
+
+    await expect(
+      computeSubscriptionCreditMetrics([supportCase]),
+    ).resolves.toMatchObject({
+      recommended: 7,
+      executed: 1,
+      executedTotals: [{ currency: "USD", minor: 4900 }],
+    });
+  });
 });

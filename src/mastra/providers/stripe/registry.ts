@@ -23,6 +23,7 @@ import { activePrincipalHasRole } from "../../server/auth";
 import { ownerIdForCustomer } from "../../server/auth";
 import { activeTrustedCancellationScope } from "../cancellation-execution";
 import { assertRefundPolicyEvidenceAtFirstEffect } from "../../lib/refund-policy-evidence-persistence";
+import { isRefundPolicyEvidenceError } from "../../lib/refund-policy-evidence";
 import {
   legacyAmountToMoney,
   structurallyEqual,
@@ -247,15 +248,28 @@ export class StripeProviderRegistry
         command,
         supportCase.customer.email,
         async () => {
-          if (
-            !(await caseStore.hasDispatchLease({
-              caseId: command.approvalCaseId,
-              turnId: authorization.turnId,
-              dispatchId: authorization.dispatchId,
-              leaseToken: authorization.leaseToken,
-            }))
-          )
-            throw new StripeFirstEffectAuthorizationError();
+          let authorized = false;
+          try {
+            authorized =
+              await caseStore.authorizeStripeSubscriptionCreditFirstEffect({
+                command,
+                dispatch: {
+                  caseId: command.approvalCaseId,
+                  turnId: authorization.turnId,
+                  dispatchId: authorization.dispatchId,
+                  leaseToken: authorization.leaseToken,
+                },
+                validatePolicy: (tx) =>
+                  assertRefundPolicyEvidenceAtFirstEffect(
+                    tx,
+                    command,
+                    authorization.turnId,
+                  ),
+              });
+          } catch (error) {
+            if (isRefundPolicyEvidenceError(error)) throw error;
+          }
+          if (!authorized) throw new StripeFirstEffectAuthorizationError();
         },
       );
       await caseStore.updateStripeSubscriptionCreditAttempt(
@@ -268,6 +282,18 @@ export class StripeProviderRegistry
       );
       return effect;
     } catch (error) {
+      if (isRefundPolicyEvidenceError(error)) {
+        // The policy fence failed before the provider boundary. Quarantine the
+        // prepared command as a policy denial; it is not an uncertain Stripe
+        // outcome and recovery must not infer that a remote POST may exist.
+        await caseStore
+          .updateStripeSubscriptionCreditAttempt(command.idempotencyKey, {
+            status: "quarantined",
+            providerStatus: "pre-dispatch-policy-denied",
+          })
+          .catch(() => undefined);
+        throw error;
+      }
       // Any error after the durable pre-POST record is conservatively
       // uncertain. A malformed/timeout response can still follow a remote
       // effect, so recovery must inspect the provider ledger rather than POST.

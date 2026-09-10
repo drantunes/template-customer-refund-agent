@@ -1382,6 +1382,16 @@ describe("native approval workflow recovery", () => {
       },
       finalResponse: expect.stringMatching(/future invoice/i),
     });
+    const recoveredCase = await restarted.caseStore.get(caseId);
+    expect(recoveredCase).toBeDefined();
+    const { computeSubscriptionCreditMetrics } =
+      await import("../../src/mastra/lib/monitoring");
+    await expect(
+      computeSubscriptionCreditMetrics([recoveredCase!]),
+    ).resolves.toMatchObject({
+      executed: 1,
+      executedTotals: [{ currency: "USD", minor: 4900 }],
+    });
     expect(
       await restarted.recoverApprovedNativeDecisions(
         restarted.mastra,
@@ -1390,6 +1400,92 @@ describe("native approval workflow recovery", () => {
       ),
     ).toBe(0);
     expect(observed.posts).toBe(1);
+  });
+
+  it("escalates expired or replaced policy before a native Stripe credit can POST", async () => {
+    for (const scenario of ["expired", "replaced"] as const) {
+      const caseId = `native-credit-policy-${scenario}-${crypto.randomUUID()}`;
+      const expiry =
+        scenario === "expired" ? prepareKnowledgeExpiry() : undefined;
+      enableSyntheticStripe();
+      let fingerprint = "";
+      const observed = {
+        posts: 0,
+        idempotencyKeys: [] as string[],
+        remoteCommitted: false,
+      };
+      vi.stubGlobal(
+        "fetch",
+        creditResponseLossStripeTransport({
+          caseId,
+          fingerprint: () => fingerprint,
+          observed,
+        }),
+      );
+      const initial = await setup(caseId, undefined, undefined, undefined, {
+        credit: true,
+        ...(expiry ? { knowledgeExpiresAt: expiry.expiresAt } : {}),
+        providerBindings: syntheticStripeBindings(caseId),
+        message: "Our service outage prevented me from using my subscription.",
+        triage: {
+          intent: "service_problem",
+          urgency: "normal",
+          sentiment: "negative",
+          requiresHumanReview: false,
+          confidence: 1,
+          rationale: "Verified service outage.",
+        },
+        responseModel: jsonModel({
+          draftResponse:
+            "After approval, we can add a credit to your next bill.",
+          citedSources: ["service-problem-credit-policy"],
+          selectedPolicyExcerpts: [
+            {
+              source: "service-problem-credit-policy",
+              excerpt:
+                "For a verified service problem on one active monthly subscription, support may propose one credit equal to that subscription's single monthly charge.",
+            },
+          ],
+          recommendRefund: false,
+          resolutionAction: "subscription_credit",
+          subscriptionCreditAmount: 49,
+          subscriptionCreditCurrency: "USD",
+          subscriptionCreditReason: "Verified service outage",
+          requiresEscalation: false,
+        }) as never,
+      });
+      const native = initial.native!;
+      fingerprint = native.fingerprint;
+      if (expiry) vi.setSystemTime(expiry.afterExpiry);
+      else {
+        const { publishKnowledge } =
+          await import("../../src/mastra/lib/publish-knowledge");
+        await publishKnowledge(syntheticStripeBindings(caseId).knowledge);
+      }
+
+      await approveNativeRefund(initial.app, caseId, native.fingerprint);
+      expect(observed).toMatchObject({ posts: 0, remoteCommitted: false });
+      expect(observed.idempotencyKeys).toEqual([]);
+      expect(await initial.caseStore.get(caseId)).toMatchObject({
+        status: "escalated",
+      });
+      const command = await initial.caseStore.getAction(
+        caseId,
+        "subscription-credit-command",
+        native.fingerprint,
+      );
+      expect(
+        await initial.caseStore.stripeSubscriptionCreditAttempt(
+          String(command!.idempotencyKey),
+        ),
+      ).toMatchObject({
+        status: "quarantined",
+        providerStatus: "pre-dispatch-policy-denied",
+      });
+      expect(
+        await initial.caseStore.idempotency(String(command!.idempotencyKey)),
+      ).toBeUndefined();
+    }
   });
 
   it("rejects tampered retrieved vector text before it can create an approval or financial effect", async () => {
