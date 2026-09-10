@@ -12,6 +12,15 @@ import {
  */
 export type ProviderBinding = PersistedProviderBinding;
 
+/** The persisted canonical support owner failed before any refund attempt or
+ * provider request could be created. Callers may safely classify this as a
+ * confirmed no-effect only when no earlier attempt exists. */
+export class VerifiedRefundOwnerRejectedError extends Error {
+  constructor() {
+    super("Refund execution requires the current verified case owner.");
+  }
+}
+
 /** A case persists each binding independently; local fixtures use the same
  * account by default, but that convenience never changes a saved case. */
 export type CaseProviderBindings = PersistedCaseProviderBindings;

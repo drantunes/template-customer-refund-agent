@@ -6,7 +6,7 @@ import {
   type SubscriptionCancellationCommand,
   type SubscriptionCreditCommand,
 } from "../providers/contracts";
-import { ownerIdForCustomer } from "../server/auth";
+import { canonicalConversationOwner } from "./case-store-cases";
 import type { DispatchLeaseScope } from "./dispatch-lease-scope";
 import {
   now,
@@ -194,13 +194,16 @@ export class CaseStoreDispatch {
       const request = attempt?.stripe_request_data
         ? JSON.parse(String(attempt.stripe_request_data))
         : undefined;
+      const canonicalOwner = supportCase
+        ? await canonicalConversationOwner(tx, {
+            caseId: command.approvalCaseId,
+            binding: bindingsForCase(supportCase).support,
+          })
+        : undefined;
       const ownerCurrent =
         supportCase &&
-        supportCase.metadata.ownerId === input.ownerId &&
-        ownerIdForCustomer(
-          command.binding.tenantId,
-          supportCase.customer.email,
-        ) === input.ownerId;
+        canonicalOwner === input.ownerId &&
+        supportCase.metadata.ownerId === canonicalOwner;
       const commandCurrent =
         attempt &&
         ["prepared", "unknown"].includes(String(attempt.status)) &&
@@ -434,10 +437,10 @@ export class CaseStoreDispatch {
         supportCase !== undefined &&
         supportCase.metadata.activeTurnId === command.turnId &&
         supportCase.metadata.ownerId === command.ownerId &&
-        ownerIdForCustomer(
-          command.binding.tenantId,
-          supportCase.customer.email,
-        ) === command.ownerId &&
+        (await canonicalConversationOwner(tx, {
+          caseId: command.caseId,
+          binding: bindingsForCase(supportCase).support,
+        })) === command.ownerId &&
         structurallyEqual(
           bindingsForCase(supportCase).transactions,
           command.binding,

@@ -198,6 +198,10 @@ async function setup(
     quoteFailure?: boolean;
     allowInitialWorkflowFailure?: boolean;
     providerBindings?: CaseProviderBindings;
+    /** An inbound support adapter establishes this immutable owner binding. */
+    ownerId?: string;
+    source?: "mock-email" | "intercom-conversation";
+    supportSource?: "mock" | "intercom";
     knowledgeExpiresAt?: string;
     triage?: Record<string, unknown>;
     message?: string;
@@ -212,7 +216,7 @@ async function setup(
     options?.databasePath ?? temporaryDatabasePath("phase003-native-workflow");
   if (!files.includes(path)) files.push(path, `${path}-shm`, `${path}-wal`);
   process.env.TURSO_DATABASE_URL = `file:${path}`;
-  process.env.SUPPORT_SOURCE = "mock";
+  process.env.SUPPORT_SOURCE = options?.supportSource ?? "mock";
   vi.resetModules();
   // Evaluators are not the subject of this recovery test.  Remove their
   // registered scorer boundary before constructing the real agents so a
@@ -371,7 +375,7 @@ async function setup(
       {
         id: caseId,
         externalId: `event-${caseId}`,
-        source: "mock-email",
+        source: options?.source ?? "mock-email",
         customer: { email: "alex@example.com" },
         subject: "I was charged twice",
         messages: [
@@ -388,7 +392,7 @@ async function setup(
         metadata: {
           providerBinding: binding,
           providerBindings: bindings,
-          ownerId: "customer-alex",
+          ownerId: options?.ownerId ?? "customer-alex",
         },
       },
       `event-${caseId}`,
@@ -592,6 +596,19 @@ afterEach(async () => {
     "STRIPE_API_BASE_URL",
   ])
     delete process.env[name];
+  for (const name of [
+    "INTERCOM_DEVELOPMENT_ENABLED",
+    "INTERCOM_TENANT_ID",
+    "INTERCOM_APP_ID",
+    "INTERCOM_ACCESS_TOKEN",
+    "INTERCOM_CLIENT_SECRET",
+    "INTERCOM_ADMIN_ID",
+    "INTERCOM_API_BASE_URL",
+    "INTERCOM_KNOWLEDGE_ENABLED",
+    "INTERCOM_TICKET_TYPE_ID",
+    "INTERCOM_TICKET_STATE_ID",
+  ])
+    delete process.env[name];
   delete process.env.SUPPORT_TEST_DISPATCH_LEASE_MS;
   delete process.env.SUPPORT_TEST_DISPATCH_HEARTBEAT_MS;
   await Promise.all(files.splice(0).map((file) => rm(file, { force: true })));
@@ -670,6 +687,28 @@ function syntheticStripeBindings(caseId: string): CaseProviderBindings {
     transactions: stripe,
     knowledge: local,
   };
+}
+
+function enableSyntheticIntercom() {
+  process.env.INTERCOM_DEVELOPMENT_ENABLED = "true";
+  process.env.INTERCOM_TENANT_ID = "local-demo";
+  process.env.INTERCOM_APP_ID = "intercom-test-app";
+  process.env.INTERCOM_ACCESS_TOKEN = "synthetic-token";
+  process.env.INTERCOM_CLIENT_SECRET = "synthetic-secret";
+  process.env.INTERCOM_ADMIN_ID = "intercom-test-admin";
+  process.env.INTERCOM_API_BASE_URL = "http://intercom.test";
+  process.env.INTERCOM_KNOWLEDGE_ENABLED = "false";
+}
+
+function syntheticIntercomStripeBindings(caseId: string): CaseProviderBindings {
+  const stripe = syntheticStripeBindings(caseId);
+  const support = {
+    tenantId: "local-demo",
+    providerKind: "intercom" as const,
+    providerAccountId: "intercom-test-app",
+    externalConversationId: `intercom-conversation-${caseId}`,
+  };
+  return { ...stripe, support };
 }
 
 /** The credit fixture includes the full subscription payment chain used by
@@ -1300,6 +1339,8 @@ describe("native approval workflow recovery", () => {
 
   it("recovers one approved native Stripe credit after its committed POST loses the response and the SQLite runtime restarts", async () => {
     const caseId = `native-credit-restart-${crypto.randomUUID()}`;
+    const ownerId = `intercom:local-demo:contact:contact-${caseId}`;
+    enableSyntheticIntercom();
     enableSyntheticStripe();
     let fingerprint = "";
     const observed = {
@@ -1334,7 +1375,10 @@ describe("native approval workflow recovery", () => {
     }) as never;
     const initial = await setup(caseId, undefined, undefined, undefined, {
       credit: true,
-      providerBindings: syntheticStripeBindings(caseId),
+      ownerId,
+      source: "intercom-conversation",
+      supportSource: "intercom",
+      providerBindings: syntheticIntercomStripeBindings(caseId),
       message: "Our service outage prevented me from using my subscription.",
       triage: {
         intent: "service_problem",
@@ -1407,7 +1451,8 @@ describe("native approval workflow recovery", () => {
       credit: true,
       databasePath,
       existingCase: true,
-      providerBindings: syntheticStripeBindings(caseId),
+      supportSource: "intercom",
+      providerBindings: syntheticIntercomStripeBindings(caseId),
       responseModel: creditResponse,
     });
     const project = vi.spyOn(
@@ -6570,6 +6615,158 @@ describe("native approval workflow recovery", () => {
       expect(posts).toBe(0);
     },
   );
+
+  it.each([
+    { label: "canonical Intercom contact", changedOwner: false },
+    { label: "changed Intercom contact", changedOwner: true },
+    { label: "changed canonical binding tuple", changedOwner: "tuple" },
+  ])(
+    "uses the canonical Intercom owner at the Stripe refund fence: $label",
+    async ({ changedOwner }) => {
+      const caseId = `intercom-stripe-owner-${crypto.randomUUID()}`;
+      const ownerId = `intercom:local-demo:contact:contact-${caseId}`;
+      enableSyntheticIntercom();
+      enableSyntheticStripe();
+      let fingerprint = "";
+      const observed = {
+        posts: 0,
+        accountGets: 0,
+        gets: [] as string[],
+        keys: [] as string[],
+      };
+      vi.stubGlobal(
+        "fetch",
+        nativeRefundStripeTransport({
+          caseId,
+          fingerprint: () => fingerprint,
+          observed,
+        }),
+      );
+      const { app, caseStore, native } = await setup(
+        caseId,
+        undefined,
+        undefined,
+        undefined,
+        {
+          ownerId,
+          source: "intercom-conversation",
+          supportSource: "intercom",
+          providerBindings: syntheticIntercomStripeBindings(caseId),
+        },
+      );
+      fingerprint = native.fingerprint;
+      if (changedOwner === true) {
+        const current = await caseStore.get(caseId);
+        await caseStore.update(caseId, {
+          metadata: {
+            ...(current!.metadata as Record<string, unknown>),
+            ownerId: `intercom:local-demo:contact:spoofed-${caseId}`,
+          },
+        });
+      } else if (changedOwner === "tuple")
+        await caseStore.getClient().execute({
+          sql: "UPDATE support_conversations SET external_conversation_id = ? WHERE case_id = ?",
+          args: [`spoofed-conversation-${caseId}`, caseId],
+        });
+
+      const approval = await approveNativeRefund(app, caseId, fingerprint);
+
+      expect(observed.posts).toBe(changedOwner ? 0 : 1);
+      if (changedOwner) {
+        expect(approval.status).toBe(500);
+        await expect(
+          caseStore.getAction(caseId, "refund-failure", fingerprint),
+        ).resolves.toMatchObject({
+          classification: "confirmed-no-effect",
+          reason:
+            "The persisted canonical conversation owner no longer matches the case.",
+        });
+        await expect(
+          caseStore.getAction(caseId, "refund-uncertain", fingerprint),
+        ).resolves.toBeUndefined();
+      } else {
+        expect(approval.status).toBe(200);
+        expect(await caseStore.get(caseId)).toMatchObject({
+          status: "resolved",
+          metadata: { ownerId },
+          refundResult: { status: "executed" },
+        });
+      }
+    },
+  );
+
+  it("keeps an uncertain Intercom refund receipt recoverable after owner drift", async () => {
+    const caseId = `intercom-stripe-owner-uncertain-${crypto.randomUUID()}`;
+    const ownerId = `intercom:local-demo:contact:contact-${caseId}`;
+    enableSyntheticIntercom();
+    enableSyntheticStripe();
+    let fingerprint = "";
+    const observed = {
+      posts: 0,
+      accountGets: 0,
+      gets: [] as string[],
+      keys: [] as string[],
+    };
+    vi.stubGlobal(
+      "fetch",
+      nativeRefundStripeTransport({
+        caseId,
+        fingerprint: () => fingerprint,
+        observed,
+        firstPostThrows: true,
+      }),
+    );
+    const { app, caseStore, native } = await setup(
+      caseId,
+      undefined,
+      undefined,
+      undefined,
+      {
+        ownerId,
+        source: "intercom-conversation",
+        supportSource: "intercom",
+        providerBindings: syntheticIntercomStripeBindings(caseId),
+      },
+    );
+    fingerprint = native.fingerprint;
+    const command = (await caseStore.getAction(
+      caseId,
+      "refund-command",
+      fingerprint,
+    )) as { idempotencyKey: string };
+
+    expect((await approveNativeRefund(app, caseId, fingerprint)).status).toBe(
+      200,
+    );
+    expect(
+      await caseStore.stripeRefundAttempt(command.idempotencyKey),
+    ).toMatchObject({ status: "unknown" });
+    const current = await caseStore.get(caseId);
+    await caseStore.update(caseId, {
+      metadata: {
+        ...(current!.metadata as Record<string, unknown>),
+        ownerId: `intercom:local-demo:contact:spoofed-${caseId}`,
+      },
+    });
+    await caseStore.getClient().execute({
+      sql: "UPDATE support_stripe_refund_attempts SET next_attempt_at = ? WHERE idempotency_key = ?",
+      args: [new Date(0).toISOString(), command.idempotencyKey],
+    });
+    const { reconcileStripeRefundAttempts } =
+      await import("../../src/mastra/providers/stripe/reconciliation");
+
+    expect(await reconcileStripeRefundAttempts(caseStore)).toBe(0);
+    expect(observed.posts).toBe(1);
+    expect(
+      await caseStore.stripeRefundAttempt(command.idempotencyKey),
+    ).toMatchObject({ status: "unknown" });
+    await expect(
+      caseStore.getAction(caseId, "refund-uncertain", fingerprint),
+    ).resolves.toMatchObject({ classification: "uncertain" });
+    await expect(
+      caseStore.getAction(caseId, "refund-failure", fingerprint),
+    ).resolves.toBeUndefined();
+  });
 
   it("keeps a replacement reconciliation claim authoritative at the native recovery first-effect fence", async () => {
     const caseId = `stripe-recovery-final-fence-${crypto.randomUUID()}`;

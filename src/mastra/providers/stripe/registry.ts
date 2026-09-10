@@ -18,9 +18,9 @@ import {
   type SubscriptionCancellationEffect,
   type SupportChannelProvider,
   type TransactionalActionProvider,
+  VerifiedRefundOwnerRejectedError,
 } from "../contracts";
 import { activePrincipalHasRole } from "../../server/auth";
-import { ownerIdForCustomer } from "../../server/auth";
 import { activeTrustedCancellationScope } from "../cancellation-execution";
 import { assertRefundPolicyEvidenceAtFirstEffect } from "../../lib/refund-policy-evidence-persistence";
 import { isRefundPolicyEvidenceError } from "../../lib/refund-policy-evidence";
@@ -428,7 +428,10 @@ export class StripeProviderRegistry
     this.assert(command.binding);
     const supportCase = await caseStore.get(command.caseId);
     const owner = supportCase
-      ? ownerIdForCustomer(command.binding.tenantId, supportCase.customer.email)
+      ? await caseStore.canonicalConversationOwner({
+          caseId: command.caseId,
+          binding: bindingsForCase(supportCase).support,
+        })
       : undefined;
     if (
       !supportCase ||
@@ -540,7 +543,10 @@ export class StripeProviderRegistry
     this.assert(command.binding);
     const supportCase = await caseStore.get(command.caseId);
     const owner = supportCase
-      ? ownerIdForCustomer(command.binding.tenantId, supportCase.customer.email)
+      ? await caseStore.canonicalConversationOwner({
+          caseId: command.caseId,
+          binding: bindingsForCase(supportCase).support,
+        })
       : undefined;
     const turn = await caseStore.turn(command.caseId, command.turnId);
     const immutable = await caseStore.getAction(
@@ -648,19 +654,20 @@ export class StripeProviderRegistry
       throw new Error(
         "Stripe refund requires the durable authorized decision, immutable command, and policy evidence.",
       );
-    // The durable owner binding is authority at the first-effect boundary.
-    // Email is an external lookup input, never a substitute for that binding.
+    // The ingress-established canonical conversation binding is authority at
+    // the first-effect boundary. Email is only a Stripe lookup input.
     const durableOwner = supportCase
-      ? ownerIdForCustomer(command.binding.tenantId, supportCase.customer.email)
+      ? await caseStore.canonicalConversationOwner({
+          caseId: command.approvalCaseId,
+          binding: bindingsForCase(supportCase).support,
+        })
       : undefined;
     if (
       !supportCase ||
       !durableOwner ||
       (supportCase.metadata as Record<string, unknown>).ownerId !== durableOwner
     )
-      throw new Error(
-        "Stripe refund requires the current verified case owner.",
-      );
+      throw new VerifiedRefundOwnerRejectedError();
     if (
       supportCase.draft?.requiresEscalation ||
       exceedsStandardRefundReviewLimit(command.amount)
@@ -940,10 +947,10 @@ export class StripeProviderRegistry
       throw new Error(
         "Stripe recovery is past the provider idempotency window.",
       );
-    const durableOwner = ownerIdForCustomer(
-      binding.tenantId,
-      supportCase.customer.email,
-    );
+    const durableOwner = await caseStore.canonicalConversationOwner({
+      caseId: attempt.caseId,
+      binding: bindingsForCase(supportCase).support,
+    });
     if (
       !durableOwner ||
       (supportCase.metadata as Record<string, unknown>).ownerId !== durableOwner

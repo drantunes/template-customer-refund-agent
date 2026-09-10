@@ -150,6 +150,14 @@ export class CaseStore {
     return this.cases.findConversation(tenantId, externalConversationId);
   }
 
+  async canonicalConversationOwner(input: {
+    caseId: string;
+    binding: ProviderBinding;
+  }) {
+    await this.ensured();
+    return this.cases.canonicalConversationOwner(input);
+  }
+
   async create(case_: SupportCase) {
     await this.ensured();
     return this.cases.create(case_);

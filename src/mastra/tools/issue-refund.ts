@@ -18,6 +18,7 @@ import { activePrincipalHasRole } from "../server/auth";
 import { traceOperationalPort } from "../lib/operational-spans";
 import { isRefundPolicyEvidenceError } from "../lib/refund-policy-evidence";
 import { persistedRefundCommandSchema } from "../domain/refund-command";
+import { VerifiedRefundOwnerRejectedError } from "../providers/contracts";
 
 /**
  * An exception alone cannot prove a financial effect failed: a transport can
@@ -30,6 +31,7 @@ function isConfirmedRefundFailure(error: unknown) {
     String(error),
   );
 }
+
 export const refundExecutionInputSchema = z.object({
   caseId: z.string(),
   orderId: z.string(),
@@ -163,7 +165,12 @@ export const issueRefundTool = createTool({
       );
       if (!durable && attempt?.status !== "failed") {
         const policyEvidenceRejected = isRefundPolicyEvidenceError(error);
-        const confirmed = isConfirmedRefundFailure(error);
+        // A prior uncertain attempt may already represent a remote Stripe
+        // effect. Only this invocation's owner rejection with no attempt is
+        // proven pre-effect; later drift must remain receipt-only recovery.
+        const ownerRejected =
+          error instanceof VerifiedRefundOwnerRejectedError && !attempt;
+        const confirmed = ownerRejected || isConfirmedRefundFailure(error);
         await caseStore.saveAction(
           input.caseId,
           policyEvidenceRejected
@@ -176,9 +183,17 @@ export const issueRefundTool = createTool({
             category: policyEvidenceRejected ? "policy" : "provider",
             classification: policyEvidenceRejected
               ? "requires-review"
-              : confirmed
-                ? "confirmed-failed"
-                : "uncertain",
+              : ownerRejected
+                ? "confirmed-no-effect"
+                : confirmed
+                  ? "confirmed-failed"
+                  : "uncertain",
+            ...(ownerRejected
+              ? {
+                  reason:
+                    "The persisted canonical conversation owner no longer matches the case.",
+                }
+              : {}),
             failedAt: new Date().toISOString(),
           },
         );

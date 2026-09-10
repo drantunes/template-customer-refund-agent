@@ -1,5 +1,6 @@
 import type { Client } from "@libsql/client";
 import type { CaseMessage, SupportCase } from "../domain/support-case";
+import type { ProviderBinding } from "../providers/contracts";
 import { activeDispatchLeaseScope } from "./dispatch-lease-scope";
 import {
   now,
@@ -12,6 +13,29 @@ import {
   assertBindingsUnchanged,
   StaleCaseWriteError,
 } from "./case-store-shared";
+
+/** The conversation owner is accepted once from authenticated ingress and is
+ * retained separately from mutable case presentation data. Financial paths
+ * must resolve this binding, rather than reconstructing identity from email. */
+export async function canonicalConversationOwner(
+  client: Pick<Client, "execute">,
+  input: { caseId: string; binding: ProviderBinding },
+) {
+  const result = await client.execute({
+    sql: "SELECT owner_id FROM support_conversations WHERE tenant_id = ? AND provider_kind = ? AND provider_account_id = ? AND external_conversation_id = ? AND case_id = ?",
+    args: [
+      input.binding.tenantId,
+      input.binding.providerKind,
+      input.binding.providerAccountId,
+      input.binding.externalConversationId,
+      input.caseId,
+    ],
+  });
+  const ownerId = result.rows[0]?.owner_id;
+  return typeof ownerId === "string" && ownerId.length > 0
+    ? ownerId
+    : undefined;
+}
 
 export class CaseStoreCases {
   constructor(private readonly client: Client) {}
@@ -51,6 +75,12 @@ export class CaseStoreCases {
       ? parse(result.rows[0] as Record<string, unknown>)
       : undefined;
   }
+  async canonicalConversationOwner(input: {
+    caseId: string;
+    binding: ProviderBinding;
+  }) {
+    return canonicalConversationOwner(this.client, input);
+  }
   async create(case_: SupportCase) {
     const persisted = withBindings(case_);
     const binding = caseBinding(persisted);
@@ -71,6 +101,19 @@ export class CaseStoreCases {
           persisted.createdAt,
         ],
       });
+      const ownerId = persisted.metadata.ownerId;
+      if (typeof ownerId === "string" && ownerId.length > 0)
+        await tx.execute({
+          sql: "INSERT INTO support_conversations(tenant_id, provider_kind, provider_account_id, external_conversation_id, case_id, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
+          args: [
+            binding.tenantId,
+            binding.providerKind,
+            binding.providerAccountId,
+            binding.externalConversationId,
+            persisted.id,
+            ownerId,
+          ],
+        });
       for (const message of persisted.messages)
         await tx.execute({
           sql: "INSERT INTO support_messages(id, case_id, data, created_at) VALUES (?, ?, ?, ?)",

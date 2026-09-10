@@ -9,6 +9,7 @@ import {
   subscriptionCreditFingerprint,
 } from "../lib/money";
 import { exceedsStandardRefundReviewLimit } from "../domain/refund-review-limit";
+import { providerBindingSchema } from "../domain/support-case";
 import {
   initializeLocalFixtures,
   resetLocalFixtures,
@@ -32,13 +33,17 @@ import type {
   SupportChannelProvider,
   TransactionalActionProvider,
 } from "../providers/contracts";
-import { bindingsForCase } from "../providers/contracts";
+import {
+  bindingsForCase,
+  VerifiedRefundOwnerRejectedError,
+} from "../providers/contracts";
 import {
   hasNativeRefundExecutionAuthorization,
   type NativeRefundExecutionAuthorization,
 } from "../providers/native-execution";
-import { activePrincipalHasRole, ownerIdForCustomer } from "../server/auth";
+import { activePrincipalHasRole } from "../server/auth";
 import { assertRefundPolicyEvidenceAtFirstEffect } from "../lib/refund-policy-evidence-persistence";
+import { canonicalConversationOwner } from "../lib/case-store-cases";
 import {
   defaultLocalBinding,
   LocalSupportProvider,
@@ -325,6 +330,8 @@ export class LocalRuntime
             draft?: { requiresEscalation?: boolean };
             metadata?: {
               ownerId?: string;
+              providerBinding?: unknown;
+              providerBindings?: { support?: unknown };
               refundCommand?: { fingerprint?: string };
               nativeApproval?: {
                 runId?: string;
@@ -443,18 +450,24 @@ export class LocalRuntime
           `Cannot issue refund: order ${command.orderId} not found.`,
         );
       const email = approvedCase?.customer?.email;
-      const verifiedOwner =
-        typeof email === "string" && email.length > 0
-          ? ownerIdForCustomer(command.binding.tenantId, email)
-          : undefined;
+      const persistedSupportBinding = providerBindingSchema.safeParse(
+        approvedCase?.metadata?.providerBindings?.support ??
+          approvedCase?.metadata?.providerBinding,
+      );
+      const verifiedOwner = persistedSupportBinding.success
+        ? await canonicalConversationOwner(tx, {
+            caseId: command.approvalCaseId,
+            binding: persistedSupportBinding.data,
+          })
+        : undefined;
       if (
         !verifiedOwner ||
         approvedCase?.metadata?.ownerId !== verifiedOwner ||
-        text(order.customer_email).toLowerCase() !== email!.toLowerCase()
+        typeof email !== "string" ||
+        email.length === 0 ||
+        text(order.customer_email).toLowerCase() !== email.toLowerCase()
       )
-        throw new Error(
-          "Refund execution requires the current verified order owner.",
-        );
+        throw new VerifiedRefundOwnerRejectedError();
       if (text(order.currency) !== command.amount.currency)
         throw new Error("Refund currency does not match the original charge.");
       const prior = await tx.execute({
@@ -794,7 +807,10 @@ export class LocalRuntime
     await this.ensured();
     const supportCase = await caseStore.get(command.caseId);
     const owner = supportCase
-      ? ownerIdForCustomer(command.binding.tenantId, supportCase.customer.email)
+      ? await caseStore.canonicalConversationOwner({
+          caseId: command.caseId,
+          binding: bindingsForCase(supportCase).support,
+        })
       : undefined;
     if (
       !supportCase ||
@@ -883,7 +899,10 @@ export class LocalRuntime
     await this.ensured();
     const supportCase = await caseStore.get(command.caseId);
     const owner = supportCase
-      ? ownerIdForCustomer(command.binding.tenantId, supportCase.customer.email)
+      ? await caseStore.canonicalConversationOwner({
+          caseId: command.caseId,
+          binding: bindingsForCase(supportCase).support,
+        })
       : undefined;
     const turn = await caseStore.turn(command.caseId, command.turnId);
     const immutable = await caseStore.getAction(
