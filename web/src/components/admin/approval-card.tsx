@@ -30,9 +30,12 @@ export function ApprovalCard({
     approved: boolean,
     commandFingerprint: string,
     note?: string,
+    serviceProblemConfirmed?: true,
   ) => Promise<void>;
 }) {
   const [note, setNote] = useState("");
+  const [confirmedServiceProblemScope, setConfirmedServiceProblemScope] =
+    useState<string>();
   const [pending, setPending] = useState<"approve" | "reject" | null>(null);
   const draft = supportCase.draft;
   const isCredit = draft?.resolutionAction === "subscription_credit";
@@ -41,6 +44,12 @@ export function ApprovalCard({
     (isCredit ? metadata.subscriptionCreditCommand : metadata.refundCommand) as
       { fingerprint?: string } | undefined
   )?.fingerprint;
+  // Scope the acknowledgement to the exact immutable command. If an operator
+  // selects another case while this card stays mounted, the old acknowledgement
+  // cannot enable approval for the newly rendered command.
+  const serviceProblemConfirmationScope = `${supportCase.id}:${commandFingerprint ?? ""}`;
+  const serviceProblemConfirmed =
+    confirmedServiceProblemScope === serviceProblemConfirmationScope;
   const amount = isCredit
     ? draft?.subscriptionCreditAmount
     : draft?.refundAmount;
@@ -59,7 +68,12 @@ export function ApprovalCard({
         throw new Error(
           "This approval command is unavailable. Refresh the case.",
         );
-      await onDecision(approved, commandFingerprint, note || undefined);
+      await onDecision(
+        approved,
+        commandFingerprint,
+        note || undefined,
+        isCredit && approved && serviceProblemConfirmed ? true : undefined,
+      );
     } finally {
       setPending(null);
     }
@@ -131,6 +145,31 @@ export function ApprovalCard({
         </div>
 
         <FieldGroup>
+          {isCredit && (
+            <Field>
+              <label className="flex items-start gap-2 text-sm font-medium">
+                <input
+                  type="checkbox"
+                  checked={serviceProblemConfirmed}
+                  onChange={(event) =>
+                    setConfirmedServiceProblemScope(
+                      event.target.checked
+                        ? serviceProblemConfirmationScope
+                        : undefined,
+                    )
+                  }
+                />
+                <span>
+                  I confirm the reported service problem before approving this
+                  credit.
+                </span>
+              </label>
+              <FieldDescription>
+                This confirmation and your authenticated approval are recorded
+                together before any billing balance change.
+              </FieldDescription>
+            </Field>
+          )}
           <Field>
             <FieldLabel htmlFor="approval-note">Internal note</FieldLabel>
             <Textarea
@@ -147,7 +186,12 @@ export function ApprovalCard({
           </Field>
         </FieldGroup>
         <div className="flex gap-2">
-          <Button onClick={() => handle(true)} disabled={pending !== null}>
+          <Button
+            onClick={() => handle(true)}
+            disabled={
+              pending !== null || (isCredit && !serviceProblemConfirmed)
+            }
+          >
             {pending === "approve" ? (
               <Spinner data-icon="inline-start" />
             ) : (

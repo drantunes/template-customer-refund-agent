@@ -47,7 +47,11 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
     );
   }
 
-  let body: { commandFingerprint?: string; note?: string } = {};
+  let body: {
+    commandFingerprint?: string;
+    note?: string;
+    serviceProblemConfirmed?: true;
+  } = {};
   try {
     const rawBody = await c.req.text();
     const parsed = approvalRequestSchema.safeParse(
@@ -75,6 +79,18 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
     return c.json(
       errorResponseSchema.parse({
         error: "Immutable refund command is missing.",
+      }),
+      409,
+    );
+  const isSubscriptionCredit = Boolean(
+    supportCase.metadata.subscriptionCreditCommand &&
+    !supportCase.metadata.refundCommand,
+  );
+  if (approved && isSubscriptionCredit && !body.serviceProblemConfirmed)
+    return c.json(
+      errorResponseSchema.parse({
+        error:
+          "Approving a subscription credit requires confirmation of the reported service problem.",
       }),
       409,
     );
@@ -106,6 +122,7 @@ async function resumeApproval(c: ContextWithMastra, approved: boolean) {
       principalId: current.id,
       approved,
       note: body.note,
+      serviceProblemConfirmed: body.serviceProblemConfirmed,
       nativeRunId: native.runId,
       nativeToolCallId: native.toolCallId,
     });

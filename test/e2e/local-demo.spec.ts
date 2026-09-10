@@ -205,6 +205,110 @@ test("keeps the local admin approval UI after the customer portal is removed", a
         ["local-demo", "local-demo"],
       );
     expect(Number(effects.rows[0]?.count)).toBe(1);
+
+    const createCreditCase = async (subject: string, externalId: string) => {
+      const response = await fetch(
+        `http://127.0.0.1:${e2eApiPort}/support/inbound`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            externalId,
+            from: "alex@example.com",
+            subject,
+            body: "Please refund the duplicate charge for ORD-1001.",
+          }),
+        },
+      );
+      return (await response.json()) as { caseId: string };
+    };
+    const firstCredit = await createCreditCase(
+      "Confirm reported service problem A",
+      "phase008-credit-approval-a",
+    );
+    const secondCredit = await createCreditCase(
+      "Confirm reported service problem B",
+      "phase008-credit-approval-b",
+    );
+    await expect
+      .poll(
+        async () => (await runtime.caseStore.get(firstCredit.caseId))?.status,
+      )
+      .toBe("waiting_approval");
+    await expect
+      .poll(
+        async () => (await runtime.caseStore.get(secondCredit.caseId))?.status,
+      )
+      .toBe("waiting_approval");
+    const makeCreditApprovalVisible = async (
+      creditCaseId: string,
+      subject: string,
+      fingerprint: string,
+    ) => {
+      const current = await runtime.caseStore.get(creditCaseId);
+      if (!current) throw new Error("Expected synthetic approval case.");
+      await runtime.caseStore.update(creditCaseId, {
+        subject,
+        draft: {
+          draftResponse:
+            "A future billing credit can be proposed after an approver confirms the reported service problem.",
+          citedSources: ["service-problem-credit-policy"],
+          selectedPolicyExcerpts: [],
+          recommendRefund: false,
+          resolutionAction: "subscription_credit",
+          subscriptionCreditAmount: 49,
+          subscriptionCreditCurrency: "USD",
+          subscriptionCreditReason:
+            "Reported service problem pending human confirmation",
+          requiresEscalation: false,
+        },
+        metadata: {
+          ...current.metadata,
+          refundCommand: undefined,
+          subscriptionCreditCommand: {
+            approvalCaseId: creditCaseId,
+            customerId: "local:local-demo:alex@example.com",
+            subscriptionId: "SUB-1001",
+            amount: 49,
+            currency: "USD",
+            reason: "Reported service problem pending human confirmation",
+            idempotencyKey: `e2e-credit-${fingerprint}`,
+            fingerprint,
+          },
+        },
+      });
+    };
+    await makeCreditApprovalVisible(
+      firstCredit.caseId,
+      "Confirm reported service problem A",
+      "credit-fingerprint-a",
+    );
+    await makeCreditApprovalVisible(
+      secondCredit.caseId,
+      "Confirm reported service problem B",
+      "credit-fingerprint-b",
+    );
+    await page
+      .getByRole("button", { name: "Confirm reported service problem A" })
+      .click();
+    const confirmation = page.getByRole("checkbox", {
+      name: "I confirm the reported service problem before approving this credit.",
+    });
+    const approveCredit = page.getByRole("button", {
+      name: "Approve credit",
+    });
+    await expect(confirmation).not.toBeChecked();
+    await expect(approveCredit).toBeDisabled();
+    await confirmation.check();
+    await expect(approveCredit).toBeEnabled();
+    await page
+      .getByRole("button", { name: "Confirm reported service problem B" })
+      .click();
+    await expect(confirmation).not.toBeChecked();
+    await expect(approveCredit).toBeDisabled();
   } finally {
     await stopServer();
     await runtime.shutdownLocalMastra();

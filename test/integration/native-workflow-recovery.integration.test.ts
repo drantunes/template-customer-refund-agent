@@ -626,6 +626,7 @@ async function approveNativeRefund(
   app: Hono,
   caseId: string,
   commandFingerprint: string,
+  serviceProblemConfirmed?: true,
 ) {
   return app.request(`http://support.test/support/cases/${caseId}/approve`, {
     method: "POST",
@@ -633,7 +634,10 @@ async function approveNativeRefund(
       authorization: `Bearer ${issueLocalSession({ id: "approver-demo" })}`,
       "content-type": "application/json",
     },
-    body: JSON.stringify({ commandFingerprint }),
+    body: JSON.stringify({
+      commandFingerprint,
+      ...(serviceProblemConfirmed ? { serviceProblemConfirmed } : {}),
+    }),
   });
 }
 
@@ -1144,7 +1148,8 @@ describe("native approval workflow recovery", () => {
     const policyExcerpt =
       "For a verified service problem on one active monthly subscription, support may propose one credit equal to that subscription's single monthly charge.";
     const creditResponse = jsonModel({
-      draftResponse: "We can add a credit for your next bill after approval.",
+      draftResponse:
+        "We can propose a future billing credit after an approver confirms the reported service problem.",
       citedSources: ["service-problem-credit-policy"],
       selectedPolicyExcerpts: [
         { source: "service-problem-credit-policy", excerpt: policyExcerpt },
@@ -1153,7 +1158,8 @@ describe("native approval workflow recovery", () => {
       resolutionAction: "subscription_credit",
       subscriptionCreditAmount: 49,
       subscriptionCreditCurrency: "USD",
-      subscriptionCreditReason: "Verified service outage",
+      subscriptionCreditReason:
+        "Reported service problem pending human confirmation",
       requiresEscalation: false,
     }) as never;
     const approvedCaseId = `native-credit-approved-${crypto.randomUUID()}`;
@@ -1170,8 +1176,10 @@ describe("native approval workflow recovery", () => {
           sentiment: "negative",
           requiresHumanReview: false,
           confidence: 1,
-          rationale: "Verified service outage.",
+          rationale: "Customer-reported service problem.",
         },
+        message:
+          "O serviço ficou indisponível e não consegui usar minha assinatura.",
         responseModel: creditResponse,
       },
     );
@@ -1194,9 +1202,26 @@ describe("native approval workflow recovery", () => {
           approvedNative.fingerprint,
         )
       ).status,
+    ).toBe(409);
+    expect((await approved.caseStore.get(approvedCaseId))?.status).toBe(
+      "waiting_approval",
+    );
+    expect(
+      (await approved.caseStore.get(approvedCaseId))?.subscriptionCreditResult,
+    ).toBeUndefined();
+    expect(
+      (
+        await approveNativeRefund(
+          approved.app,
+          approvedCaseId,
+          approvedNative.fingerprint,
+          true,
+        )
+      ).status,
     ).toBe(200);
     expect(await approved.caseStore.get(approvedCaseId)).toMatchObject({
       status: "resolved",
+      approval: { serviceProblemConfirmed: true },
       subscriptionCreditResult: {
         subscriptionId: "SUB-1001",
         amount: 49,
@@ -1344,7 +1369,10 @@ describe("native approval workflow recovery", () => {
           authorization: `Bearer ${issueLocalSession({ id: "approver-demo" })}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ commandFingerprint: fingerprint }),
+        body: JSON.stringify({
+          commandFingerprint: fingerprint,
+          serviceProblemConfirmed: true,
+        }),
       },
     );
     expect(approval.status).toBe(200);
@@ -1544,7 +1572,8 @@ describe("native approval workflow recovery", () => {
         ).mockResolvedValue(false);
 
       expect(
-        (await approveNativeRefund(initial.app, caseId, fingerprint)).status,
+        (await approveNativeRefund(initial.app, caseId, fingerprint, true))
+          .status,
       ).toBe(200);
       expect(observed).toMatchObject({ posts: 0, remoteCommitted: false });
       expect(observed.idempotencyKeys).toEqual([]);
@@ -1669,7 +1698,12 @@ describe("native approval workflow recovery", () => {
       release: preflightRelease,
     };
 
-    const approval = approveNativeRefund(initial.app, caseId, fingerprint);
+    const approval = approveNativeRefund(
+      initial.app,
+      caseId,
+      fingerprint,
+      true,
+    );
     await preflightStartedPromise;
     const original = await initial.caseStore.getClient().execute({
       sql: "SELECT id, lease_token FROM support_dispatch WHERE case_id = ?",
@@ -1818,6 +1852,7 @@ describe("native approval workflow recovery", () => {
         commandFingerprint: fingerprint,
         principalId: "approver-demo",
         approved: true,
+        serviceProblemConfirmed: true,
         nativeRunId: native.runId,
         nativeToolCallId: native.toolCallId,
       });
@@ -1931,7 +1966,7 @@ describe("native approval workflow recovery", () => {
         await publishKnowledge(syntheticStripeBindings(caseId).knowledge);
       }
 
-      await approveNativeRefund(initial.app, caseId, native.fingerprint);
+      await approveNativeRefund(initial.app, caseId, native.fingerprint, true);
       expect(observed).toMatchObject({ posts: 0, remoteCommitted: false });
       expect(observed.idempotencyKeys).toEqual([]);
       expect(await initial.caseStore.get(caseId)).toMatchObject({

@@ -199,6 +199,10 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                               "note": {
                                 "type": "string",
                               },
+                              "serviceProblemConfirmed": {
+                                "const": true,
+                                "type": "boolean",
+                              },
                             },
                             "required": [
                               "approved",
@@ -940,6 +944,10 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                         },
                         "note": {
                           "type": "string",
+                        },
+                        "serviceProblemConfirmed": {
+                          "const": true,
+                          "type": "boolean",
                         },
                       },
                       "required": [
@@ -1693,6 +1701,10 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                     "maxLength": 2000,
                     "type": "string",
                   },
+                  "serviceProblemConfirmed": {
+                    "const": true,
+                    "type": "boolean",
+                  },
                 },
                 "required": [
                   "commandFingerprint",
@@ -1741,6 +1753,10 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                         },
                         "note": {
                           "type": "string",
+                        },
+                        "serviceProblemConfirmed": {
+                          "const": true,
+                          "type": "boolean",
                         },
                       },
                       "required": [
@@ -2613,6 +2629,10 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                         "note": {
                           "type": "string",
                         },
+                        "serviceProblemConfirmed": {
+                          "const": true,
+                          "type": "boolean",
+                        },
                       },
                       "required": [
                         "approved",
@@ -3453,6 +3473,10 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                         "note": {
                           "type": "string",
                         },
+                        "serviceProblemConfirmed": {
+                          "const": true,
+                          "type": "boolean",
+                        },
                       },
                       "required": [
                         "approved",
@@ -4289,6 +4313,10 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                     "maxLength": 2000,
                     "type": "string",
                   },
+                  "serviceProblemConfirmed": {
+                    "const": true,
+                    "type": "boolean",
+                  },
                 },
                 "required": [
                   "commandFingerprint",
@@ -4337,6 +4365,10 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                         },
                         "note": {
                           "type": "string",
+                        },
+                        "serviceProblemConfirmed": {
+                          "const": true,
+                          "type": "boolean",
                         },
                       },
                       "required": [

@@ -51,6 +51,7 @@ export function CaseDetail({
     approved: boolean,
     commandFingerprint: string,
     note?: string,
+    serviceProblemConfirmed?: true,
   ) => Promise<void>;
 }) {
   const c = supportCase;

@@ -35,6 +35,7 @@ describe("ApprovalCard", () => {
     );
     expect(html).toContain("Subscription credit approval requested");
     expect(html).toContain("Approve credit");
+    expect(html).toContain("I confirm the reported service problem");
     expect(html).toContain("credit-fingerprint");
     expect(html).toContain("SUB-1001");
     expect(html).toContain("49 USD");

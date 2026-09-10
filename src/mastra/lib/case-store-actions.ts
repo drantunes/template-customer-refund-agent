@@ -192,6 +192,7 @@ export class CaseStoreActions {
     principalId: string;
     approved: boolean;
     note?: string;
+    serviceProblemConfirmed?: true;
     nativeRunId?: string;
     nativeToolCallId?: string;
   }): Promise<{ won: boolean; decisionId?: string }> {
@@ -231,6 +232,7 @@ export class CaseStoreActions {
           approved: input.approved,
           approverId: input.principalId,
           note: input.note,
+          serviceProblemConfirmed: input.serviceProblemConfirmed,
         },
         status: "processing",
         updatedAt: now(),
@@ -271,6 +273,7 @@ export class CaseStoreActions {
             decisionId,
             commandFingerprint: input.commandFingerprint,
             approved: input.approved,
+            serviceProblemConfirmed: input.serviceProblemConfirmed,
           }),
           now(),
         ],

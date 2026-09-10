@@ -34,7 +34,7 @@ export const subscriptionCreditExecutionInputSchema = z.object({
 export const issueSubscriptionCreditTool = createTool({
   id: "issue_subscription_credit",
   description:
-    "Create the already-approved one-month customer billing credit for a verified subscription.",
+    "Create the already-approved one-month customer billing credit after human confirmation of the reported service problem.",
   inputSchema: subscriptionCreditExecutionInputSchema,
   outputSchema: z.object({
     creditId: z.string(),

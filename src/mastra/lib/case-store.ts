@@ -472,6 +472,7 @@ export class CaseStore {
     principalId: string;
     approved: boolean;
     note?: string;
+    serviceProblemConfirmed?: true;
     nativeRunId?: string;
     nativeToolCallId?: string;
   }): Promise<{ won: boolean; decisionId?: string }> {

@@ -194,11 +194,18 @@ function AdminSession({
     approved: boolean,
     commandFingerprint: string,
     note?: string,
+    serviceProblemConfirmed?: true,
   ) {
     if (!selectedCase) return;
     try {
       const updated = approved
-        ? await approveCase(selectedCase.id, commandFingerprint, note, session)
+        ? await approveCase(
+            selectedCase.id,
+            commandFingerprint,
+            note,
+            session,
+            serviceProblemConfirmed,
+          )
         : await rejectCase(selectedCase.id, commandFingerprint, note, session);
       if (!mounted.current) return;
       setCases((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));

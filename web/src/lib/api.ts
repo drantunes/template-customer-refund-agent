@@ -149,12 +149,17 @@ export function approveCase(
   commandFingerprint: string,
   note?: string,
   session?: SupportSession,
+  serviceProblemConfirmed?: true,
 ): Promise<SupportCase> {
   return request(
     `/support/cases/${caseId}/approve`,
     {
       method: "POST",
-      body: JSON.stringify({ commandFingerprint, note }),
+      body: JSON.stringify({
+        commandFingerprint,
+        note,
+        serviceProblemConfirmed,
+      }),
     },
     session,
   );

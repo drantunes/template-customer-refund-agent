@@ -172,6 +172,7 @@ export const approvalDecisionSchema = z.object({
   approved: z.boolean(),
   approverId: z.string(),
   note: z.string().optional(),
+  serviceProblemConfirmed: z.literal(true).optional(),
 });
 export type ApprovalDecision = z.infer<typeof approvalDecisionSchema>;
 

@@ -2,7 +2,7 @@
 
 The local demo has fixed synthetic identities. Server-side signed sessions determine the tenant and role for each request; email, query parameters, browser storage, and request bodies do not grant authority. Customers can access their own tenant-scoped cases, while the operational queue requires staff roles.
 
-Each refund approval is authenticated and binds to the exact immutable command fingerprint. The application records the decision and uses durable idempotency before a local or configured transaction effect. A customer or browser cannot approve a command by changing displayed values.
+Each refund and subscription-credit approval is authenticated and binds to the exact immutable command fingerprint. A subscription-credit approver also confirms the customer's reported service problem in that same recorded decision before a new billing-balance effect. The application uses durable idempotency before a local or configured transaction effect, so a customer or browser cannot approve a command by changing displayed values.
 
 Keep `.env` and provider credentials out of version control. `npm run check:env` reads `.env` only to validate configuration; it does not start the application, open a database, or contact a provider. `local:seed` and `local:retention` do open the explicitly selected local `file:` database. The normal test suite clears inherited remote-provider selection and uses synthetic data.
 

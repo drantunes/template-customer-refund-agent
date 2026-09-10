@@ -32,6 +32,7 @@ export const customerFinancialRequestsResponseSchema = z.object({
 export const approvalRequestSchema = z.object({
   commandFingerprint: z.string().min(1),
   note: z.string().max(2_000).optional(),
+  serviceProblemConfirmed: z.literal(true).optional(),
 });
 export const followUpRequestSchema = z.object({
   body: z.string().min(1).max(10_000),

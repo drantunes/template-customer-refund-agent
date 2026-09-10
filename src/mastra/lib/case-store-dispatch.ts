@@ -352,6 +352,7 @@ export class CaseStoreDispatch {
       if (
         !commandCurrent ||
         !leaseCurrent ||
+        !supportCase.approval?.serviceProblemConfirmed ||
         supportCase.draft?.requiresEscalation
       ) {
         await tx.rollback();

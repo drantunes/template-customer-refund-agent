@@ -586,7 +586,10 @@ export class LocalRuntime
       });
       const supportCase = row.rows[0]
         ? (JSON.parse(String(row.rows[0].data)) as {
-            approval?: { approved?: boolean };
+            approval?: {
+              approved?: boolean;
+              serviceProblemConfirmed?: true;
+            };
             customer?: { email?: string };
             draft?: { requiresEscalation?: boolean };
             metadata?: {
@@ -681,6 +684,13 @@ export class LocalRuntime
         await tx.rollback();
         return { ...effect, replayed: true };
       }
+      // The confirmation is required only to create a new effect. An existing
+      // idempotent effect above remains recoverable after an application
+      // upgrade, without manufacturing a new approval decision.
+      if (!supportCase.approval?.serviceProblemConfirmed)
+        throw new Error(
+          "Subscription credit requires the approver to confirm the reported service problem.",
+        );
       await assertRefundPolicyEvidenceAtFirstEffect(tx, command, native.turnId);
       const subscriptionRows = await tx.execute({
         sql: "SELECT * FROM local_subscriptions WHERE tenant_id = ? AND provider_account_id = ? AND subscription_id = ?",
