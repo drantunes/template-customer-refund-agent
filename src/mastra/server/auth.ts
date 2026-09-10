@@ -440,6 +440,12 @@ export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipa
         "schedule_subscription_cancellation",
       ]),
       workflows: new Set([
+        // Studio builds detail links from the Mastra registry keys returned by
+        // GET /workflows. The workflow definitions themselves use the
+        // kebab-case IDs below, which the installed handler also resolves.
+        "ingestSupportCaseWorkflow",
+        "resolveSupportCaseWorkflow",
+        "indexSupportKnowledgeWorkflow",
         "ingest-support-case",
         "resolve-support-case",
         "index-support-knowledge",

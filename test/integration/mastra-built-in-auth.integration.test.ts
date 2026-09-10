@@ -309,13 +309,34 @@ describe("configured Mastra built-in API authorization", () => {
         })
       ).status,
     ).toBe(200);
-    expect(
-      (
-        await server.request("http://support.test/api/workflows", {
-          headers: staffHeaders,
-        })
-      ).status,
-    ).toBe(200);
+    const listedWorkflowsResponse = await server.request(
+      "http://support.test/api/workflows",
+      { headers: staffHeaders },
+    );
+    expect(listedWorkflowsResponse.status).toBe(200);
+    const listedWorkflows = (await listedWorkflowsResponse.json()) as Record<
+      string,
+      { stepGraph: unknown[] }
+    >;
+    expect(Object.keys(listedWorkflows)).toEqual([
+      "ingestSupportCaseWorkflow",
+      "resolveSupportCaseWorkflow",
+      "indexSupportKnowledgeWorkflow",
+    ]);
+    for (const [workflowId, listedWorkflow] of Object.entries(
+      listedWorkflows,
+    )) {
+      const workflowDetailResponse = await server.request(
+        `http://support.test/api/workflows/${workflowId}`,
+        { headers: staffHeaders },
+      );
+      expect(workflowDetailResponse.status).toBe(200);
+      const workflowDetail = (await workflowDetailResponse.json()) as {
+        stepGraph: unknown[];
+      };
+      expect(workflowDetail.stepGraph).toEqual(listedWorkflow.stepGraph);
+      expect(workflowDetail.stepGraph.length).toBeGreaterThan(0);
+    }
     expect(
       (
         await server.request("http://support.test/api/tools", {
@@ -366,6 +387,18 @@ describe("configured Mastra built-in API authorization", () => {
         await server.request(
           "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs",
           { headers: staffHeaders },
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/start-async",
+          {
+            method: "POST",
+            headers: { ...staffHeaders, "content-type": "application/json" },
+            body: JSON.stringify({}),
+          },
         )
       ).status,
     ).toBe(403);
