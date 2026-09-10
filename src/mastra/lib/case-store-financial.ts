@@ -402,10 +402,11 @@ export class CaseStoreFinancial {
       update.status,
     );
     const write = await this.client.execute({
-      sql: "UPDATE support_stripe_subscription_credit_attempts SET status = ?, credit_id = COALESCE(?, credit_id), provider_status = COALESCE(?, provider_status), terminal_at = CASE WHEN ? THEN COALESCE(terminal_at, ?) ELSE terminal_at END, updated_at = ? WHERE idempotency_key = ? AND (status NOT IN ('succeeded','failed','quarantined') OR status = ?)",
+      sql: "UPDATE support_stripe_subscription_credit_attempts SET status = ?, credit_id = COALESCE(?, credit_id), provider_status = CASE WHEN provider_status = 'prepost-no-effect' AND ? <> 'succeeded' THEN provider_status ELSE COALESCE(?, provider_status) END, terminal_at = CASE WHEN ? THEN COALESCE(terminal_at, ?) ELSE terminal_at END, updated_at = ? WHERE idempotency_key = ? AND (status NOT IN ('succeeded','failed','quarantined') OR status = ?)",
       args: [
         update.status,
         update.creditId ?? null,
+        update.status,
         update.providerStatus ?? null,
         terminal ? 1 : 0,
         now(),
@@ -427,6 +428,7 @@ export class CaseStoreFinancial {
   async finalizeStripeSubscriptionCreditNoEffectFailure(input: {
     idempotencyKey: string;
     fingerprint: string;
+    dispatch: { dispatchId: string; leaseToken: string; turnId: string };
   }) {
     const tx = await this.client.transaction("write");
     try {
@@ -439,6 +441,41 @@ export class CaseStoreFinancial {
         !attempt ||
         !["prepared", "unknown"].includes(String(attempt.status))
       ) {
+        await tx.rollback();
+        return false;
+      }
+      const preparedWorker =
+        String(attempt.dispatch_id) === input.dispatch.dispatchId &&
+        String(attempt.lease_token) === input.dispatch.leaseToken &&
+        String(attempt.turn_id) === input.dispatch.turnId;
+      const currentWorker = await tx.execute({
+        sql: "SELECT id FROM support_dispatch WHERE id = ? AND case_id = ? AND turn_id = ? AND lease_token = ? AND state IN ('claimed', 'started') AND lease_until > ?",
+        args: [
+          input.dispatch.dispatchId,
+          String(attempt.case_id),
+          input.dispatch.turnId,
+          input.dispatch.leaseToken,
+          now(),
+        ],
+      });
+      if (!preparedWorker && !currentWorker.rows[0]) {
+        await tx.rollback();
+        return false;
+      }
+      // A stale worker may observe a preflight refusal after another worker
+      // has reclaimed this suspended dispatch. That newer lease owns the
+      // prepared reservation and its recovery outcome, so the stale worker
+      // must not close the immutable command underneath it.
+      const newerLease = await tx.execute({
+        sql: "SELECT id, lease_token FROM support_dispatch WHERE case_id = ? AND state IN ('claimed', 'started') AND lease_until > ? AND (id <> ? OR lease_token <> ?)",
+        args: [
+          String(attempt.case_id),
+          now(),
+          input.dispatch.dispatchId,
+          input.dispatch.leaseToken,
+        ],
+      });
+      if (newerLease.rows[0]) {
         await tx.rollback();
         return false;
       }
@@ -541,6 +578,28 @@ export class CaseStoreFinancial {
       } catch {}
       throw error;
     }
+  }
+  /** A worker that has not crossed the POST marker may prove the exact
+   * prepared command has no remote effect even after losing its dispatch
+   * lease. Retain that proof for the reclaiming worker; it owns the eventual
+   * public terminalization and must never retry a non-existent receipt. */
+  async markStripeSubscriptionCreditPrePostNoEffect(input: {
+    idempotencyKey: string;
+    fingerprint: string;
+    dispatch: { dispatchId: string; leaseToken: string; turnId: string };
+  }) {
+    const write = await this.client.execute({
+      sql: "UPDATE support_stripe_subscription_credit_attempts SET provider_status = 'prepost-no-effect', updated_at = ? WHERE idempotency_key = ? AND command_fingerprint = ? AND dispatch_id = ? AND lease_token = ? AND turn_id = ? AND status IN ('prepared', 'unknown')",
+      args: [
+        now(),
+        input.idempotencyKey,
+        input.fingerprint,
+        input.dispatch.dispatchId,
+        input.dispatch.leaseToken,
+        input.dispatch.turnId,
+      ],
+    });
+    return Number(write.rowsAffected ?? 0) === 1;
   }
   async stripeSubscriptionCreditAttempt(idempotencyKey: string) {
     const result = await this.client.execute({

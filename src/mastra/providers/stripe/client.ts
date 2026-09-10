@@ -684,6 +684,10 @@ export class StripeClient {
     command: SubscriptionCreditCommand,
     email: string,
     beforeDispatch?: () => Promise<void>,
+    /** Marks the exact point where a Stripe POST can begin. It must remain
+     * synchronous and directly adjacent to request so callers can distinguish
+     * a proven preflight refusal from an ambiguous provider outcome. */
+    onPostBoundary?: () => void,
   ): Promise<SubscriptionCreditEffect> {
     if (subscriptionCreditFingerprint(command) !== command.fingerprint)
       throw new Error(
@@ -698,6 +702,7 @@ export class StripeClient {
     // before the POST. The durable authorization must still be current at the
     // financial boundary, not merely before a slow ledger lookup.
     await beforeDispatch?.();
+    onPostBoundary?.();
     const response = await this.request(
       `/v1/customers/${encodeURIComponent(target.customerId)}/balance_transactions`,
       {

@@ -57,6 +57,12 @@ class StripeFirstEffectAuthorizationError extends Error {
   }
 }
 
+class StripePrePostNoEffectError extends Error {
+  constructor() {
+    super("Stripe subscription credit was refused before the provider POST.");
+  }
+}
+
 /** Stripe owns only the commerce and transactional ports. Support and
  * knowledge keep their independently persisted bindings. */
 export class StripeProviderRegistry
@@ -250,6 +256,21 @@ export class StripeProviderRegistry
     // its immutable receipt only; never turn a bounded Stripe key expiry into
     // a fresh POST.
     if (!attempt.inserted) {
+      const persisted = await caseStore.stripeSubscriptionCreditAttempt(
+        command.idempotencyKey,
+      );
+      if (persisted?.providerStatus === "prepost-no-effect") {
+        await caseStore.finalizeStripeSubscriptionCreditNoEffectFailure({
+          idempotencyKey: command.idempotencyKey,
+          fingerprint: command.fingerprint,
+          dispatch: {
+            dispatchId: authorization.dispatchId,
+            leaseToken: authorization.leaseToken,
+            turnId: authorization.turnId,
+          },
+        });
+        throw new StripePrePostNoEffectError();
+      }
       const recovered = await recoverReceipt();
       if (recovered) return recovered;
       await caseStore.updateStripeSubscriptionCreditAttempt(
@@ -258,6 +279,7 @@ export class StripeProviderRegistry
       );
       throw new StripeHttpError(0, true);
     }
+    let crossedPostBoundary = false;
     try {
       const effect = await this.client.createSubscriptionCredit(
         command,
@@ -286,6 +308,9 @@ export class StripeProviderRegistry
           }
           if (!authorized) throw new StripeFirstEffectAuthorizationError();
         },
+        () => {
+          crossedPostBoundary = true;
+        },
       );
       await caseStore.updateStripeSubscriptionCreditAttempt(
         command.idempotencyKey,
@@ -309,11 +334,33 @@ export class StripeProviderRegistry
           .catch(() => undefined);
         throw error;
       }
-      if (isDefiniteCreditNoEffect(error)) {
+      // Every client preflight and the durable final authorization run before
+      // this exact marker. Their failures prove that this worker has not sent
+      // a provider mutation, even though the recovery record was prepared
+      // first. Once marked, retain the conservative receipt-only path: a
+      // timeout, 5xx, or malformed response can follow a committed POST.
+      if (!crossedPostBoundary || isDefiniteCreditNoEffect(error)) {
+        if (!crossedPostBoundary)
+          await caseStore
+            .markStripeSubscriptionCreditPrePostNoEffect({
+              idempotencyKey: command.idempotencyKey,
+              fingerprint: command.fingerprint,
+              dispatch: {
+                dispatchId: authorization.dispatchId,
+                leaseToken: authorization.leaseToken,
+                turnId: authorization.turnId,
+              },
+            })
+            .catch(() => undefined);
         await caseStore
           .finalizeStripeSubscriptionCreditNoEffectFailure({
             idempotencyKey: command.idempotencyKey,
             fingerprint: command.fingerprint,
+            dispatch: {
+              dispatchId: authorization.dispatchId,
+              leaseToken: authorization.leaseToken,
+              turnId: authorization.turnId,
+            },
           })
           .catch(() => undefined);
         throw error;

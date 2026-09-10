@@ -575,11 +575,20 @@ export class CaseStore {
   async finalizeStripeSubscriptionCreditNoEffectFailure(input: {
     idempotencyKey: string;
     fingerprint: string;
+    dispatch: { dispatchId: string; leaseToken: string; turnId: string };
   }) {
     await this.ensured();
     return this.financial.finalizeStripeSubscriptionCreditNoEffectFailure(
       input,
     );
+  }
+  async markStripeSubscriptionCreditPrePostNoEffect(input: {
+    idempotencyKey: string;
+    fingerprint: string;
+    dispatch: { dispatchId: string; leaseToken: string; turnId: string };
+  }) {
+    await this.ensured();
+    return this.financial.markStripeSubscriptionCreditPrePostNoEffect(input);
   }
 
   async updateStripeSubscriptionCreditAttempt(

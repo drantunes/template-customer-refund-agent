@@ -680,6 +680,10 @@ function creditResponseLossStripeTransport(input: {
     posts: number;
     idempotencyKeys: string[];
     remoteCommitted: boolean;
+    /** Mutated after the initial quote so approval re-runs the Stripe
+     * preflight against changed provider state. */
+    preflightFailure?: "subscription" | "prior-credit";
+    preflightBarrier?: { started: () => void; release: Promise<void> };
   };
 }) {
   const transaction = () => ({
@@ -702,7 +706,11 @@ function creditResponseLossStripeTransport(input: {
     livemode: false,
     // Once the provider has committed the credit, model a lifecycle change to
     // ensure receipt recovery does not require an active subscription.
-    status: input.observed.remoteCommitted ? "canceled" : "active",
+    status:
+      input.observed.remoteCommitted ||
+      input.observed.preflightFailure === "subscription"
+        ? "canceled"
+        : "active",
     cancel_at_period_end: false,
     items: {
       data: [
@@ -784,11 +792,31 @@ function creditResponseLossStripeTransport(input: {
     if (path === "/v1/refunds" && request.method === "GET")
       return Response.json({ data: [], has_more: false });
     if (path === "/v1/customers/cus_credit_restart/balance_transactions") {
-      if (request.method === "GET")
+      if (request.method === "GET") {
+        const barrier = input.observed.preflightBarrier;
+        if (barrier) {
+          input.observed.preflightBarrier = undefined;
+          barrier.started();
+          await barrier.release;
+        }
         return Response.json({
-          data: input.observed.remoteCommitted ? [transaction()] : [],
+          data: input.observed.remoteCommitted
+            ? [transaction()]
+            : input.observed.preflightFailure === "prior-credit"
+              ? [
+                  {
+                    ...transaction(),
+                    id: "cbtxn_prior_credit",
+                    metadata: {
+                      ...transaction().metadata,
+                      command_fingerprint: "prior-credit-fingerprint",
+                    },
+                  },
+                ]
+              : [],
           has_more: false,
         });
+      }
       input.observed.posts += 1;
       input.observed.idempotencyKeys.push(
         request.headers.get("idempotency-key") ?? "",
@@ -1434,6 +1462,296 @@ describe("native approval workflow recovery", () => {
       ),
     ).toBe(0);
     expect(observed.posts).toBe(1);
+  });
+
+  it.each([
+    {
+      label: "subscription drift",
+      preflightFailure: "subscription" as const,
+    },
+    {
+      label: "a prior credit observed after quote",
+      preflightFailure: "prior-credit" as const,
+    },
+    { label: "a final authorization-fence loss", preflightFailure: undefined },
+  ])(
+    "terminalizes a proven pre-POST Stripe credit failure from HTTP approval and does not recover it after restart: $label",
+    async ({ preflightFailure }) => {
+      const caseId = `native-credit-prepost-${crypto.randomUUID()}`;
+      enableSyntheticStripe();
+      let fingerprint = "";
+      const observed: {
+        posts: number;
+        idempotencyKeys: string[];
+        remoteCommitted: boolean;
+        preflightFailure?: "subscription" | "prior-credit";
+      } = {
+        posts: 0,
+        idempotencyKeys: [],
+        remoteCommitted: false,
+      };
+      vi.stubGlobal(
+        "fetch",
+        creditResponseLossStripeTransport({
+          caseId,
+          fingerprint: () => fingerprint,
+          observed,
+        }),
+      );
+      const creditResponse = jsonModel({
+        draftResponse: "After approval, we can add a credit to your next bill.",
+        citedSources: ["service-problem-credit-policy"],
+        selectedPolicyExcerpts: [
+          {
+            source: "service-problem-credit-policy",
+            excerpt:
+              "For a verified service problem on one active monthly subscription, support may propose one credit equal to that subscription's single monthly charge.",
+          },
+        ],
+        recommendRefund: false,
+        resolutionAction: "subscription_credit",
+        subscriptionCreditAmount: 49,
+        subscriptionCreditCurrency: "USD",
+        subscriptionCreditReason: "Verified service outage",
+        requiresEscalation: false,
+      }) as never;
+      const initial = await setup(caseId, undefined, undefined, undefined, {
+        credit: true,
+        providerBindings: syntheticStripeBindings(caseId),
+        message: "Our service outage prevented me from using my subscription.",
+        triage: {
+          intent: "service_problem",
+          urgency: "normal",
+          sentiment: "negative",
+          requiresHumanReview: false,
+          confidence: 1,
+          rationale: "Verified service outage.",
+        },
+        responseModel: creditResponse,
+      });
+      const native = initial.native!;
+      fingerprint = native.fingerprint;
+      const command = await initial.caseStore.getAction(
+        caseId,
+        "subscription-credit-command",
+        fingerprint,
+      );
+      observed.preflightFailure = preflightFailure;
+      if (!preflightFailure)
+        vi.spyOn(
+          initial.caseStore,
+          "authorizeStripeSubscriptionCreditFirstEffect",
+        ).mockResolvedValue(false);
+
+      expect(
+        (await approveNativeRefund(initial.app, caseId, fingerprint)).status,
+      ).toBe(200);
+      expect(observed).toMatchObject({ posts: 0, remoteCommitted: false });
+      expect(observed.idempotencyKeys).toEqual([]);
+      expect(
+        await initial.caseStore.stripeSubscriptionCreditAttempt(
+          String(command!.idempotencyKey),
+        ),
+      ).toMatchObject({
+        status: "failed",
+        providerStatus: "confirmed-no-effect",
+        terminalAt: expect.any(String),
+      });
+      expect(
+        await initial.caseStore.getAction(
+          caseId,
+          "subscription-credit-failure",
+          fingerprint,
+        ),
+      ).toMatchObject({ classification: "confirmed-no-effect" });
+      expect(await initial.caseStore.get(caseId)).toMatchObject({
+        status: "escalated",
+        finalResponse: expect.stringMatching(/additional review/i),
+      });
+      const outbox = await initial.caseStore.getClient().execute({
+        sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ? AND originating_turn_id = ? AND status = 'escalated'",
+        args: [caseId, native.turnId],
+      });
+      expect(Number(outbox.rows[0]?.total)).toBe(1);
+
+      const databasePath = initial.databasePath!;
+      await initial.mastra.shutdown();
+      runtimes.splice(runtimes.indexOf(initial.mastra), 1);
+      const restarted = await setup(caseId, undefined, undefined, undefined, {
+        credit: true,
+        databasePath,
+        existingCase: true,
+        providerBindings: syntheticStripeBindings(caseId),
+        responseModel: creditResponse,
+      });
+      expect(
+        await restarted.recoverApprovedNativeDecisions(
+          restarted.mastra,
+          restarted.caseStore,
+          { disableScorers: true },
+        ),
+      ).toBe(0);
+      expect(observed.posts).toBe(0);
+      const postRestartOutbox = await restarted.caseStore.getClient().execute({
+        sql: "SELECT COUNT(*) AS total FROM support_outbox WHERE case_id = ? AND originating_turn_id = ? AND status = 'escalated'",
+        args: [caseId, native.turnId],
+      });
+      expect(Number(postRestartOutbox.rows[0]?.total)).toBe(1);
+    },
+  );
+
+  it("hands a proven pre-POST refusal to a reclaimed native lease without allowing the stale worker to overwrite it", async () => {
+    const caseId = `native-credit-reclaimed-prepost-${crypto.randomUUID()}`;
+    enableSyntheticStripe();
+    let fingerprint = "";
+    let releasePreflight!: () => void;
+    let preflightStarted!: () => void;
+    const observed: {
+      posts: number;
+      idempotencyKeys: string[];
+      remoteCommitted: boolean;
+      preflightBarrier?: { started: () => void; release: Promise<void> };
+    } = { posts: 0, idempotencyKeys: [], remoteCommitted: false };
+    vi.stubGlobal(
+      "fetch",
+      creditResponseLossStripeTransport({
+        caseId,
+        fingerprint: () => fingerprint,
+        observed,
+      }),
+    );
+    const creditResponse = jsonModel({
+      draftResponse: "After approval, we can add a credit to your next bill.",
+      citedSources: ["service-problem-credit-policy"],
+      selectedPolicyExcerpts: [
+        {
+          source: "service-problem-credit-policy",
+          excerpt:
+            "For a verified service problem on one active monthly subscription, support may propose one credit equal to that subscription's single monthly charge.",
+        },
+      ],
+      recommendRefund: false,
+      resolutionAction: "subscription_credit",
+      subscriptionCreditAmount: 49,
+      subscriptionCreditCurrency: "USD",
+      subscriptionCreditReason: "Verified service outage",
+      requiresEscalation: false,
+    }) as never;
+    const initial = await setup(caseId, undefined, undefined, undefined, {
+      credit: true,
+      providerBindings: syntheticStripeBindings(caseId),
+      message: "Our service outage prevented me from using my subscription.",
+      triage: {
+        intent: "service_problem",
+        urgency: "normal",
+        sentiment: "negative",
+        requiresHumanReview: false,
+        confidence: 1,
+        rationale: "Verified service outage.",
+      },
+      responseModel: creditResponse,
+    });
+    const native = initial.native!;
+    fingerprint = native.fingerprint;
+    const command = await initial.caseStore.getAction(
+      caseId,
+      "subscription-credit-command",
+      fingerprint,
+    );
+    const preflightRelease = new Promise<void>((resolve) => {
+      releasePreflight = resolve;
+    });
+    const preflightStartedPromise = new Promise<void>((resolve) => {
+      preflightStarted = resolve;
+    });
+    observed.preflightBarrier = {
+      started: preflightStarted,
+      release: preflightRelease,
+    };
+
+    const approval = approveNativeRefund(initial.app, caseId, fingerprint);
+    await preflightStartedPromise;
+    const original = await initial.caseStore.getClient().execute({
+      sql: "SELECT id, lease_token FROM support_dispatch WHERE case_id = ?",
+      args: [caseId],
+    });
+    const dispatchId = String(original.rows[0]?.id);
+    const originalLeaseToken = String(original.rows[0]?.lease_token);
+    await initial.caseStore.getClient().execute({
+      sql: "UPDATE support_dispatch SET lease_until = ? WHERE id = ? AND lease_token = ?",
+      args: [
+        new Date(Date.now() - 1_000).toISOString(),
+        dispatchId,
+        originalLeaseToken,
+      ],
+    });
+    const [reclaimed] = await initial.caseStore.claimDispatch();
+    expect(reclaimed).toMatchObject({
+      id: dispatchId,
+      caseId,
+      turnId: native.turnId,
+    });
+    expect(reclaimed.leaseToken).not.toBe(originalLeaseToken);
+
+    releasePreflight();
+    // The route reports its stale completion as a conflict; it must not turn
+    // that into a second approval outcome under the reclaimed lease.
+    expect((await approval).status).toBe(409);
+    expect(observed.posts).toBe(0);
+    expect(
+      await initial.caseStore.stripeSubscriptionCreditAttempt(
+        String(command!.idempotencyKey),
+      ),
+    ).toMatchObject({
+      status: "prepared",
+      providerStatus: "prepost-no-effect",
+    });
+    const retainedLease = await initial.caseStore.getClient().execute({
+      sql: "SELECT state, lease_token FROM support_dispatch WHERE id = ?",
+      args: [dispatchId],
+    });
+    expect(retainedLease.rows).toEqual([
+      expect.objectContaining({
+        state: "claimed",
+        lease_token: reclaimed!.leaseToken,
+      }),
+    ]);
+
+    // The stale HTTP worker cannot close the case. After this reclaim expires,
+    // the next native recovery owns the proof and closes the one prepared
+    // attempt without searching forever or issuing a replacement POST.
+    await initial.caseStore.getClient().execute({
+      sql: "UPDATE support_dispatch SET lease_until = ? WHERE id = ? AND lease_token = ?",
+      args: [
+        new Date(Date.now() - 1_000).toISOString(),
+        dispatchId,
+        reclaimed!.leaseToken!,
+      ],
+    });
+    expect(
+      await initial.recoverApprovedNativeDecisions(
+        initial.mastra,
+        initial.caseStore,
+        { disableScorers: true },
+      ),
+    ).toBe(1);
+    expect(observed.posts).toBe(0);
+    expect(
+      await initial.caseStore.stripeSubscriptionCreditAttempt(
+        String(command!.idempotencyKey),
+      ),
+    ).toMatchObject({
+      status: "failed",
+      providerStatus: "confirmed-no-effect",
+    });
+    expect(await initial.caseStore.get(caseId)).toMatchObject({
+      status: "escalated",
+    });
+    const failures = await initial.caseStore.getClient().execute({
+      sql: "SELECT COUNT(*) AS total FROM support_actions WHERE case_id = ? AND kind = 'subscription-credit-failure' AND fingerprint = ?",
+      args: [caseId, fingerprint],
+    });
+    expect(Number(failures.rows[0]?.total)).toBe(1);
   });
 
   it.each([400, 401, 403, 404, 422])(
