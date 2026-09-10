@@ -33,6 +33,20 @@ const studioWorkflowIds = new Map([
   ["index-support-knowledge", "indexSupportKnowledgeWorkflow"],
 ]);
 
+const workflowRunStatuses = new Set([
+  "running",
+  "waiting",
+  "suspended",
+  "success",
+  "failed",
+  "canceled",
+  "pending",
+  "bailed",
+  "tripwire",
+  "paused",
+  "skipped",
+]);
+
 function historyRoute(path: string) {
   const match = path.match(/^\/api\/workflows\/([^/]+)\/runs(?:\/([^/]+))?$/);
   if (!match) return undefined;
@@ -139,17 +153,40 @@ async function studioHistoryResponse(
     return c.json(run);
   }
   const query = new URL(c.req.url).searchParams;
-  const perPageValue = query.get("perPage") ?? query.get("limit");
-  const pageValue = query.get("page");
-  const perPage = perPageValue === null ? undefined : Number(perPageValue);
-  const page = pageValue === null ? 0 : Number(pageValue);
+  const paginationValue = (name: string) => {
+    const value = query.get(name);
+    if (value === null) return undefined;
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+  };
+  const perPageInput = paginationValue("perPage");
+  const pageInput = paginationValue("page");
+  const limit = paginationValue("limit");
+  const offset = paginationValue("offset");
   if (
-    (perPage !== undefined && (!Number.isInteger(perPage) || perPage <= 0)) ||
-    !Number.isInteger(page) ||
-    page < 0
+    perPageInput === null ||
+    pageInput === null ||
+    limit === null ||
+    offset === null
   )
     return c.json({ error: "Invalid pagination." }, 400);
+  let perPage = perPageInput;
+  let page = pageInput;
+  // Match Mastra's combined pagination handler: page/perPage take precedence;
+  // legacy offset is converted only when page was omitted and a page size exists.
+  if (perPage === undefined && limit !== undefined) perPage = limit;
+  if (
+    page === undefined &&
+    offset !== undefined &&
+    perPage !== undefined &&
+    perPage > 0
+  )
+    page = Math.floor(offset / perPage);
+  if (perPage !== undefined && perPage <= 0)
+    return c.json({ error: "Invalid pagination." }, 400);
   const status = query.get("status") ?? undefined;
+  if (status && !workflowRunStatuses.has(status))
+    return c.json({ error: "Invalid workflow status." }, 400);
   const parseDate = (value: string | null) =>
     value === null ? undefined : new Date(value);
   const fromDate = parseDate(query.get("fromDate"));
@@ -167,10 +204,11 @@ async function studioHistoryResponse(
     .sort(
       (left, right) => right.createdAt.getTime() - left.createdAt.getTime(),
     );
-  const start = perPage === undefined ? 0 : page * perPage;
+  const start =
+    page === undefined || perPage === undefined ? 0 : page * perPage;
   return c.json({
     runs:
-      perPage === undefined
+      page === undefined || perPage === undefined
         ? permitted
         : permitted.slice(start, start + perPage),
     total: permitted.length,

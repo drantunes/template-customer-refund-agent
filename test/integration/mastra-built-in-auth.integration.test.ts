@@ -186,6 +186,28 @@ describe("configured Mastra built-in API authorization", () => {
         createdAt.toISOString(),
       ],
     });
+    await caseStore.getClient().execute({
+      sql: "INSERT INTO support_dispatch(id, case_id, turn_id, run_id, state, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, 'completed', 1, ?, ?)",
+      args: [
+        "studio-history-dispatch-third",
+        localCase.id,
+        "studio-history-turn-third",
+        "studio-history-authorized-third",
+        createdAt.toISOString(),
+        createdAt.toISOString(),
+      ],
+    });
+    await caseStore.getClient().execute({
+      sql: "INSERT INTO support_dispatch(id, case_id, turn_id, run_id, state, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, 'completed', 1, ?, ?)",
+      args: [
+        "studio-history-dispatch-second",
+        localCase.id,
+        "studio-history-turn-second",
+        "studio-history-authorized-second",
+        createdAt.toISOString(),
+        createdAt.toISOString(),
+      ],
+    });
     const runs = [
       {
         workflowName: "resolveSupportCaseWorkflow",
@@ -199,6 +221,20 @@ describe("configured Mastra built-in API authorization", () => {
         runId: "studio-history-foreign",
         snapshot: { status: "suspended" },
         createdAt: new Date(createdAt.getTime() + 1),
+        updatedAt: createdAt,
+      },
+      {
+        workflowName: "resolveSupportCaseWorkflow",
+        runId: "studio-history-authorized-second",
+        snapshot: { status: "canceled" },
+        createdAt: new Date(createdAt.getTime() + 2),
+        updatedAt: createdAt,
+      },
+      {
+        workflowName: "resolveSupportCaseWorkflow",
+        runId: "studio-history-authorized-third",
+        snapshot: { status: "failed" },
+        createdAt: new Date(createdAt.getTime() + 3),
         updatedAt: createdAt,
       },
     ];
@@ -225,6 +261,58 @@ describe("configured Mastra built-in API authorization", () => {
       total: 1,
       runs: [{ runId: "studio-history-authorized" }],
     });
+    const legacyPage = await server.request(
+      "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?limit=1&offset=2",
+      { headers },
+    );
+    expect(legacyPage.status).toBe(200);
+    expect(await legacyPage.json()).toMatchObject({
+      total: 3,
+      runs: [{ runId: "studio-history-authorized" }],
+    });
+    const omittedPage = await server.request(
+      "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?perPage=1",
+      { headers },
+    );
+    expect(omittedPage.status).toBe(200);
+    expect(await omittedPage.json()).toMatchObject({
+      total: 3,
+      runs: [
+        { runId: "studio-history-authorized-third" },
+        { runId: "studio-history-authorized-second" },
+        { runId: "studio-history-authorized" },
+      ],
+    });
+    expect(
+      await (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?status=canceled",
+          { headers },
+        )
+      ).json(),
+    ).toMatchObject({
+      total: 1,
+      runs: [{ runId: "studio-history-authorized-second" }],
+    });
+    expect(
+      await (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?status=failed",
+          { headers },
+        )
+      ).json(),
+    ).toMatchObject({
+      total: 1,
+      runs: [{ runId: "studio-history-authorized-third" }],
+    });
+    expect(
+      (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?status=not-a-status",
+          { headers },
+        )
+      ).status,
+    ).toBe(400);
     expect(
       await (
         await server.request(

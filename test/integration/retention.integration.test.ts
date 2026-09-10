@@ -28,6 +28,35 @@ describe("DEC-015 retention", () => {
     const client = store.getClient();
     const createdAt = new Date().toISOString();
     const liveUntil = new Date(Date.now() + 60_000).toISOString();
+    await store.create({
+      id: "lease-race-case",
+      externalId: "lease-race-event",
+      source: "mock-email",
+      customer: { email: "lease-race@example.test" },
+      subject: "Reconciliation lease race",
+      messages: [],
+      status: "resolved",
+      createdAt,
+      updatedAt: createdAt,
+      metadata: {
+        providerBinding: {
+          tenantId: "local-demo",
+          providerKind: "local",
+          providerAccountId: "acct",
+          externalConversationId: "lease-race",
+        },
+      },
+    });
+    await client.execute({
+      sql: "INSERT INTO support_turns(id, case_id, event_id, sequence, state, created_at, updated_at) VALUES (?, ?, ?, 1, 'resolved', ?, ?)",
+      args: [
+        "lease-race-turn",
+        "lease-race-case",
+        "lease-race-event",
+        createdAt,
+        createdAt,
+      ],
+    });
     await client.execute({
       sql: "INSERT INTO support_dispatch(id, case_id, turn_id, run_id, state, attempts, lease_until, lease_token, created_at, updated_at) VALUES (?, ?, ?, ?, 'started', 1, ?, ?, ?, ?)",
       args: [
@@ -86,8 +115,48 @@ describe("DEC-015 retention", () => {
       idempotencyKey: "lease-race-key",
       status: "prepared",
     });
+    // The generic restart worker uses claimDispatch rather than the native
+    // resume helper. Its candidate and CAS must observe the same live
+    // reconciliation ownership, then permit reclaim after expiry.
+    await client.execute({
+      sql: "UPDATE support_dispatch SET state = 'started', attempts = 1, lease_until = ? WHERE id = ?",
+      args: [new Date(0).toISOString(), "dispatch-live-refund"],
+    });
+    expect(await store.claimDispatch()).toEqual([]);
+    await client.execute({
+      sql: "UPDATE support_stripe_refund_attempts SET reconcile_lease_until = ? WHERE idempotency_key = ?",
+      args: [new Date(0).toISOString(), "lease-race-key"],
+    });
+    await expect(store.claimDispatch()).resolves.toMatchObject([
+      { id: "dispatch-live-refund" },
+    ]);
+    // Reconciliation also blocks the exhausted-dispatch projection. Once it
+    // expires, the generic claimant may terminalize the exhausted dispatch.
+    await client.execute({
+      sql: "UPDATE support_dispatch SET state = 'started', attempts = 3, lease_until = ? WHERE id = ?",
+      args: [new Date(0).toISOString(), "dispatch-live-refund"],
+    });
+    expect(await store.claimableStripeRefundAttempts()).toHaveLength(1);
+    expect(await store.claimDispatch()).toEqual([]);
+    expect(await store.get("lease-race-case")).toMatchObject({
+      status: "resolved",
+    });
+    await client.execute({
+      sql: "UPDATE support_stripe_refund_attempts SET reconcile_lease_until = ? WHERE idempotency_key = ?",
+      args: [new Date(0).toISOString(), "lease-race-key"],
+    });
+    expect(await store.claimDispatch()).toEqual([]);
+    expect(await store.get("lease-race-case")).toMatchObject({
+      status: "escalated",
+      escalationReason:
+        "Workflow recovery exhausted its durable lease attempts.",
+    });
     // The reverse race is just as important: a recovery resume cannot replace
     // its dispatch token while reconciliation owns the prepared attempt.
+    await client.execute({
+      sql: "UPDATE support_stripe_refund_attempts SET reconcile_lease_until = ? WHERE idempotency_key = ?",
+      args: [new Date(Date.now() + 60_000).toISOString(), "lease-race-key"],
+    });
     await client.execute({
       sql: "UPDATE support_dispatch SET state = 'suspended', lease_until = ? WHERE id = ?",
       args: [new Date(0).toISOString(), "dispatch-live-refund"],

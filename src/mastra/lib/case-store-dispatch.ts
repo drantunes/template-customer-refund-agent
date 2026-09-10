@@ -23,16 +23,16 @@ export class CaseStoreDispatch {
   async claimDispatch(limit = 10): Promise<DispatchRecord[]> {
     const claimedAt = now();
     const exhausted = await this.client.execute({
-      sql: "SELECT case_id, id FROM support_dispatch WHERE state IN ('claimed', 'started') AND lease_until < ? AND attempts >= 3",
-      args: [claimedAt],
+      sql: "SELECT d.case_id, d.id FROM support_dispatch d WHERE d.state IN ('claimed', 'started') AND d.lease_until < ? AND d.attempts >= 3 AND NOT EXISTS (SELECT 1 FROM support_stripe_refund_attempts r WHERE r.dispatch_id = d.id AND r.reconcile_lease_until > ?)",
+      args: [claimedAt, claimedAt],
     });
     for (const row of exhausted.rows) {
       const caseId = String(row.case_id);
       const tx = await this.client.transaction("write");
       try {
         const changed = await tx.execute({
-          sql: "UPDATE support_dispatch SET state = 'failed', lease_until = NULL, lease_token = NULL, last_error = COALESCE(last_error, 'Dispatch lease exhausted after three attempts.'), updated_at = ? WHERE case_id = ? AND state IN ('claimed', 'started') AND lease_until < ? AND attempts >= 3",
-          args: [claimedAt, caseId, claimedAt],
+          sql: "UPDATE support_dispatch SET state = 'failed', lease_until = NULL, lease_token = NULL, last_error = COALESCE(last_error, 'Dispatch lease exhausted after three attempts.'), updated_at = ? WHERE case_id = ? AND state IN ('claimed', 'started') AND lease_until < ? AND attempts >= 3 AND NOT EXISTS (SELECT 1 FROM support_stripe_refund_attempts r WHERE r.dispatch_id = support_dispatch.id AND r.reconcile_lease_until > ?)",
+          args: [claimedAt, caseId, claimedAt, claimedAt],
         });
         if (Number(changed.rowsAffected) === 1) {
           const caseRow = await tx.execute({
@@ -90,15 +90,22 @@ export class CaseStoreDispatch {
     }
     const leaseUntil = dispatchLeaseUntil();
     const rows = await this.client.execute({
-      sql: "SELECT candidate.* FROM support_dispatch AS candidate JOIN support_turns AS candidate_turn ON candidate_turn.id = candidate.turn_id WHERE (candidate.state = 'pending' OR (candidate.state IN ('claimed', 'started') AND candidate.lease_until < ?)) AND candidate.attempts < 3 AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS earlier JOIN support_turns AS earlier_turn ON earlier_turn.id = earlier.turn_id WHERE earlier.case_id = candidate.case_id AND earlier.state = 'pending' AND earlier_turn.sequence < candidate_turn.sequence) ORDER BY candidate.created_at, candidate_turn.sequence, candidate.id LIMIT ?",
-      args: [claimedAt, limit],
+      sql: "SELECT candidate.* FROM support_dispatch AS candidate JOIN support_turns AS candidate_turn ON candidate_turn.id = candidate.turn_id WHERE (candidate.state = 'pending' OR (candidate.state IN ('claimed', 'started') AND candidate.lease_until < ?)) AND candidate.attempts < 3 AND NOT EXISTS (SELECT 1 FROM support_stripe_refund_attempts r WHERE r.dispatch_id = candidate.id AND r.reconcile_lease_until > ?) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS earlier JOIN support_turns AS earlier_turn ON earlier_turn.id = earlier.turn_id WHERE earlier.case_id = candidate.case_id AND earlier.state = 'pending' AND earlier_turn.sequence < candidate_turn.sequence) ORDER BY candidate.created_at, candidate_turn.sequence, candidate.id LIMIT ?",
+      args: [claimedAt, claimedAt, limit],
     });
     const claimed: DispatchRecord[] = [];
     for (const row of rows.rows) {
       const leaseToken = crypto.randomUUID();
       const update = await this.client.execute({
-        sql: "UPDATE support_dispatch AS candidate SET state = 'claimed', attempts = attempts + 1, lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND (state = 'pending' OR (state IN ('claimed', 'started') AND lease_until < ?)) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS earlier JOIN support_turns AS earlier_turn ON earlier_turn.id = earlier.turn_id JOIN support_turns AS candidate_turn ON candidate_turn.id = candidate.turn_id WHERE earlier.case_id = candidate.case_id AND earlier.state = 'pending' AND earlier_turn.sequence < candidate_turn.sequence)",
-        args: [leaseUntil, leaseToken, claimedAt, String(row.id), claimedAt],
+        sql: "UPDATE support_dispatch AS candidate SET state = 'claimed', attempts = attempts + 1, lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND (state = 'pending' OR (state IN ('claimed', 'started') AND lease_until < ?)) AND NOT EXISTS (SELECT 1 FROM support_stripe_refund_attempts r WHERE r.dispatch_id = candidate.id AND r.reconcile_lease_until > ?) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS earlier JOIN support_turns AS earlier_turn ON earlier_turn.id = earlier.turn_id JOIN support_turns AS candidate_turn ON candidate_turn.id = candidate.turn_id WHERE earlier.case_id = candidate.case_id AND earlier.state = 'pending' AND earlier_turn.sequence < candidate_turn.sequence)",
+        args: [
+          leaseUntil,
+          leaseToken,
+          claimedAt,
+          String(row.id),
+          claimedAt,
+          claimedAt,
+        ],
       });
       if (Number(update.rowsAffected) === 1)
         claimed.push({
