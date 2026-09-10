@@ -34,7 +34,7 @@ import {
   setMastraStorageReady,
   startAfterStorageReady,
 } from "./runtime/storage-lifecycle";
-import { LocalSupportAuthProvider } from "./server/auth";
+import { isLocalStudioDevMode, LocalSupportAuthProvider } from "./server/auth";
 import { studioSupervisorMiddleware } from "./server/studio-supervisor";
 import { retentionPolicyFromEnvironment } from "./lib/case-store";
 import {
@@ -44,6 +44,7 @@ import {
 import { composeConfiguredProviders } from "./providers/composition";
 
 const retentionPolicy = retentionPolicyFromEnvironment();
+const localStudioDevMode = isLocalStudioDevMode();
 let localRuntimeWorkers: Promise<undefined | (() => Promise<void>)> =
   Promise.resolve(undefined);
 
@@ -101,9 +102,12 @@ export const mastra = new Mastra({
   server: {
     apiRoutes: supportRoutes,
     middleware: studioSupervisorMiddleware,
-    // This protects the configured server's built-in agent/tool/workflow,
-    // approval, memory and storage routes as well as our custom API routes.
-    auth: new LocalSupportAuthProvider(),
+    // The generated `mastra dev` child is loopback-only and the middleware
+    // below admits only a read-only Studio surface plus the scoped supervisor.
+    // `start` and every other environment retain the configured provider.
+    ...(localStudioDevMode
+      ? { host: "127.0.0.1", studioHost: "localhost" }
+      : { auth: new LocalSupportAuthProvider() }),
     // This module owns SIGINT/SIGTERM so it can stop local recovery before
     // Mastra and the shared SQLite client close. The generated CLI cannot
     // drain HTTP connections while custom signal handling is enabled.

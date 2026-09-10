@@ -305,6 +305,132 @@ export function hasRole(principal: SupportPrincipal, role: SupportRole) {
   return principal.roles.includes(role);
 }
 
+/**
+ * The generated Mastra CLI sets both values only for its child `dev` process.
+ * Requiring the pair prevents a manually supplied development flag from
+ * disabling authentication on a `start` or deployed server.
+ */
+export function isLocalStudioDevMode() {
+  return (
+    process.env.MASTRA_DEV === "true" &&
+    process.env.MASTRA_TELEMETRY_COMMAND === "dev"
+  );
+}
+
+/** The bounded principal used only by the loopback development Studio. */
+export function localDemoStudioPrincipal(): SupportPrincipal {
+  const identity = seeded.find((entry) => entry.id === "support-agent-demo");
+  if (!identity)
+    throw new Error("The local Studio principal is not configured.");
+  return {
+    id: identity.id,
+    email: identity.email,
+    tenantId: identity.tenantId,
+    roles: [...identity.roles],
+    // This principal is process-local and never serialized into a session.
+    expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
+  };
+}
+
+/**
+ * Resolves Studio identity without allowing a stale cookie to affect local
+ * development. An explicit Authorization header always remains authoritative:
+ * invalid, customer, approver, and foreign-tenant tokens cannot fall back to
+ * the demo principal.
+ */
+export function studioPrincipalForRequest(headers: Headers) {
+  if (isLocalStudioDevMode() && !headers.has("authorization"))
+    return localDemoStudioPrincipal();
+  return studioPrincipalFromHeaders(headers);
+}
+
+export type BuiltInStudioRequest = {
+  method: string;
+  path: string;
+};
+
+const nativeSupervisorRoute =
+  /^\/(?:api\/)?agents\/support-supervisor\/(?:generate|stream|send-message|signals|threads\/subscribe)$/;
+const scopedStudioMemoryRoute = (path: string, method: string) =>
+  (method === "GET" &&
+    /^\/(?:api\/)?memory\/(?:status|config|threads(?:\/[^/]+(?:\/messages)?)?)$/.test(
+      path,
+    )) ||
+  (method === "POST" && /^\/(?:api\/)?memory\/threads$/.test(path));
+
+/**
+ * The Studio-only allowlist is deliberately data-free: middleware supplies
+ * tenant and case scope before the framework handlers read memory or history.
+ * Keeping it pure lets the configured auth provider and login-free local mode
+ * enforce exactly the same registry and execution boundary.
+ */
+export function canAccessBuiltInStudioRoute(
+  user: SupportPrincipal,
+  request: BuiltInStudioRequest,
+) {
+  const expires = Date.parse(user.expiresAt);
+  if (!Number.isFinite(expires) || expires <= Date.now()) return false;
+  const method = request.method.toUpperCase();
+  const { path } = request;
+  const isLocalStaff =
+    user.tenantId === "local-demo" &&
+    user.roles.some((role) => role === "support-agent" || role === "admin");
+  if (!isLocalStaff) return false;
+  if (method === "POST" && nativeSupervisorRoute.test(path)) return true;
+  if (scopedStudioMemoryRoute(path, method)) return true;
+  if (
+    method === "GET" &&
+    /^\/(?:api\/)?workflows\/(?:ingestSupportCaseWorkflow|resolveSupportCaseWorkflow|indexSupportKnowledgeWorkflow|ingest-support-case|resolve-support-case|index-support-knowledge)\/runs(?:\/[^/]+)?$/.test(
+      path,
+    )
+  )
+    return true;
+  const studioChromeMetadata = new Set([
+    "/api/agents/providers",
+    "/api/editor/builder/settings",
+    "/api/editor/builder/models/available",
+    "/api/system/packages",
+    "/api/scores/scorers",
+  ]);
+  if (method === "GET" && studioChromeMetadata.has(path)) return true;
+  const studioRegistryIds = {
+    agents: new Set([
+      "triage-agent",
+      "response-agent",
+      "support-supervisor",
+      "refund-execution-agent",
+    ]),
+    tools: new Set([
+      "search_support_knowledge",
+      "lookup_order",
+      "lookup_subscription",
+      "lookup_customer_refund_history",
+      "issue_refund",
+      "issue_subscription_credit",
+      "schedule_subscription_cancellation",
+    ]),
+    workflows: new Set([
+      "ingestSupportCaseWorkflow",
+      "resolveSupportCaseWorkflow",
+      "indexSupportKnowledgeWorkflow",
+      "ingest-support-case",
+      "resolve-support-case",
+      "index-support-knowledge",
+    ]),
+  };
+  const metadataRoute = path.match(
+    /^(?:\/api)?\/(agents|tools|workflows)(?:\/([^/]+))?$/,
+  );
+  return (
+    method === "GET" &&
+    metadataRoute !== null &&
+    (metadataRoute[2] === undefined ||
+      studioRegistryIds[metadataRoute[1] as keyof typeof studioRegistryIds].has(
+        metadataRoute[2],
+      ))
+  );
+}
+
 export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipal> {
   constructor() {
     super({
@@ -348,8 +474,6 @@ export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipa
     return false;
   }
   async authorizeUser(user: SupportPrincipal, request: unknown) {
-    const expires = Date.parse(user.expiresAt);
-    if (!Number.isFinite(expires) || expires <= Date.now()) return false;
     const rawRequest =
       typeof request === "object" && request !== null && "raw" in request
         ? request.raw
@@ -376,113 +500,13 @@ export class LocalSupportAuthProvider extends MastraAuthProvider<SupportPrincipa
         : undefined;
       return bearerPrincipal?.id === user.id;
     }
-    // The native supervisor execution receives a tenant/case scope from server
-    // middleware; registry and memory configuration are the only unaffiliated
-    // Studio reads exposed to local staff. Other built-in data and mutation
-    // routes remain denied because they have no tenant-safe contract here.
     const method =
       typeof rawRequest === "object" &&
       rawRequest !== null &&
       "method" in rawRequest
         ? String(rawRequest.method).toUpperCase()
         : "GET";
-    const isNativeSupervisorExecution =
-      method === "POST" &&
-      /^\/(?:api\/)?agents\/support-supervisor\/(?:generate|stream|send-message|signals|threads\/subscribe)$/.test(
-        path,
-      );
-    if (
-      isNativeSupervisorExecution &&
-      user.tenantId === "local-demo" &&
-      user.roles.some((role) => role === "support-agent" || role === "admin")
-    )
-      return true;
-    const isScopedStudioMemory =
-      (method === "GET" &&
-        /^\/(?:api\/)?memory\/(?:status|config|threads(?:\/[^/]+(?:\/messages)?)?)$/.test(
-          path,
-        )) ||
-      (method === "POST" && /^\/(?:api\/)?memory\/threads$/.test(path));
-    if (
-      isScopedStudioMemory &&
-      user.tenantId === "local-demo" &&
-      user.roles.some((role) => role === "support-agent" || role === "admin")
-    )
-      return true;
-    // History is served by the Studio middleware. It derives tenant scope from
-    // durable case associations and deliberately ignores any requested
-    // resourceId; the framework's single-resource handler cannot represent
-    // the tenant-wide staff read scope safely.
-    const studioHistoryRoute =
-      method === "GET" &&
-      /^\/(?:api\/)?workflows\/(?:ingestSupportCaseWorkflow|resolveSupportCaseWorkflow|indexSupportKnowledgeWorkflow|ingest-support-case|resolve-support-case|index-support-knowledge)\/runs(?:\/[^/]+)?$/.test(
-        path,
-      );
-    if (
-      studioHistoryRoute &&
-      user.tenantId === "local-demo" &&
-      user.roles.some((role) => role === "support-agent" || role === "admin")
-    )
-      return true;
-    const studioChromeMetadata = new Set([
-      "/api/agents/providers",
-      "/api/editor/builder/settings",
-      "/api/editor/builder/models/available",
-      "/api/system/packages",
-      "/api/scores/scorers",
-    ]);
-    if (
-      method === "GET" &&
-      user.tenantId === "local-demo" &&
-      user.roles.some((role) => role === "support-agent" || role === "admin") &&
-      studioChromeMetadata.has(path)
-    )
-      return true;
-    const studioRegistryIds = {
-      agents: new Set([
-        "triage-agent",
-        "response-agent",
-        "support-supervisor",
-        "refund-execution-agent",
-      ]),
-      tools: new Set([
-        "search_support_knowledge",
-        "lookup_order",
-        "lookup_subscription",
-        "lookup_customer_refund_history",
-        "issue_refund",
-        "issue_subscription_credit",
-        "schedule_subscription_cancellation",
-      ]),
-      workflows: new Set([
-        // Studio builds detail links from the Mastra registry keys returned by
-        // GET /workflows. The workflow definitions themselves use the
-        // kebab-case IDs below, which the installed handler also resolves.
-        "ingestSupportCaseWorkflow",
-        "resolveSupportCaseWorkflow",
-        "indexSupportKnowledgeWorkflow",
-        "ingest-support-case",
-        "resolve-support-case",
-        "index-support-knowledge",
-      ]),
-    };
-    const metadataRoute = path.match(
-      /^(?:\/api)?\/(agents|tools|workflows)(?:\/([^/]+))?$/,
-    );
-    const isRegistryMetadata =
-      metadataRoute !== null &&
-      (metadataRoute[2] === undefined ||
-        studioRegistryIds[
-          metadataRoute[1] as keyof typeof studioRegistryIds
-        ].has(metadataRoute[2]));
-    if (
-      method === "GET" &&
-      user.tenantId === "local-demo" &&
-      user.roles.some((role) => role === "support-agent" || role === "admin") &&
-      isRegistryMetadata
-    )
-      return true;
-    return false;
+    return canAccessBuiltInStudioRoute(user, { method, path });
   }
   mapUserToResourceId(user: SupportPrincipal) {
     const studioScope = currentTrustedCaseReadScope();

@@ -96,11 +96,18 @@ function nativeStudioReadModel(): LanguageModelV2 {
   };
 }
 
-async function configuredServer() {
+async function configuredServer(options: { localStudioDev?: boolean } = {}) {
   const path = temporaryDatabasePath("phase003-built-in-auth");
   databases.push(path, `${path}-shm`, `${path}-wal`);
   process.env.TURSO_DATABASE_URL = `file:${path}`;
   process.env.SUPPORT_SOURCE = "mock";
+  if (options.localStudioDev) {
+    process.env.MASTRA_DEV = "true";
+    process.env.MASTRA_TELEMETRY_COMMAND = "dev";
+  } else {
+    delete process.env.MASTRA_DEV;
+    delete process.env.MASTRA_TELEMETRY_COMMAND;
+  }
   vi.resetModules();
   vi.doMock("@mastra/core/llm", async (importOriginal) => {
     const actual = await importOriginal<typeof import("@mastra/core/llm")>();
@@ -130,12 +137,99 @@ afterEach(async () => {
   vi.restoreAllMocks();
   vi.doUnmock("../../src/mastra/evals");
   vi.doUnmock("@mastra/core/llm");
+  delete process.env.MASTRA_DEV;
+  delete process.env.MASTRA_TELEMETRY_COMMAND;
   await Promise.all(
     databases.splice(0).map((path) => rm(path, { force: true })),
   );
 });
 
 describe("configured Mastra built-in API authorization", () => {
+  it("admits only the loopback Studio surface without a login in the exact dev child", async () => {
+    const { mastra, server } = await configuredServer({ localStudioDev: true });
+    expect(mastra.getServer()?.auth).toBeUndefined();
+    expect(mastra.getServer()?.host).toBe("127.0.0.1");
+    expect(mastra.getServer()?.studioHost).toBe("localhost");
+
+    const capabilities = await server.request(
+      "http://support.test/api/auth/capabilities",
+    );
+    expect(capabilities.status).toBe(200);
+    expect(await capabilities.json()).toMatchObject({
+      enabled: false,
+      login: null,
+    });
+    expect(
+      (await server.request("http://support.test/api/workflows")).status,
+    ).toBe(200);
+    expect(
+      (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs",
+          { headers: { cookie: "mastra-token=stale-session" } },
+        )
+      ).status,
+    ).toBe(200);
+
+    for (const [headers, status] of [
+      [{ authorization: "Bearer invalid-token" }, 401],
+      [
+        {
+          authorization: `Bearer ${issueLocalSession({ id: "customer-alex" })}`,
+        },
+        403,
+      ],
+      [
+        {
+          authorization: `Bearer ${issueLocalSession({ id: "approver-demo" })}`,
+        },
+        403,
+      ],
+      [
+        {
+          authorization: `Bearer ${issueLocalSession({ id: "other-tenant-agent" })}`,
+        },
+        403,
+      ],
+    ] as const) {
+      expect(
+        (
+          await server.request("http://support.test/api/workflows", {
+            headers,
+          })
+        ).status,
+      ).toBe(status);
+    }
+
+    for (const url of [
+      "http://support.test/api/tools/issue_refund/execute",
+      "http://support.test/api/workflows/resolveSupportCaseWorkflow/start",
+      "http://support.test/api/agents/refund-execution-agent/stream",
+    ])
+      expect(
+        (
+          await server.request(url, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          })
+        ).status,
+      ).toBe(403);
+
+    expect(
+      (await server.request("http://support.test/support/openapi.json")).status,
+    ).toBe(401);
+    expect(
+      (
+        await server.request("http://support.test/support/openapi.json", {
+          headers: {
+            authorization: `Bearer ${issueLocalSession({ id: "admin-demo" })}`,
+          },
+        })
+      ).status,
+    ).toBe(200);
+  });
+
   it("filters legacy NULL-resource workflow history before tenant totals, pagination, and detail", async () => {
     const { mastra, server } = await configuredServer();
     const { caseStore } = await import("../../src/mastra/lib/case-store");

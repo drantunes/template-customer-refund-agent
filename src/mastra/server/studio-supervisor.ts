@@ -5,10 +5,13 @@ import { caseStore } from "../lib/case-store";
 import { bindingsForCase } from "../providers/contracts";
 import { ensureStudioSupervisorDemoCase } from "../runtime/studio-seed";
 import {
+  canAccessBuiltInStudioRoute,
   canAccessCase,
   hasRole,
+  isLocalStudioDevMode,
   isForeignCookieMutation,
-  studioPrincipalFromHeaders,
+  principalFromHeaders,
+  studioPrincipalForRequest,
 } from "./auth";
 import {
   supportSupervisorInstructions,
@@ -93,7 +96,7 @@ function snapshotStatus(snapshot: unknown): string | undefined {
 
 async function studioHistoryResponse(
   c: ContextWithMastra,
-  principal: NonNullable<ReturnType<typeof studioPrincipalFromHeaders>>,
+  principal: NonNullable<ReturnType<typeof studioPrincipalForRequest>>,
   route: { workflowId: string; runId?: string },
 ) {
   const allCases = await caseStore.list();
@@ -296,6 +299,37 @@ export async function studioSupervisorMiddleware(
   if (isForeignCookieMutation(c.req.raw))
     return c.json({ error: "Cross-origin cookie mutation denied." }, 403);
   const path = new URL(c.req.url).pathname;
+  const isBuiltInApi = path.startsWith("/api/");
+  // Without server.auth the framework permits its built-in routes by default.
+  // In the exact CLI dev child, restore a fail-closed boundary here. Framework
+  // public auth/capabilities remains outside this middleware and reports
+  // `enabled: false`, which is how Studio suppresses the login screen.
+  if (isLocalStudioDevMode() && isBuiltInApi) {
+    const devPrincipal = studioPrincipalForRequest(c.req.raw.headers);
+    if (!devPrincipal)
+      return c.json({ error: "Authentication required." }, 401);
+    if (
+      !canAccessBuiltInStudioRoute(devPrincipal, {
+        method: c.req.method,
+        path,
+      })
+    )
+      return c.json(
+        { error: "Studio route is not available in local dev." },
+        403,
+      );
+  }
+  if (
+    isLocalStudioDevMode() &&
+    path.startsWith("/support/") &&
+    ![
+      "/support/auth/login",
+      "/support/webhooks/intercom",
+      "/support/webhooks/stripe",
+    ].includes(path) &&
+    !principalFromHeaders(c.req.raw.headers)
+  )
+    return c.json({ error: "Authentication required." }, 401);
   const requestedHistory = historyRoute(path);
   const isNativeSupervisor = nativeSupervisorRoute.test(path);
   const isScopedMemory = scopedStudioMemoryRoute(path, c.req.method);
@@ -306,7 +340,7 @@ export async function studioSupervisorMiddleware(
   if (isNativeSupervisor && c.req.method !== "POST")
     return c.json({ error: "Method not allowed." }, 405);
 
-  const principal = studioPrincipalFromHeaders(c.req.raw.headers);
+  const principal = studioPrincipalForRequest(c.req.raw.headers);
   if (!principal) return c.json({ error: "Authentication required." }, 401);
   if (
     principal.tenantId !== "local-demo" ||
