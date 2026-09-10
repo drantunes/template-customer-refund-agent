@@ -12,7 +12,7 @@ import { databaseUrl, ensureDatabaseDirectory } from "../../src/db.js";
 
 const customer = {
   id: "customer-example",
-  name: "Cliente Exemplo",
+  name: "Example Customer",
   email: "customer@example.test",
   tenantId: "local-demo",
   stripeCustomerId: "cus_example",

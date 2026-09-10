@@ -23,9 +23,9 @@ async function signIn(
   password: string,
 ) {
   await page.goto("/entrar");
-  await page.getByLabel("E-mail").fill(email);
-  await page.getByLabel("Senha").fill(password);
-  await page.getByRole("button", { name: "Entrar na conta" }).click();
+  await page.getByLabel("Email").fill(email);
+  await page.getByLabel("Password").fill(password);
+  await page.getByRole("button", { name: "Sign in to your account" }).click();
 }
 
 test("public support launcher requires login and then shows the customer account", async ({
@@ -34,18 +34,18 @@ test("public support launcher requires login and then shows the customer account
   await installWidgetStub(page);
   await page.goto("/atendimento");
   await expect(
-    page.getByRole("heading", { name: "Entre para acompanhar seu suporte." }),
+    page.getByRole("heading", { name: "Sign in to track your requests." }),
   ).toBeVisible();
-  await page.getByLabel("E-mail").fill("customer@example.test");
-  await page.getByLabel("Senha").fill("test-password");
-  await page.getByRole("button", { name: "Entrar na conta" }).click();
+  await page.getByLabel("Email").fill("customer@example.test");
+  await page.getByLabel("Password").fill("test-password");
+  await page.getByRole("button", { name: "Sign in to your account" }).click();
   await expect(
-    page.getByRole("heading", { name: "Olá, Cliente E2E." }),
+    page.getByRole("heading", { name: "Hello, E2E Customer." }),
   ).toBeVisible();
   await expect(page.getByText("Northstar Toolkit")).toBeVisible();
   await expect(
     page.getByText(
-      "Não foi possível consultar as solicitações agora. Tente novamente em instantes.",
+      "We could not retrieve your requests right now. Try again shortly.",
     ),
   ).toBeVisible();
   const initialWidgetCalls = await page.evaluate(
@@ -61,10 +61,10 @@ test("public support launcher requires login and then shows the customer account
           .northstarWidgetCalls,
     ),
   ).toEqual(initialWidgetCalls);
-  await page.getByRole("link", { name: "Falar com suporte" }).click();
+  await page.getByRole("link", { name: "Contact support" }).click();
   await expect(page).toHaveURL(/\/conta\?chat=open$/);
   await expect(
-    page.getByRole("heading", { name: "Olá, Cliente E2E." }),
+    page.getByRole("heading", { name: "Hello, E2E Customer." }),
   ).toBeVisible();
   expect(
     await page.evaluate(
@@ -73,9 +73,9 @@ test("public support launcher requires login and then shows the customer account
           .northstarWidgetCalls,
     ),
   ).toContain("show");
-  await page.getByRole("button", { name: "Sair" }).click();
+  await page.getByRole("button", { name: "Sign out" }).click();
   await expect(
-    page.getByRole("heading", { name: "Entre para acompanhar seu suporte." }),
+    page.getByRole("heading", { name: "Sign in to track your requests." }),
   ).toBeVisible();
 });
 
@@ -84,12 +84,12 @@ test("shuts down the old Messenger session after another account signs in", asyn
 }) => {
   await installWidgetStub(page);
   await signIn(page, "customer@example.test", "test-password");
-  await expect(page.getByText("Olá, Cliente E2E.")).toBeVisible();
+  await expect(page.getByText("Hello, E2E Customer.")).toBeVisible();
 
   const other = await page.context().newPage();
   await installWidgetStub(other);
   await signIn(other, "other@example.test", "other-test-password");
-  await expect(other.getByText("Olá, Cliente Alternativo.")).toBeVisible();
+  await expect(other.getByText("Hello, Alternate Customer.")).toBeVisible();
   const otherCalls = await other.evaluate(
     () =>
       (window as typeof window & { northstarWidgetCalls: string[] })
@@ -114,10 +114,10 @@ test("shuts down the Messenger before redirecting after an expired session check
 }) => {
   await installWidgetStub(page);
   await page.route("**/sessao", (route) =>
-    route.fulfill({ status: 401, body: "Sessão expirada." }),
+    route.fulfill({ status: 401, body: "Session expired." }),
   );
   await signIn(page, "customer@example.test", "test-password");
-  await expect(page.getByText("Olá, Cliente E2E.")).toBeVisible();
+  await expect(page.getByText("Hello, E2E Customer.")).toBeVisible();
   await page.evaluate(() =>
     document.dispatchEvent(new Event("visibilitychange")),
   );
@@ -153,7 +153,7 @@ test("shuts down the Messenger at the exact session-expiry timer", async ({
   });
   await installWidgetStub(page);
   await signIn(page, "customer@example.test", "test-password");
-  await expect(page.getByText("Olá, Cliente E2E.")).toBeVisible();
+  await expect(page.getByText("Hello, E2E Customer.")).toBeVisible();
   await page.evaluate(() => {
     (
       window as typeof window & { northstarExpiry?: () => void }
@@ -179,7 +179,7 @@ test("queues boot and open commands while the real Messenger loader is pending",
     }),
   );
   await signIn(page, "customer@example.test", "test-password");
-  await page.getByRole("link", { name: "Falar com suporte" }).click();
+  await page.getByRole("link", { name: "Contact support" }).click();
   await expect(page).toHaveURL(/\/conta\?chat=open$/);
   await expect
     .poll(() =>

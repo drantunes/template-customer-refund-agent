@@ -10,7 +10,7 @@ export function Layout(props: {
   requestsRefresh?: boolean;
 }) {
   return (
-    <html lang="pt-BR">
+    <html lang="en">
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -33,12 +33,12 @@ export function Layout(props: {
                       name="csrf"
                       value={props.csrfToken ?? ""}
                     />
-                    <button class="button">Sair</button>
+                    <button class="button">Sign out</button>
                   </form>
                 </>
               ) : (
                 <a class="button" href="/entrar">
-                  Entrar
+                  Sign in
                 </a>
               )}
             </div>
@@ -62,42 +62,42 @@ export function Layout(props: {
 }
 export function Landing() {
   return (
-    <Layout title="Suporte que acompanha você">
+    <Layout title="Support that keeps up with you">
       <main class="hero">
         <div class="eyebrow">Northstar support</div>
-        <h1>Seu trabalho continua. A gente resolve o resto.</h1>
+        <h1>Your work keeps moving. We take care of the rest.</h1>
         <p class="lead">
-          Acompanhe suas solicitações e fale com o suporte em um único lugar,
-          com contexto da sua conta.
+          Track your requests and contact support in one place.
         </p>
         <div class="actions">
           <a class="button primary" href="/entrar">
-            Acessar minha conta
+            Access my account
           </a>
           <a class="button" href="/atendimento">
-            Falar com atendimento
+            Contact support
           </a>
         </div>
       </main>
       <section class="grid">
         <article class="card">
-          <h2>Pedidos claros</h2>
+          <h2>Request status</h2>
           <p class="muted">
-            Veja o que já foi registrado e o andamento real de cada solicitação.
+            See what has already been recorded and the actual status of each
+            request.
           </p>
         </article>
         <article class="card">
-          <h2>Suporte com contexto</h2>
+          <h2>Support with context</h2>
           <p class="muted">
-            O atendimento começa pela sua conta autenticada, sem repetir
-            informações.
+            Support starts with your authenticated account, without making you
+            repeat information.
           </p>
         </article>
         <article class="card">
-          <h2>Próxima fatura</h2>
+          <h2>Next invoice</h2>
           <p class="muted">
-            Quando um crédito for aprovado, ele fica disponível para a próxima
-            fatura.
+            When a credit is approved, it will be available for your next
+            invoice.
           </p>
         </article>
       </section>
@@ -106,19 +106,19 @@ export function Landing() {
 }
 export function Login(props: { error?: string; next?: string }) {
   return (
-    <Layout title="Entrar">
+    <Layout title="Sign in">
       <main class="auth">
-        <div class="eyebrow">Conta Northstar</div>
-        <h1>Entre para acompanhar seu suporte.</h1>
+        <div class="eyebrow">Northstar account</div>
+        <h1>Sign in to track your requests.</h1>
         {props.error ? <p class="error">{props.error}</p> : null}
         <form method="post" action="/entrar">
           <input type="hidden" name="next" value={props.next ?? "/conta"} />
           <label class="field">
-            E-mail
+            Email
             <input name="email" type="email" autoComplete="email" required />
           </label>
           <label class="field">
-            Senha
+            Password
             <input
               name="password"
               type="password"
@@ -127,7 +127,7 @@ export function Login(props: { error?: string; next?: string }) {
             />
           </label>
           <button class="button primary" type="submit">
-            Entrar na conta
+            Sign in to your account
           </button>
         </form>
       </main>
@@ -143,12 +143,12 @@ type SupportCase = {
   status: string;
 };
 const labels: Record<string, string> = {
-  pending_approval: "Aguardando aprovação",
-  rejected: "Não aprovada",
-  processing: "Em processamento",
-  executed: "Concluída",
-  failed: "Precisa de atenção",
-  unknown: "Em verificação",
+  pending_approval: "Awaiting approval",
+  rejected: "Not approved",
+  processing: "Processing",
+  executed: "Completed",
+  failed: "Needs attention",
+  unknown: "Under review",
 };
 export function Account(props: {
   customer: DemoCustomer;
@@ -162,21 +162,21 @@ export function Account(props: {
     props.customer.purchasePaid
       ? {
           title: "Northstar Toolkit",
-          detail: "Compra única · US$ 5",
-          state: "Pagamento confirmado",
+          detail: "One-time purchase · $5.00",
+          state: "Payment confirmed",
         }
       : undefined,
     props.customer.subscriptionId
       ? {
           title: "Northstar Workspace",
-          detail: "US$ 5 por mês",
-          state: "Assinatura ativa",
+          detail: "$5.00 per month",
+          state: "Active subscription",
         }
       : undefined,
   ].filter(Boolean) as Array<{ title: string; detail: string; state: string }>;
   return (
     <Layout
-      title="Minha conta"
+      title="My account"
       customer={props.customer}
       csrfToken={props.csrfToken}
       widget={props.widget}
@@ -185,24 +185,22 @@ export function Account(props: {
       <main class="account">
         <div class="account-header">
           <div>
-            <div class="eyebrow">Minha conta</div>
-            <h1>Olá, {props.customer.name}.</h1>
-            <p class="muted">
-              Acompanhe seus produtos e solicitações de suporte.
-            </p>
+            <div class="eyebrow">My account</div>
+            <h1>Hello, {props.customer.name}.</h1>
+            <p class="muted">Track your products and support requests.</p>
           </div>
           <a class="button primary" href="/atendimento">
-            Falar com suporte
+            Contact support
           </a>
         </div>
         {props.chatUnavailable ? (
           <p class="notice">
-            O chat autenticado ainda não está configurado neste ambiente. Volte
-            quando o suporte estiver disponível.
+            Authenticated chat is not configured in this environment yet. Come
+            back when support is available.
           </p>
         ) : null}
         <section class="section">
-          <h2>Produtos</h2>
+          <h2>Products</h2>
           <div class="stack">
             {purchases.length ? (
               purchases.map((purchase) => (
@@ -216,13 +214,13 @@ export function Account(props: {
               ))
             ) : (
               <div class="empty">
-                Nenhum produto disponível para esta conta.
+                No products are available for this account.
               </div>
             )}
           </div>
         </section>
         <section class="section">
-          <h2>Solicitações</h2>
+          <h2>Requests</h2>
           <div id="financial-requests" aria-live="polite">
             <FinancialRequests
               requests={props.requests}
@@ -232,11 +230,11 @@ export function Account(props: {
         </section>
         <section class="section">
           <article class="card">
-            <h2>Alteração de endereço</h2>
+            <h2>Address change</h2>
             <p class="muted">
-              Para compras futuras, peça a atualização de endereço pelo chat
-              autenticado. O suporte confirma os dados antes de registrar a
-              orientação.
+              To update your address for future purchases, contact support
+              through the chat. The team will confirm your details and guide you
+              through the next steps.
             </p>
           </article>
         </section>
@@ -252,8 +250,7 @@ export function FinancialRequests(props: {
     <div class="stack">
       {!props.requestsAvailable ? (
         <div class="empty">
-          Não foi possível consultar as solicitações agora. Tente novamente em
-          instantes.
+          We could not retrieve your requests right now. Try again shortly.
         </div>
       ) : props.requests.length ? (
         props.requests.map((request) => (
@@ -261,17 +258,17 @@ export function FinancialRequests(props: {
             <div>
               <h3>
                 {request.type === "subscription_credit"
-                  ? "Crédito para a próxima fatura"
-                  : "Solicitação de reembolso"}
+                  ? "Credit for your next invoice"
+                  : "Refund request"}
               </h3>
               <p class="muted">
-                {request.amount.toLocaleString("pt-BR", {
+                {request.amount.toLocaleString("en-US", {
                   style: "currency",
                   currency: request.currency,
                 })}
                 {request.type === "subscription_credit" &&
                 request.status === "executed"
-                  ? " · Crédito disponível para uma fatura futura."
+                  ? " · Credit available for a future invoice."
                   : ""}
               </p>
             </div>
@@ -282,7 +279,7 @@ export function FinancialRequests(props: {
         ))
       ) : (
         <div class="empty">
-          Ainda não há solicitações registradas para esta conta.
+          There are no requests recorded for this account yet.
         </div>
       )}
     </div>

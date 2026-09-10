@@ -8,7 +8,7 @@ await client.execute({
   sql: "INSERT INTO demo_customers (id,name,email,password_salt,password_hash,tenant_id,stripe_customer_id,intercom_contact_id,purchase_paid) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET password_salt=excluded.password_salt,password_hash=excluded.password_hash",
   args: [
     "customer-e2e",
-    "Cliente E2E",
+    "E2E Customer",
     "customer@example.test",
     password.salt,
     password.hash,
@@ -23,7 +23,7 @@ await client.execute({
   sql: "INSERT INTO demo_customers (id,name,email,password_salt,password_hash,tenant_id,stripe_customer_id,intercom_contact_id,purchase_paid) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,email=excluded.email,password_salt=excluded.password_salt,password_hash=excluded.password_hash",
   args: [
     "customer-other-e2e",
-    "Cliente Alternativo",
+    "Alternate Customer",
     "other@example.test",
     otherPassword.salt,
     otherPassword.hash,

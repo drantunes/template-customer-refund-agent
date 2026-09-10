@@ -78,6 +78,7 @@ function widget(
     app_id: appId,
     user_id: customer.id,
     intercom_user_jwt: jwt,
+    language_override: "en",
   });
   const identity = scriptValue(customer.id);
   const expiry = scriptValue(expiresAt);
@@ -140,7 +141,7 @@ app.get("/atendimento", async (c) => {
 });
 app.get("/entrar", (c) => c.html(<Login next={safeNext()} />));
 app.post("/entrar", async (c) => {
-  if (!originAllowed(c.req.raw)) return c.text("Origem não permitida.", 403);
+  if (!originAllowed(c.req.raw)) return c.text("Origin is not allowed.", 403);
   const form = await c.req.parseBody();
   const customer = await verifyCustomer(
     client,
@@ -150,7 +151,7 @@ app.post("/entrar", async (c) => {
   const next = safeNext();
   if (!customer)
     return c.html(
-      <Login error="E-mail ou senha inválidos." next={next} />,
+      <Login error="Invalid email or password." next={next} />,
       401,
     );
   const session = await createSession(client, customer);
@@ -169,12 +170,12 @@ app.get("/sessao", async (c) => {
   const session = await current(c);
   return session
     ? c.json({ expiresAt: session.expiresAt })
-    : c.text("Sessão expirada.", 401);
+    : c.text("Session expired.", 401);
 });
 app.get("/solicitacoes", async (c) => {
   const session = await current(c);
   noStore(c);
-  if (!session) return c.text("Sessão expirada.", 401);
+  if (!session) return c.text("Session expired.", 401);
   const projection = await financialRequestsFor(
     session.customer,
     session.expiresAt,
@@ -187,7 +188,7 @@ app.get("/solicitacoes", async (c) => {
   );
 });
 app.post("/sair", async (c) => {
-  if (!originAllowed(c.req.raw)) return c.text("Origem não permitida.", 403);
+  if (!originAllowed(c.req.raw)) return c.text("Origin is not allowed.", 403);
   const id = getCookie(c, cookieName);
   const session = await sessionById(client, id);
   const form = await c.req.parseBody();
@@ -196,7 +197,7 @@ app.post("/sair", async (c) => {
     typeof form.csrf !== "string" ||
     !sameToken(form.csrf, session.csrfToken)
   )
-    return c.text("Sessão ou proteção CSRF inválida.", 403);
+    return c.text("Session or CSRF protection is invalid.", 403);
   await deleteSession(client, id);
   noStore(c);
   setCookie(c, cookieName, "", {
@@ -242,9 +243,9 @@ async function forwardWebhook(c: Context) {
   const destination = `${backend()}${url.pathname}`;
   const declared = Number(c.req.header("content-length"));
   if (Number.isFinite(declared) && declared > maxWebhookBytes)
-    return c.text("Webhook maior que o limite aceito.", 413);
+    return c.text("Webhook exceeds the accepted limit.", 413);
   const body = await limitedBody(c.req.raw, maxWebhookBytes);
-  if (!body) return c.text("Webhook maior que o limite aceito.", 413);
+  if (!body) return c.text("Webhook exceeds the accepted limit.", 413);
   const headers = new Headers();
   for (const name of [
     "content-type",

@@ -14,7 +14,7 @@ beforeAll(async () => {
     sql: "INSERT INTO demo_customers (id,name,email,password_salt,password_hash,tenant_id,stripe_customer_id,intercom_contact_id,purchase_paid) VALUES (?,?,?,?,?,?,?,?,?)",
     args: [
       "customer-example",
-      "Cliente Exemplo",
+      "Example Customer",
       "customer@example.test",
       password.salt,
       password.hash,
@@ -63,6 +63,7 @@ describe("Northstar demo routes", () => {
     const page = await account.text();
     expect(page).toContain("Northstar Toolkit");
     expect(page).toContain("intercom_user_jwt");
+    expect(page).toContain('language_override":"en"');
     expect(page).toContain('user_id":"customer-example"');
     expect(page).toContain("window.setTimeout(shutdown,Math.max(0,remaining))");
     expect(page).toContain("localStorage.getItem(key)");
