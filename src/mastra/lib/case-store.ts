@@ -494,6 +494,35 @@ export class CaseStore {
     return this.outbox.completeOutbox(id, receipt, leaseToken);
   }
 
+  async manualOutboxEffectIsCurrent(id: string, leaseToken: string) {
+    await this.ensured();
+    return this.outbox.manualOutboxEffectIsCurrent(id, leaseToken);
+  }
+
+  async supersedeManualOutboxAfterFence(
+    id: string,
+    receipt: unknown,
+    reason: string,
+  ) {
+    await this.ensured();
+    return this.outbox.supersedeManualOutboxAfterFence(id, receipt, reason);
+  }
+
+  async manualOutboxNeedsReopen(id: string) {
+    await this.ensured();
+    return this.outbox.manualOutboxNeedsReopen(id);
+  }
+
+  async manualOutboxIsUncertain(id: string) {
+    await this.ensured();
+    return this.outbox.manualOutboxIsUncertain(id);
+  }
+
+  async markManualOutboxReconciliationStarted(id: string) {
+    await this.ensured();
+    return this.outbox.markManualOutboxReconciliationStarted(id);
+  }
+
   async supersedeOutbox(id: string, leaseToken: string, reason: string) {
     await this.ensured();
     return this.outbox.supersedeOutbox(id, leaseToken, reason);

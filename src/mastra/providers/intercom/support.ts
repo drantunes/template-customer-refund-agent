@@ -2,8 +2,10 @@ import { z } from "zod";
 import type {
   DeliveryReceipt,
   ProviderBinding,
+  ProviderMutationFence,
   SupportChannelProvider,
 } from "../contracts";
+import { ProviderEffectFenceRejectedError } from "../contracts";
 import { IntercomClient } from "./client";
 import { type IntercomDevelopmentConfig } from "./config";
 import type { VerifiedIntercomConversationWebhook } from "./webhook";
@@ -424,10 +426,13 @@ export class IntercomSupportProvider implements SupportChannelProvider {
     binding: ProviderBinding,
     body: string,
     _idempotencyKey: string,
+    beforeMutation?: ProviderMutationFence,
   ) {
     this.assert(binding);
     const before = await this.conversation(binding);
     this.assertPreMutationConversation(binding, before);
+    if (beforeMutation && !(await beforeMutation()))
+      throw new ProviderEffectFenceRejectedError();
     const response = await this.client.request(
       `/conversations/${encodeURIComponent(binding.externalConversationId)}/reply`,
       {
@@ -447,6 +452,7 @@ export class IntercomSupportProvider implements SupportChannelProvider {
     binding: ProviderBinding,
     status: string,
     _idempotencyKey: string,
+    beforeMutation?: ProviderMutationFence,
   ) {
     this.assert(binding);
     const state = status === "resolved" ? "closed" : "open";
@@ -459,6 +465,8 @@ export class IntercomSupportProvider implements SupportChannelProvider {
         receiptId: `intercom:status:no-op:${binding.externalConversationId}`,
         deliveredAt: new Date().toISOString(),
       };
+    if (beforeMutation && !(await beforeMutation()))
+      throw new ProviderEffectFenceRejectedError();
     const messageType = state === "open" ? "open" : "close";
     const response = await this.client.request(
       `/conversations/${encodeURIComponent(binding.externalConversationId)}/parts`,

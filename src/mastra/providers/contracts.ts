@@ -12,6 +12,19 @@ import {
  */
 export type ProviderBinding = PersistedProviderBinding;
 
+/** A provider adapter calls this immediately before its irreversible mutation.
+ * It lets a durable domain fence reject a stale operation after any provider
+ * preflight GET, rather than treating that earlier read as the mutation edge. */
+export type ProviderMutationFence = () => Promise<boolean>;
+
+/** The adapter checked its mutation fence before sending a provider POST. */
+export class ProviderEffectFenceRejectedError extends Error {
+  constructor() {
+    super("Provider mutation was superseded before the POST boundary.");
+    this.name = "ProviderEffectFenceRejectedError";
+  }
+}
+
 /** The persisted canonical support owner failed before any refund attempt or
  * provider request could be created. Callers may safely classify this as a
  * confirmed no-effect only when no earlier attempt exists. */
@@ -58,11 +71,13 @@ export interface SupportChannelProvider {
     binding: ProviderBinding,
     body: string,
     idempotencyKey: string,
+    beforeMutation?: ProviderMutationFence,
   ): Promise<DeliveryReceipt>;
   updateStatus(
     binding: ProviderBinding,
     status: string,
     idempotencyKey: string,
+    beforeMutation?: ProviderMutationFence,
   ): Promise<DeliveryReceipt>;
   /** Read-only provider state used to fence signed provider close events. */
   currentConversationState?(

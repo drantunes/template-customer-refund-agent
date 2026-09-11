@@ -333,6 +333,27 @@ export class CaseStoreCases {
         await tx.rollback();
         return { appended: false, supportCase: current };
       }
+      const activeTurnId = current.metadata.activeTurnId;
+      if (typeof activeTurnId === "string") {
+        // This is the other half of the manual provider-effect fence. Rows
+        // still waiting for a POST are safely superseded. A row that has
+        // already crossed its durable start marker may have reached Intercom,
+        // so retain explicit uncertainty for the outbox worker to reconcile.
+        await tx.execute({
+          sql: "UPDATE support_outbox SET state = CASE WHEN state = 'started' THEN 'uncertain' ELSE 'superseded' END, receipt = CASE WHEN state = 'started' THEN NULL ELSE ? END, last_error = ?, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE case_id = ? AND id LIKE 'manual_%' AND originating_turn_id = ? AND state IN ('pending', 'claimed', 'started')",
+          args: [
+            JSON.stringify({
+              superseded: true,
+              reason:
+                "A newer customer turn superseded this manual resolution.",
+            }),
+            "A newer customer turn superseded this manual resolution.",
+            now(),
+            input.caseId,
+            activeTurnId,
+          ],
+        });
+      }
       const next = await tx.execute({
         sql: "SELECT COALESCE(MAX(sequence), 0) + 1 AS value FROM support_turns WHERE case_id = ?",
         args: [input.caseId],
@@ -342,7 +363,6 @@ export class CaseStoreCases {
       const invalidatesApproval = current.status === "waiting_approval";
       const terminal =
         current.status === "resolved" || current.status === "escalated";
-      const activeTurnId = current.metadata.activeTurnId;
       if (
         (invalidatesApproval || terminal) &&
         typeof activeTurnId === "string"

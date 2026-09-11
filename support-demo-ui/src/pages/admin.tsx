@@ -38,7 +38,6 @@ import { CaseDetail } from "@/components/admin/case-detail";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -62,6 +61,7 @@ import { SessionLogin } from "@/components/session-login";
 import type { SupportCase } from "@/lib/types";
 import { Ellipsis, RefreshCcw } from "lucide-react";
 import { Spinner } from "@/components/ui/spinner";
+import { isCurrentManualContextSelection } from "./admin-manual-context";
 
 const FILTERS = [
   { value: "all", label: "All" },
@@ -131,6 +131,9 @@ function AdminSession({
   const [reindexing, setReindexing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [manualContext, setManualContext] = useState<ManualResolutionContext>();
+  // Every async manual-resolution result is scoped to the modal selection
+  // which created it. Route changes invalidate both POST and 409 refreshes.
+  const manualSelectionGeneration = useRef(0);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -186,6 +189,7 @@ function AdminSession({
   const selectedCaseStatus = selectedCase?.status;
 
   useEffect(() => {
+    manualSelectionGeneration.current += 1;
     setManualContext(undefined);
   }, [caseId]);
 
@@ -274,18 +278,28 @@ function AdminSession({
 
   async function handleManualResolution(note: string, idempotencyKey: string) {
     if (!selectedCase || !manualContext?.activeTurnId) return;
+    const submittedCaseId = selectedCase.id;
+    const submittedGeneration = manualSelectionGeneration.current;
+    const submittedContext = manualContext;
+    const submittedTurnId = manualContext.activeTurnId;
+    const selectionIsCurrent = () =>
+      mounted.current &&
+      isCurrentManualContextSelection(
+        { caseId, generation: manualSelectionGeneration.current },
+        { caseId: submittedCaseId, generation: submittedGeneration },
+      );
     try {
       const result = await resolveManually(
-        selectedCase.id,
+        submittedCaseId,
         {
-          expectedVersion: manualContext.version,
-          expectedTurnId: manualContext.activeTurnId,
+          expectedVersion: submittedContext.version,
+          expectedTurnId: submittedTurnId,
           idempotencyKey,
           internalNote: note,
         },
         session,
       );
-      if (!mounted.current) return;
+      if (!selectionIsCurrent()) return;
       setCases((previous) =>
         previous.map((item) =>
           item.id === result.case.id ? result.case : item,
@@ -302,15 +316,17 @@ function AdminSession({
         onSessionExpired(session);
         return;
       }
-      if (mounted.current)
+      if (selectionIsCurrent())
         toast.error(
           error instanceof Error ? error.message : "Manual resolution failed",
         );
       // A 409 can be caused by a follow-up. Reload the immutable context before
       // allowing the same human to make a deliberate new decision.
-      if (mounted.current && selectedCase)
-        getManualResolutionContext(selectedCase.id, session)
-          .then(setManualContext)
+      if (selectionIsCurrent())
+        getManualResolutionContext(submittedCaseId, session)
+          .then((context) => {
+            if (selectionIsCurrent()) setManualContext(context);
+          })
           .catch(() => undefined);
     }
   }
@@ -471,10 +487,7 @@ function AdminSession({
           {selectedCase && (
             <DialogContent className="max-h-[85vh] sm:max-w-4xl overflow-y-auto">
               <DialogHeader>
-                <DialogTitle>Case details</DialogTitle>
-                <DialogDescription>
-                  Conversation, analysis, and evidence.
-                </DialogDescription>
+                <DialogTitle>Support Case: {selectedCase.id}</DialogTitle>
               </DialogHeader>
               <CaseDetail
                 supportCase={selectedCase}
