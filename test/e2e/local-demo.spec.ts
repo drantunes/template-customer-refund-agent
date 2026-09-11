@@ -221,10 +221,9 @@ test("keeps the local admin approval UI after the customer portal is removed", a
     expect(await runtime.caseStore.approvalDecision(caseId)).toBeUndefined();
     await page.unroute(`**/support/cases/${caseId}/approve`);
     await signIn(page, "approver@local.test", "local-approver");
-    await page
-      .getByRole("button", { name: "Approve this synthetic refund" })
-      .click();
-    await page.getByRole("button", { name: "Approve refund" }).click();
+    await expect(page).toHaveURL(new RegExp(`/admin/${caseId}$`));
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "Approve refund" }).click();
     await expect(page.getByText("Refund approved")).toBeVisible();
     await expect
       .poll(async () => (await runtime.caseStore.get(caseId))?.status)
