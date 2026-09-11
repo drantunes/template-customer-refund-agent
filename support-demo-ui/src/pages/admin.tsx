@@ -193,6 +193,9 @@ function AdminSession({
   const selectedCaseId = selectedCase?.id;
   const selectedCaseStatus = selectedCase?.status;
   const isAdmin = session.principal.roles.includes("admin");
+  // The URL is authoritative for a selected case, including browser history.
+  // Keep the prior non-case tab in state so Forward restores it after closing.
+  const renderedView: AdminView = caseId ? "cases" : activeView;
 
   useEffect(() => {
     manualSelectionGeneration.current += 1;
@@ -395,7 +398,7 @@ function AdminSession({
       </section>
 
       <Tabs
-        value={activeView}
+        value={renderedView}
         onValueChange={(value) => setActiveView(value as AdminView)}
       >
         <TabsList aria-label="Admin sections" className="h-auto flex-wrap">
@@ -498,7 +501,7 @@ function AdminSession({
             </Card>
 
             <Dialog
-              open={Boolean(activeView === "cases" && caseId && selectedCase)}
+              open={Boolean(renderedView === "cases" && caseId && selectedCase)}
               onOpenChange={(open) => !open && navigate("/admin")}
             >
               {selectedCase && (
@@ -564,9 +567,9 @@ function AdminSession({
           </section>
         </TabsContent>
 
-        {isAdmin && activeView !== "cases" && (
-          <TabsContent value={activeView} className="mt-6">
-            <MonitoringSection session={session} view={activeView} />
+        {isAdmin && renderedView !== "cases" && (
+          <TabsContent value={renderedView} className="mt-6">
+            <MonitoringSection session={session} view={renderedView} />
           </TabsContent>
         )}
       </Tabs>

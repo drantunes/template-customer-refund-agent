@@ -214,6 +214,18 @@ test("separates admin views while retaining the case deep link and compact dialo
     ).toBeVisible();
     await expect(page.getByText("Operational telemetry")).toBeVisible();
     await expect(page.getByText("Case funnel")).toBeHidden();
+
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`/admin/${caseId}$`));
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText(`Support Case: ${caseId}`);
+    await page.goForward();
+    await expect(page).toHaveURL(/\/admin$/);
+    await expect(dialog).toBeHidden();
+    await expect(
+      page.getByRole("heading", { name: "Telemetry" }),
+    ).toBeVisible();
+
     await casesTab.click();
     await expect(escalatedFilter).toHaveAttribute("aria-selected", "true");
 
