@@ -2455,6 +2455,7 @@ describe("native approval workflow recovery", () => {
   it("uses the authenticated server acceptance time for future and past inbound retention in runtime and CLI", async () => {
     const caseId = `acceptance-clock-${crypto.randomUUID()}`;
     const { app, caseStore } = await setup(caseId);
+    const client = caseStore.getClient();
     const before = new Date();
     const accepted: Array<{ caseId: string; receivedAt: string }> = [];
     for (const receivedAt of [
@@ -2484,6 +2485,20 @@ describe("native approval workflow recovery", () => {
         caseId: ((await response.json()) as { caseId: string }).caseId,
         receivedAt,
       });
+      // Ingress starts resolution after accepting the case. The detached run
+      // ends by either suspending for its native approval or returning its
+      // dispatch to the retry queue after a recorded failure. Both durable
+      // states occur after its final write; claimed/started would still own
+      // the database as an active writer.
+      await vi.waitFor(async () => {
+        const dispatch = await client.execute({
+          sql: "SELECT state FROM support_dispatch WHERE case_id = ? ORDER BY created_at DESC LIMIT 1",
+          args: [accepted.at(-1)!.caseId],
+        });
+        expect(["suspended", "pending"]).toContain(
+          String(dispatch.rows[0]?.state),
+        );
+      });
     }
     const after = new Date();
     // Retention must not use the untrusted occurrence timestamp to purge a
@@ -2495,7 +2510,6 @@ describe("native approval workflow recovery", () => {
           customer: { email: "alex@example.com" },
         });
     });
-    const client = caseStore.getClient();
     const stored = await Promise.all(
       accepted.map(async (item) => ({
         ...item,
@@ -2880,24 +2894,58 @@ describe("native approval workflow recovery", () => {
         await slowTransport;
         return issueRefund(command, authorization);
       });
+    const renewDispatchLease = caseStore.renewDispatchLease.bind(caseStore);
+    let heartbeatCallback: (() => void) | undefined;
+    let lostHeartbeat!: () => void;
+    const lostHeartbeatObserved = new Promise<void>((resolve) => {
+      lostHeartbeat = resolve;
+    });
+    const renew = vi
+      .spyOn(caseStore, "renewDispatchLease")
+      .mockImplementation(async (...args) => {
+        const renewed = await renewDispatchLease(...args);
+        if (!renewed) lostHeartbeat();
+        return renewed;
+      });
+    const originalSetInterval = globalThis.setInterval.bind(globalThis);
+    const heartbeat = vi
+      .spyOn(globalThis, "setInterval")
+      .mockImplementation((callback, interval) => {
+        if (interval === 5) {
+          heartbeatCallback = callback as () => void;
+          // Keep the test in control of the callback so it proves the exact
+          // replacement-token transition without scheduler timing.
+          return originalSetInterval(() => undefined, 60_000);
+        }
+        return originalSetInterval(callback, interval);
+      });
 
     let released = false;
+    // Keep the short test-only lease valid until the captured heartbeat is
+    // invoked. The real timer is replaced below; only Date is controlled.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
     try {
       const recovery = recoverApprovedNativeDecisions(mastra, caseStore, {
         disableScorers: true,
       });
       await enteredSlowTransport;
+      expect(heartbeatCallback).toEqual(expect.any(Function));
       await caseStore.getClient().execute({
         sql: "UPDATE support_dispatch SET lease_token = ? WHERE case_id = ?",
         args: ["replacement-owner", caseId],
       });
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      heartbeatCallback!();
+      await lostHeartbeatObserved;
       release();
       released = true;
       expect(await recovery).toBe(0);
     } finally {
       if (!released) release();
+      heartbeat.mockRestore();
+      renew.mockRestore();
       slowProvider.mockRestore();
+      vi.useRealTimers();
     }
     expect(await localRefundCount(caseStore)).toBe(0);
     // The winning decision has already moved the case into its durable
