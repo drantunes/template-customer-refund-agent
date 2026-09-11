@@ -8,6 +8,7 @@ describe("ManualResolution", () => {
       <ManualResolution
         context={{
           version: 2,
+          activeTurnId: "turn-synthetic",
           receipt: {
             id: "manual-synthetic",
             actorId: "support-agent-demo",
@@ -17,6 +18,7 @@ describe("ManualResolution", () => {
             closeState: "uncertain",
           },
         }}
+        canResolve={false}
         onResolve={async () => undefined}
       />,
     );
@@ -24,5 +26,29 @@ describe("ManualResolution", () => {
     expect(html).toContain("Note delivery: delivered");
     expect(html).toContain("close delivery: uncertain");
     expect(html).not.toContain("Record note and close");
+  });
+
+  it("keeps an earlier receipt as history and opens a fresh form for a newer turn", () => {
+    const html = renderToStaticMarkup(
+      <ManualResolution
+        context={{
+          version: 4,
+          activeTurnId: "turn-new",
+          receipt: {
+            id: "manual-old",
+            actorId: "support-agent-demo",
+            turnId: "turn-old",
+            createdAt: "2026-09-11T12:00:00.000Z",
+            noteState: "delivered",
+            closeState: "superseded",
+          },
+        }}
+        canResolve
+        onResolve={async () => undefined}
+      />,
+    );
+    expect(html).toContain("Previous manual resolution recorded");
+    expect(html).toContain("close delivery: superseded");
+    expect(html).toContain("Record note and close");
   });
 });

@@ -321,6 +321,12 @@ test("keeps the local admin approval UI after the customer portal is removed", a
       "Confirm reported service problem B",
       "credit-fingerprint-b",
     );
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(/\/admin$/);
+    await expect(
+      page.getByRole("button", { name: "Confirm reported service problem A" }),
+    ).toBeVisible();
     await page
       .getByRole("button", { name: "Confirm reported service problem A" })
       .click();
@@ -334,6 +340,12 @@ test("keeps the local admin approval UI after the customer portal is removed", a
     await expect(approveCredit).toBeDisabled();
     await confirmation.check();
     await expect(approveCredit).toBeEnabled();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(/\/admin$/);
+    await expect(
+      page.getByRole("button", { name: "Confirm reported service problem B" }),
+    ).toBeVisible();
     await page
       .getByRole("button", { name: "Confirm reported service problem B" })
       .click();

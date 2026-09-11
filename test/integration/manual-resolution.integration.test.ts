@@ -192,4 +192,75 @@ describe("manual resolution", () => {
     });
     await store.close();
   });
+
+  it("allows a distinct manually resolved escalated follow-up while preserving exact retry semantics", async () => {
+    const store = await fixture();
+    const first = {
+      caseId: "case-manual",
+      tenantId: "local-demo",
+      actorId: "support-agent-demo",
+      expectedVersion: 1,
+      expectedTurnId: "turn-manual",
+      idempotencyKey: "manual-resolution-key-first",
+      internalNote: "First committed escalation was reviewed.",
+    };
+    expect((await store.resolveManually(first)).state).toBe("accepted");
+    const followUp = await store.appendFollowUp({
+      caseId: "case-manual",
+      eventId: "customer-follow-up-second-resolution",
+      runId: "run-follow-up-second-resolution",
+      message: {
+        id: "customer-follow-up-second-resolution-message",
+        author: "customer",
+        body: "A new question needs another review.",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    const afterFollowUp = await store.get("case-manual");
+    if (!afterFollowUp) throw new Error("Expected follow-up case.");
+    await store.update("case-manual", {
+      status: "escalated",
+      metadata: {
+        ...afterFollowUp.metadata,
+        activeTurnId: followUp.turnId,
+      },
+    });
+    await store.getClient().execute({
+      sql: "UPDATE support_turns SET state = 'escalated' WHERE id = ?",
+      args: [followUp.turnId],
+    });
+    await store.getClient().execute({
+      sql: "UPDATE support_dispatch SET state = 'completed' WHERE case_id = ? AND turn_id = ?",
+      args: ["case-manual", followUp.turnId],
+    });
+    const context = await store.manualResolutionContext("case-manual");
+    expect(context).toMatchObject({
+      activeTurnId: followUp.turnId,
+      receipt: { turnId: "turn-manual" },
+    });
+    const second = {
+      ...first,
+      expectedVersion: context!.version,
+      expectedTurnId: followUp.turnId,
+      idempotencyKey: "manual-resolution-key-second",
+      internalNote: "Second committed escalation was reviewed.",
+    };
+    const [left, right] = await Promise.all([
+      store.resolveManually(second),
+      store.resolveManually(second),
+    ]);
+    expect([left.state, right.state].sort()).toEqual(["accepted", "replayed"]);
+    expect((await store.get("case-manual"))?.status).toBe("resolved");
+    expect(
+      await store
+        .getClient()
+        .execute(
+          "SELECT turn_id FROM support_manual_resolutions WHERE case_id = ? ORDER BY created_at, id",
+          ["case-manual"],
+        ),
+    ).toMatchObject({
+      rows: [{ turn_id: "turn-manual" }, { turn_id: followUp.turnId }],
+    });
+    await store.close();
+  });
 });

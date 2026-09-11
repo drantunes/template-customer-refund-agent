@@ -230,7 +230,9 @@ export function CaseDetail({
             onManualResolution &&
             (c.status === "escalated" || manualResolution.receipt) && (
               <ManualResolution
+                key={`${c.id}:${manualResolution.activeTurnId ?? "none"}`}
                 context={manualResolution}
+                canResolve={c.status === "escalated"}
                 onResolve={onManualResolution}
               />
             )}

@@ -182,21 +182,43 @@ function AdminSession({
   }, [cases, filter]);
 
   const selectedCase = cases.find((c) => c.id === caseId);
+  const selectedCaseId = selectedCase?.id;
+  const selectedCaseStatus = selectedCase?.status;
 
   useEffect(() => {
+    setManualContext(undefined);
+  }, [caseId]);
+
+  useEffect(() => {
+    let stale = false;
     if (
-      !selectedCase ||
-      !["escalated", "resolved"].includes(selectedCase.status)
+      !selectedCaseId ||
+      !selectedCaseStatus ||
+      !["escalated", "resolved"].includes(selectedCaseStatus)
     ) {
       setManualContext(undefined);
-      return;
+      return () => {
+        stale = true;
+      };
     }
-    getManualResolutionContext(selectedCase.id, session)
-      .then((context) => mounted.current && setManualContext(context))
+    getManualResolutionContext(selectedCaseId, session)
+      .then((context) => {
+        if (mounted.current && !stale) setManualContext(context);
+      })
       .catch((error) => {
-        if (error instanceof SessionExpiredError) onSessionExpired(session);
+        if (!stale && error instanceof SessionExpiredError)
+          onSessionExpired(session);
       });
-  }, [selectedCase, session, onSessionExpired]);
+    return () => {
+      stale = true;
+    };
+  }, [
+    selectedCase,
+    selectedCaseId,
+    selectedCaseStatus,
+    session,
+    onSessionExpired,
+  ]);
 
   async function handleReindex() {
     setReindexing(true);
