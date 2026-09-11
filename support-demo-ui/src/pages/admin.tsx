@@ -23,7 +23,6 @@ import {
   EmptyTitle,
   EmptyDescription,
 } from "@/components/ui/empty";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -33,16 +32,18 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CaseDetail } from "@/components/admin/case-detail";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { MonitoringSection } from "@/components/admin/monitoring-section";
-import { StatusBadge } from "@/components/status-badge";
+import { StatusBadge, UrgencyBadge } from "@/components/status-badge";
 import {
   approveCase,
   clearSession,
@@ -59,7 +60,7 @@ import {
 import { useMountedSession } from "@/lib/mounted-session";
 import { SessionLogin } from "@/components/session-login";
 import type { SupportCase } from "@/lib/types";
-import { Ellipsis, RefreshCcw } from "lucide-react";
+import { Ellipsis, RefreshCcw, XIcon } from "lucide-react";
 import { Spinner } from "@/components/ui/spinner";
 import { isCurrentManualContextSelection } from "./admin-manual-context";
 
@@ -70,6 +71,9 @@ const FILTERS = [
   { value: "escalated", label: "Escalated" },
   { value: "resolved", label: "Resolved" },
 ] as const;
+
+const ADMIN_VIEWS = ["cases", "monitoring", "telemetry"] as const;
+type AdminView = (typeof ADMIN_VIEWS)[number];
 
 export function Admin() {
   const { session, setSession, invalidateSession } = useMountedSession();
@@ -128,6 +132,7 @@ function AdminSession({
   const [cases, setCases] = useState<SupportCase[]>([]);
   const [filter, setFilter] =
     useState<(typeof FILTERS)[number]["value"]>("all");
+  const [activeView, setActiveView] = useState<AdminView>("cases");
   const [reindexing, setReindexing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [manualContext, setManualContext] = useState<ManualResolutionContext>();
@@ -187,6 +192,10 @@ function AdminSession({
   const selectedCase = cases.find((c) => c.id === caseId);
   const selectedCaseId = selectedCase?.id;
   const selectedCaseStatus = selectedCase?.status;
+  const isAdmin = session.principal.roles.includes("admin");
+  // The URL is authoritative for a selected case, including browser history.
+  // Keep the prior non-case tab in state so Forward restores it after closing.
+  const renderedView: AdminView = caseId ? "cases" : activeView;
 
   useEffect(() => {
     manualSelectionGeneration.current += 1;
@@ -388,125 +397,182 @@ function AdminSession({
         </DropdownMenu>
       </section>
 
-      <section className="flex flex-col gap-6">
-        <Card>
-          <CardHeader className="flex flex-col gap-4">
-            <div className="flex flex-col gap-1">
-              <CardTitle>Case queue</CardTitle>
-              <CardDescription>
-                Filter the list and open a case.
-              </CardDescription>
-            </div>
-            <Tabs
-              value={filter}
-              onValueChange={(v) => setFilter(v as typeof filter)}
-            >
-              <TabsList className="h-auto flex-wrap">
-                {FILTERS.map((f) => (
-                  <TabsTrigger
-                    key={f.value}
-                    value={f.value}
-                    className="text-xs"
-                  >
-                    {f.label}
-                  </TabsTrigger>
-                ))}
-              </TabsList>
-            </Tabs>
-          </CardHeader>
-          <CardContent>
-            {loading && (
-              <div className="flex flex-col gap-3">
-                <Skeleton className="h-12 w-full" />
-                <Skeleton className="h-12 w-full" />
-                <Skeleton className="h-12 w-full" />
-              </div>
-            )}
-            {!loading && filteredCases.length === 0 && (
-              <Empty className="border">
-                <EmptyHeader>
-                  <EmptyTitle>No cases in this view</EmptyTitle>
-                  <EmptyDescription>Try another filter.</EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-            )}
-            {!loading && filteredCases.length > 0 && (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Case</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Customer</TableHead>
-                    <TableHead>Updated</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredCases.map((c) => (
-                    <TableRow
-                      key={c.id}
-                      data-state={c.id === caseId ? "selected" : undefined}
-                      className="cursor-pointer"
-                      onClick={() => navigate(`/admin/${c.id}`)}
-                    >
-                      <TableCell>
-                        <button
-                          type="button"
-                          className="flex flex-col text-left"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            navigate(`/admin/${c.id}`);
-                          }}
+      <Tabs
+        value={renderedView}
+        onValueChange={(value) => setActiveView(value as AdminView)}
+      >
+        <TabsList aria-label="Admin sections" className="h-auto flex-wrap">
+          <TabsTrigger value="cases">Cases</TabsTrigger>
+          {isAdmin && <TabsTrigger value="monitoring">Monitoring</TabsTrigger>}
+          {isAdmin && <TabsTrigger value="telemetry">Telemetry</TabsTrigger>}
+        </TabsList>
+
+        <TabsContent value="cases" className="mt-6">
+          <section className="flex flex-col gap-6">
+            <Card>
+              <CardHeader className="flex flex-col gap-4">
+                <div className="flex flex-col gap-1">
+                  <CardTitle>Case queue</CardTitle>
+                  <CardDescription>
+                    Filter the list and open a case.
+                  </CardDescription>
+                </div>
+                <Tabs
+                  value={filter}
+                  onValueChange={(v) => setFilter(v as typeof filter)}
+                >
+                  <TabsList className="h-auto flex-wrap">
+                    {FILTERS.map((f) => (
+                      <TabsTrigger
+                        key={f.value}
+                        value={f.value}
+                        className="text-xs"
+                      >
+                        {f.label}
+                      </TabsTrigger>
+                    ))}
+                  </TabsList>
+                </Tabs>
+              </CardHeader>
+              <CardContent>
+                {loading && (
+                  <div className="flex flex-col gap-3">
+                    <Skeleton className="h-12 w-full" />
+                    <Skeleton className="h-12 w-full" />
+                    <Skeleton className="h-12 w-full" />
+                  </div>
+                )}
+                {!loading && filteredCases.length === 0 && (
+                  <Empty className="border">
+                    <EmptyHeader>
+                      <EmptyTitle>No cases in this view</EmptyTitle>
+                      <EmptyDescription>Try another filter.</EmptyDescription>
+                    </EmptyHeader>
+                  </Empty>
+                )}
+                {!loading && filteredCases.length > 0 && (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Case</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Customer</TableHead>
+                        <TableHead>Updated</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {filteredCases.map((c) => (
+                        <TableRow
+                          key={c.id}
+                          data-state={c.id === caseId ? "selected" : undefined}
+                          className="cursor-pointer"
+                          onClick={() => navigate(`/admin/${c.id}`)}
                         >
-                          <span className="font-medium">{c.subject}</span>
-                          <span className="text-xs text-muted-foreground">
-                            {c.id}
-                          </span>
-                        </button>
-                      </TableCell>
-                      <TableCell>
-                        <StatusBadge status={c.status} />
-                      </TableCell>
-                      <TableCell>
-                        {c.customer.name ?? c.customer.email}
-                      </TableCell>
-                      <TableCell>
-                        {new Date(c.updatedAt).toLocaleString()}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
+                          <TableCell>
+                            <button
+                              type="button"
+                              className="flex flex-col text-left"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                navigate(`/admin/${c.id}`);
+                              }}
+                            >
+                              <span className="font-medium">{c.subject}</span>
+                              <span className="text-xs text-muted-foreground">
+                                {c.id}
+                              </span>
+                            </button>
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge status={c.status} />
+                          </TableCell>
+                          <TableCell>
+                            {c.customer.name ?? c.customer.email}
+                          </TableCell>
+                          <TableCell>
+                            {new Date(c.updatedAt).toLocaleString()}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
 
-        <Dialog
-          open={Boolean(caseId && selectedCase)}
-          onOpenChange={(open) => !open && navigate("/admin")}
-        >
-          {selectedCase && (
-            <DialogContent className="max-h-[85vh] sm:max-w-4xl overflow-y-auto">
-              <DialogHeader>
-                <DialogTitle>Support Case: {selectedCase.id}</DialogTitle>
-              </DialogHeader>
-              <CaseDetail
-                supportCase={selectedCase}
-                approverId={session.principal.id}
-                onDecision={handleDecision}
-                canApprove={hasAnyRole(session, ["approver", "admin"])}
-                manualResolution={manualContext}
-                onManualResolution={handleManualResolution}
-              />
-            </DialogContent>
-          )}
-        </Dialog>
-      </section>
+            <Dialog
+              open={Boolean(renderedView === "cases" && caseId && selectedCase)}
+              onOpenChange={(open) => !open && navigate("/admin")}
+            >
+              {selectedCase && (
+                <DialogContent
+                  showCloseButton={false}
+                  className="max-h-[85vh] sm:max-w-4xl overflow-y-auto"
+                >
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                    <DialogHeader className="min-w-0 gap-1 sm:pr-3">
+                      <DialogTitle className="break-all">
+                        Support Case: {selectedCase.id}
+                      </DialogTitle>
+                      <p className="break-all text-sm text-muted-foreground">
+                        {selectedCase.customer.name ??
+                          selectedCase.customer.email ??
+                          "Customer"}
+                        {selectedCase.customer.name &&
+                        selectedCase.customer.email
+                          ? ` <${selectedCase.customer.email}>`
+                          : ""}{" "}
+                        · via {selectedCase.source}
+                      </p>
+                    </DialogHeader>
+                    <div className="flex items-start justify-end gap-1.5 sm:shrink-0">
+                      <div className="flex min-w-0 flex-wrap justify-end gap-1.5">
+                        <StatusBadge status={selectedCase.status} />
+                        {selectedCase.triage && (
+                          <>
+                            <Badge variant="secondary" className="capitalize">
+                              {selectedCase.triage.intent.replace(/_/g, " ")}
+                            </Badge>
+                            <UrgencyBadge
+                              urgency={selectedCase.triage.urgency}
+                            />
+                          </>
+                        )}
+                      </div>
+                      <DialogClose
+                        render={
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label="Close"
+                          />
+                        }
+                      >
+                        <XIcon />
+                        <span className="sr-only">Close</span>
+                      </DialogClose>
+                    </div>
+                  </div>
+                  <CaseDetail
+                    supportCase={selectedCase}
+                    approverId={session.principal.id}
+                    onDecision={handleDecision}
+                    canApprove={hasAnyRole(session, ["approver", "admin"])}
+                    manualResolution={manualContext}
+                    onManualResolution={handleManualResolution}
+                  />
+                </DialogContent>
+              )}
+            </Dialog>
+          </section>
+        </TabsContent>
 
-      <Separator />
-
-      {session.principal.roles.includes("admin") && (
-        <MonitoringSection session={session} />
-      )}
+        {isAdmin && renderedView !== "cases" && (
+          <TabsContent value={renderedView} className="mt-6">
+            <MonitoringSection session={session} view={renderedView} />
+          </TabsContent>
+        )}
+      </Tabs>
     </div>
   );
 }

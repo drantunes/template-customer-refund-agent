@@ -120,7 +120,13 @@ function RateCard({
  * token cost / tool health data Mastra already tracks for every case.
  * Rendered as a section within the admin page rather than its own route.
  */
-export function MonitoringSection({ session }: { session: SupportSession }) {
+export function MonitoringSection({
+  session,
+  view,
+}: {
+  session: SupportSession;
+  view: "monitoring" | "telemetry";
+}) {
   const mounted = useRef(true);
   const [summary, setSummary] = useState<MonitoringSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -169,12 +175,9 @@ export function MonitoringSection({ session }: { session: SupportSession }) {
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <h2 className="text-xl font-semibold tracking-tight">Monitoring</h2>
-          <p className="max-w-2xl text-sm text-muted-foreground">
-            Containment, escalation, refund approvals, customer feedback, and
-            tenant-scoped model usage, exact refund totals, and operational
-            health recorded by Mastra.
-          </p>
+          <h2 className="text-xl font-semibold tracking-tight">
+            {view === "monitoring" ? "Monitoring" : "Telemetry"}
+          </h2>
         </div>
         <Button
           variant="outline"
@@ -199,207 +202,221 @@ export function MonitoringSection({ session }: { session: SupportSession }) {
         </div>
       )}
 
-      {!loading && summary && summary.casesConsidered === 0 && (
-        <Empty className="border">
-          <EmptyHeader>
-            <EmptyTitle>No cases yet</EmptyTitle>
-            <EmptyDescription>
-              Send a case from the customer portal to start populating this
-              dashboard.
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
-      )}
+      {!loading &&
+        summary &&
+        view === "monitoring" &&
+        summary.casesConsidered === 0 && (
+          <Empty className="border">
+            <EmptyHeader>
+              <EmptyTitle>No cases yet</EmptyTitle>
+              <EmptyDescription>
+                Send a case from the customer portal to start populating this
+                dashboard.
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        )}
 
-      {!loading && summary && summary.casesConsidered > 0 && (
-        <>
-          <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <RateCard
-              icon={ShieldCheck}
-              title="Containment rate"
-              value={formatPercent(summary.funnel.containmentRate)}
-              description={`${summary.funnel.resolved} resolved without escalation, of ${summary.funnel.resolved + summary.funnel.escalated} decided cases.`}
-              tooltip="Share of decided cases (resolved or escalated) that the agent closed on its own, without a human taking over."
-            />
-            <RateCard
-              icon={MessageSquareWarning}
-              title="Escalation rate"
-              value={formatPercent(summary.funnel.escalationRate)}
-              description={`${summary.funnel.escalated} of ${summary.funnel.resolved + summary.funnel.escalated} decided cases needed a human.`}
-              tooltip="Share of decided cases that were escalated - either a rejected refund, a refund over the standard review limit, or a policy the agent couldn't resolve."
-            />
-            <RateCard
-              icon={Wallet}
-              title="Refund approval rate"
-              value={formatPercent(summary.refunds.approvalRate)}
-              description={`${summary.refunds.approved} approved / ${summary.refunds.rejected} rejected of ${summary.refunds.recommended} recommended.`}
-              tooltip="Of the refunds a human reviewer decided on, the share that were approved."
-            />
-            <RateCard
-              icon={
-                summary.feedback.up >= summary.feedback.down
-                  ? ThumbsUp
-                  : ThumbsDown
-              }
-              title="Customer satisfaction"
-              value={formatPercent(summary.feedback.satisfactionRate)}
-              description={`${summary.feedback.totalResponses} rating${summary.feedback.totalResponses === 1 ? "" : "s"} collected via the portal.`}
-              tooltip="Share of customers who said the resolution solved their issue, out of everyone who left feedback."
-            />
-          </section>
+      {!loading &&
+        summary &&
+        view === "monitoring" &&
+        summary.casesConsidered > 0 && (
+          <>
+            <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              <RateCard
+                icon={ShieldCheck}
+                title="Containment rate"
+                value={formatPercent(summary.funnel.containmentRate)}
+                description={`${summary.funnel.resolved} resolved without escalation, of ${summary.funnel.resolved + summary.funnel.escalated} decided cases.`}
+                tooltip="Share of decided cases (resolved or escalated) that the agent closed on its own, without a human taking over."
+              />
+              <RateCard
+                icon={MessageSquareWarning}
+                title="Escalation rate"
+                value={formatPercent(summary.funnel.escalationRate)}
+                description={`${summary.funnel.escalated} of ${summary.funnel.resolved + summary.funnel.escalated} decided cases needed a human.`}
+                tooltip="Share of decided cases that were escalated - either a rejected refund, a refund over the standard review limit, or a policy the agent couldn't resolve."
+              />
+              <RateCard
+                icon={Wallet}
+                title="Refund approval rate"
+                value={formatPercent(summary.refunds.approvalRate)}
+                description={`${summary.refunds.approved} approved / ${summary.refunds.rejected} rejected of ${summary.refunds.recommended} recommended.`}
+                tooltip="Of the refunds a human reviewer decided on, the share that were approved."
+              />
+              <RateCard
+                icon={
+                  summary.feedback.up >= summary.feedback.down
+                    ? ThumbsUp
+                    : ThumbsDown
+                }
+                title="Customer satisfaction"
+                value={formatPercent(summary.feedback.satisfactionRate)}
+                description={`${summary.feedback.totalResponses} rating${summary.feedback.totalResponses === 1 ? "" : "s"} collected via the portal.`}
+                tooltip="Share of customers who said the resolution solved their issue, out of everyone who left feedback."
+              />
+            </section>
 
-          <section className="grid gap-4 lg:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle>Case funnel</CardTitle>
-                <CardDescription>
-                  Where {summary.funnel.totalCases} case
-                  {summary.funnel.totalCases === 1 ? "" : "s"} ended up.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="flex flex-col gap-4 text-sm">
-                {(
-                  [
+            <section className="grid gap-4 lg:grid-cols-2">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Case funnel</CardTitle>
+                  <CardDescription>
+                    Where {summary.funnel.totalCases} case
+                    {summary.funnel.totalCases === 1 ? "" : "s"} ended up.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="flex flex-col gap-4 text-sm">
+                  {(
                     [
-                      "New / processing",
-                      summary.funnel.new + summary.funnel.processing,
-                    ],
-                    ["Waiting approval", summary.funnel.waitingApproval],
-                    ["Resolved", summary.funnel.resolved],
-                    ["Escalated", summary.funnel.escalated],
-                    ["Failed", summary.funnel.failed],
-                  ] as const
-                ).map(([label, count]) => (
-                  <Progress
-                    key={label}
-                    value={
-                      summary.funnel.totalCases > 0
-                        ? (count / summary.funnel.totalCases) * 100
-                        : 0
-                    }
-                  >
-                    <div className="flex w-full items-center justify-between">
-                      <ProgressLabel>{label}</ProgressLabel>
-                      <span className="text-sm text-muted-foreground tabular-nums">
-                        {count}
-                      </span>
-                    </div>
-                  </Progress>
-                ))}
-                <Separator />
-                <div className="flex items-center gap-2 text-muted-foreground">
-                  <Timer className="size-4" />
-                  Avg. time to close:{" "}
-                  {formatMinutes(summary.funnel.avgResolutionMinutes)}
-                </div>
-              </CardContent>
-            </Card>
+                      [
+                        "New / processing",
+                        summary.funnel.new + summary.funnel.processing,
+                      ],
+                      ["Waiting approval", summary.funnel.waitingApproval],
+                      ["Resolved", summary.funnel.resolved],
+                      ["Escalated", summary.funnel.escalated],
+                      ["Failed", summary.funnel.failed],
+                    ] as const
+                  ).map(([label, count]) => (
+                    <Progress
+                      key={label}
+                      value={
+                        summary.funnel.totalCases > 0
+                          ? (count / summary.funnel.totalCases) * 100
+                          : 0
+                      }
+                    >
+                      <div className="flex w-full items-center justify-between">
+                        <ProgressLabel>{label}</ProgressLabel>
+                        <span className="text-sm text-muted-foreground tabular-nums">
+                          {count}
+                        </span>
+                      </div>
+                    </Progress>
+                  ))}
+                  <Separator />
+                  <div className="flex items-center gap-2 text-muted-foreground">
+                    <Timer className="size-4" />
+                    Avg. time to close:{" "}
+                    {formatMinutes(summary.funnel.avgResolutionMinutes)}
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Refunds</CardTitle>
+                  <CardDescription>
+                    Human-in-the-loop outcomes for recommended refunds.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="grid grid-cols-2 gap-y-4 text-sm">
+                  <div>
+                    <p className="text-muted-foreground">Recommended</p>
+                    <p className="text-2xl font-semibold">
+                      {summary.refunds.recommended}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">Approved</p>
+                    <p className="text-2xl font-semibold">
+                      {summary.refunds.approved}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">Rejected</p>
+                    <p className="text-2xl font-semibold">
+                      {summary.refunds.rejected}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">Auto-escalated</p>
+                    <p className="text-2xl font-semibold">
+                      {summary.refunds.autoEscalated}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">Executed / failed</p>
+                    <p className="text-2xl font-semibold">
+                      {summary.refunds.executed} / {summary.refunds.failed}
+                    </p>
+                  </div>
+                  <div className="col-span-2">
+                    <Separator className="mb-3" />
+                    <p className="text-muted-foreground">
+                      Executed totals (minor units)
+                    </p>
+                    {summary.refunds.executedTotals.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">—</p>
+                    ) : (
+                      summary.refunds.executedTotals.map((total) => (
+                        <p
+                          key={total.currency}
+                          className="text-2xl font-semibold"
+                        >
+                          {total.minor} {total.currency}
+                        </p>
+                      ))
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            </section>
 
             <Card>
               <CardHeader>
-                <CardTitle>Refunds</CardTitle>
+                <CardTitle>Recent customer feedback</CardTitle>
                 <CardDescription>
-                  Human-in-the-loop outcomes for recommended refunds.
+                  Collected from the customer portal after a case closes.
                 </CardDescription>
               </CardHeader>
-              <CardContent className="grid grid-cols-2 gap-y-4 text-sm">
-                <div>
-                  <p className="text-muted-foreground">Recommended</p>
-                  <p className="text-2xl font-semibold">
-                    {summary.refunds.recommended}
+              <CardContent>
+                {summary.feedback.recent.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    No feedback submitted yet.
                   </p>
-                </div>
-                <div>
-                  <p className="text-muted-foreground">Approved</p>
-                  <p className="text-2xl font-semibold">
-                    {summary.refunds.approved}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-muted-foreground">Rejected</p>
-                  <p className="text-2xl font-semibold">
-                    {summary.refunds.rejected}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-muted-foreground">Auto-escalated</p>
-                  <p className="text-2xl font-semibold">
-                    {summary.refunds.autoEscalated}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-muted-foreground">Executed / failed</p>
-                  <p className="text-2xl font-semibold">
-                    {summary.refunds.executed} / {summary.refunds.failed}
-                  </p>
-                </div>
-                <div className="col-span-2">
-                  <Separator className="mb-3" />
-                  <p className="text-muted-foreground">
-                    Executed totals (minor units)
-                  </p>
-                  {summary.refunds.executedTotals.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">—</p>
-                  ) : (
-                    summary.refunds.executedTotals.map((total) => (
-                      <p
-                        key={total.currency}
-                        className="text-2xl font-semibold"
+                ) : (
+                  <div className="flex flex-col gap-3">
+                    {summary.feedback.recent.map((entry) => (
+                      <div
+                        key={entry.caseId}
+                        className="flex items-start justify-between gap-3 border-b pb-3 text-sm last:border-0 last:pb-0"
                       >
-                        {total.minor} {total.currency}
-                      </p>
-                    ))
-                  )}
-                </div>
+                        <div>
+                          <p className="font-medium">{entry.subject}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {new Date(entry.submittedAt).toLocaleString()}
+                          </p>
+                        </div>
+                        <Badge
+                          variant={
+                            entry.rating === "up" ? "default" : "destructive"
+                          }
+                          className="gap-1"
+                        >
+                          {entry.rating === "up" ? (
+                            <ThumbsUp data-icon="inline-start" />
+                          ) : (
+                            <ThumbsDown data-icon="inline-start" />
+                          )}
+                          {entry.rating === "up" ? "Resolved" : "Not resolved"}
+                        </Badge>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </CardContent>
             </Card>
-          </section>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Recent customer feedback</CardTitle>
-              <CardDescription>
-                Collected from the customer portal after a case closes.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {summary.feedback.recent.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No feedback submitted yet.
-                </p>
-              ) : (
-                <div className="flex flex-col gap-3">
-                  {summary.feedback.recent.map((entry) => (
-                    <div
-                      key={entry.caseId}
-                      className="flex items-start justify-between gap-3 border-b pb-3 text-sm last:border-0 last:pb-0"
-                    >
-                      <div>
-                        <p className="font-medium">{entry.subject}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {new Date(entry.submittedAt).toLocaleString()}
-                        </p>
-                      </div>
-                      <Badge
-                        variant={
-                          entry.rating === "up" ? "default" : "destructive"
-                        }
-                        className="gap-1"
-                      >
-                        {entry.rating === "up" ? (
-                          <ThumbsUp data-icon="inline-start" />
-                        ) : (
-                          <ThumbsDown data-icon="inline-start" />
-                        )}
-                        {entry.rating === "up" ? "Resolved" : "Not resolved"}
-                      </Badge>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+            <p className="text-xs text-muted-foreground">
+              Last updated {new Date(summary.generatedAt).toLocaleString()}
+            </p>
+          </>
+        )}
 
+      {!loading && summary && view === "telemetry" && (
+        <>
           <Card>
             <CardHeader>
               <CardTitle>Operational telemetry</CardTitle>
