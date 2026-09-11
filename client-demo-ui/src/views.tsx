@@ -230,7 +230,7 @@ export function Account(props: {
         </section>
         <section class="section">
           <article class="card">
-            <h2>Address change</h2>
+            <h2>Address</h2>
             <p class="muted">
               To update your address for future purchases, contact support
               through the chat. The team will confirm your details and guide you
