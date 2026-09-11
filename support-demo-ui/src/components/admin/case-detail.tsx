@@ -1,8 +1,8 @@
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { StatusBadge, UrgencyBadge } from "@/components/status-badge";
+import { Badge } from "@/components/ui/badge";
+import { UrgencyBadge } from "@/components/status-badge";
 import { ApprovalCard } from "@/components/admin/approval-card";
 import { ManualResolution } from "@/components/admin/manual-resolution";
 import type { ManualResolutionContext } from "@/lib/api";
@@ -101,29 +101,6 @@ export function CaseDetail({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-xl font-semibold">
-            {c.subject || "Support case"}
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            {c.customer.name ?? c.customer.email ?? "Customer"} &lt;
-            {c.customer.email}&gt; · Case {c.id} · via {c.source}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <StatusBadge status={c.status} />
-          {c.triage && (
-            <>
-              <Badge variant="secondary" className="capitalize">
-                {c.triage.intent.replace(/_/g, " ")}
-              </Badge>
-              <UrgencyBadge urgency={c.triage.urgency} />
-            </>
-          )}
-        </div>
-      </div>
-
       {c.status === "waiting_approval" && canApprove && (
         <ApprovalCard
           supportCase={c}
