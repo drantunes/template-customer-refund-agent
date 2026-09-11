@@ -4,6 +4,8 @@ import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { StatusBadge, UrgencyBadge } from "@/components/status-badge";
 import { ApprovalCard } from "@/components/admin/approval-card";
+import { ManualResolution } from "@/components/admin/manual-resolution";
+import type { ManualResolutionContext } from "@/lib/api";
 import type { SupportCase } from "@/lib/types";
 import {
   AlertTriangle,
@@ -40,10 +42,48 @@ function Section({
   );
 }
 
+function EvidenceCard({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="rounded-lg border bg-muted/20 p-3">
+      <h4 className="mb-2 text-sm font-medium">{title}</h4>
+      <div className="text-sm">{children}</div>
+    </section>
+  );
+}
+
+function money(amount: number, currency: string) {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency,
+  }).format(amount);
+}
+
+export function subscriptionDisplayName(plan: string) {
+  return /^price_[A-Za-z0-9]+$/.test(plan) ? "Monthly subscription" : plan;
+}
+
+export function subscriptionInterval(
+  interval: "month" | "year" | undefined,
+  count: number | undefined,
+) {
+  if (!interval) return "billing period";
+  const normalizedCount = count ?? 1;
+  return normalizedCount === 1 ? interval : `${normalizedCount} ${interval}s`;
+}
+
 export function CaseDetail({
   supportCase,
   approverId,
   onDecision,
+  canApprove,
+  manualResolution,
+  onManualResolution,
 }: {
   supportCase: SupportCase;
   approverId: string;
@@ -53,6 +93,9 @@ export function CaseDetail({
     note?: string,
     serviceProblemConfirmed?: true,
   ) => Promise<void>;
+  canApprove: boolean;
+  manualResolution?: ManualResolutionContext;
+  onManualResolution?: (note: string, idempotencyKey: string) => Promise<void>;
 }) {
   const c = supportCase;
 
@@ -60,10 +103,12 @@ export function CaseDetail({
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-xl font-semibold">{c.subject}</h2>
+          <h2 className="text-xl font-semibold">
+            {c.subject || "Support case"}
+          </h2>
           <p className="text-sm text-muted-foreground">
-            {c.customer.name ?? c.customer.email} &lt;{c.customer.email}&gt; ·
-            Case {c.id} · via {c.source}
+            {c.customer.name ?? c.customer.email ?? "Customer"} &lt;
+            {c.customer.email}&gt; · Case {c.id} · via {c.source}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
@@ -79,7 +124,7 @@ export function CaseDetail({
         </div>
       </div>
 
-      {c.status === "waiting_approval" && (
+      {c.status === "waiting_approval" && canApprove && (
         <ApprovalCard
           supportCase={c}
           approverId={approverId}
@@ -151,22 +196,44 @@ export function CaseDetail({
       <Tabs defaultValue="conversation">
         <TabsList className="h-auto flex-wrap">
           <TabsTrigger value="conversation">Conversation</TabsTrigger>
-          <TabsTrigger value="reasoning">AI reasoning</TabsTrigger>
+          <TabsTrigger value="reasoning">AI Analysis</TabsTrigger>
           <TabsTrigger value="data">Order &amp; policy data</TabsTrigger>
         </TabsList>
 
         <TabsContent value="conversation" className="flex flex-col gap-2">
           {c.messages.map((message) => (
-            <div key={message.id} className="rounded-lg border p-3 text-sm">
+            <div
+              key={message.id}
+              className={`rounded-lg border p-3 text-sm ${
+                message.author === "customer"
+                  ? "mr-8 border-sky-700/50 bg-sky-950/20"
+                  : message.author === "internal"
+                    ? "border-amber-700/50 bg-amber-950/20"
+                    : "ml-8 border-emerald-700/50 bg-emerald-950/20"
+              }`}
+            >
               <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
                 <span className="font-medium text-foreground capitalize">
-                  {message.authorName ?? message.author}
+                  {message.author === "agent"
+                    ? "Support"
+                    : message.author === "internal"
+                      ? "Internal"
+                      : "Customer"}
+                  {message.authorName ? ` · ${message.authorName}` : ""}
                 </span>
                 <span>{new Date(message.createdAt).toLocaleString()}</span>
               </div>
               <p className="whitespace-pre-wrap">{message.body}</p>
             </div>
           ))}
+          {manualResolution &&
+            onManualResolution &&
+            (c.status === "escalated" || manualResolution.receipt) && (
+              <ManualResolution
+                context={manualResolution}
+                onResolve={onManualResolution}
+              />
+            )}
         </TabsContent>
 
         <TabsContent value="reasoning" className="flex flex-col gap-4">
@@ -185,9 +252,15 @@ export function CaseDetail({
                   <Badge variant="outline" className="capitalize">
                     {c.triage.sentiment}
                   </Badge>
-                  <Badge variant="outline">
-                    {Math.round(c.triage.confidence * 100)}% confidence
-                  </Badge>
+                  <div
+                    className={`rounded border px-2 py-1 text-xs ${
+                      c.triage.confidence >= 0.8
+                        ? "border-emerald-700/50 bg-emerald-950/20 text-emerald-300"
+                        : "border-yellow-700/50 bg-yellow-950/20 text-yellow-200"
+                    }`}
+                  >
+                    Confidence: {Math.round(c.triage.confidence * 100)}%
+                  </div>
                   {c.triage.requiresHumanReview && (
                     <Badge variant="destructive">Flagged for review</Badge>
                   )}
@@ -207,33 +280,48 @@ export function CaseDetail({
               >
                 <div className="flex flex-col gap-3">
                   {c.policyMatches.map((match, i) => (
-                    <div
+                    <EvidenceCard
                       key={`${match.source}-${i}`}
-                      className="flex flex-col gap-1 border-b pb-2 last:border-0 last:pb-0"
+                      title={match.title || match.source}
                     >
-                      <div className="flex items-center justify-between text-xs text-muted-foreground">
-                        <span className="font-medium text-foreground">
-                          {match.title}
-                        </span>
-                        <span>score {match.score.toFixed(2)}</span>
+                      <div className="flex flex-col gap-2">
+                        <div className="flex items-center justify-between text-xs text-muted-foreground">
+                          <span className="text-muted-foreground">
+                            Policy evidence
+                          </span>
+                          <span
+                            className={`rounded border px-1.5 py-0.5 ${
+                              match.score >= 0.7
+                                ? "border-emerald-700/50 bg-emerald-950/20 text-emerald-300"
+                                : "border-yellow-700/50 bg-yellow-950/20 text-yellow-200"
+                            }`}
+                          >
+                            Relevance: {match.score.toFixed(2)}
+                          </span>
+                        </div>
+                        <details>
+                          <summary className="cursor-pointer text-muted-foreground">
+                            Read policy excerpt
+                          </summary>
+                          <p className="mt-2 whitespace-pre-wrap break-words text-muted-foreground">
+                            {match.text}
+                          </p>
+                        </details>
+                        <p className="text-xs text-muted-foreground">
+                          Source: {match.source}
+                          {match.version ? ` · version ${match.version}` : ""}
+                          {match.effectiveAt
+                            ? ` · effective ${new Date(match.effectiveAt).toLocaleDateString()}`
+                            : ""}
+                          {match.expiresAt
+                            ? ` · expires ${new Date(match.expiresAt).toLocaleDateString()}`
+                            : ""}
+                          {match.documentHash
+                            ? ` · hash ${match.documentHash.slice(0, 12)}…`
+                            : ""}
+                        </p>
                       </div>
-                      <p className="line-clamp-3 text-muted-foreground">
-                        {match.text}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        Source: {match.source}
-                        {match.version ? ` · version ${match.version}` : ""}
-                        {match.effectiveAt
-                          ? ` · effective ${new Date(match.effectiveAt).toLocaleDateString()}`
-                          : ""}
-                        {match.expiresAt
-                          ? ` · expires ${new Date(match.expiresAt).toLocaleDateString()}`
-                          : ""}
-                        {match.documentHash
-                          ? ` · hash ${match.documentHash.slice(0, 12)}…`
-                          : ""}
-                      </p>
-                    </div>
+                    </EvidenceCard>
                   ))}
                 </div>
               </Section>
@@ -251,11 +339,18 @@ export function CaseDetail({
                 <div className="flex flex-col gap-2">
                   <div className="flex flex-wrap gap-1.5">
                     <Badge
-                      variant={c.draft.recommendRefund ? "default" : "outline"}
+                      variant={
+                        c.draft.recommendRefund ||
+                        c.draft.resolutionAction === "subscription_credit"
+                          ? "default"
+                          : "outline"
+                      }
                     >
                       {c.draft.recommendRefund
-                        ? `Recommends refund`
-                        : "No refund recommended"}
+                        ? "Recommends refund"
+                        : c.draft.resolutionAction === "subscription_credit"
+                          ? "Proposes subscription credit"
+                          : "No financial action proposed"}
                     </Badge>
                     {c.draft.requiresEscalation && (
                       <Badge variant="destructive">Requires escalation</Badge>
@@ -273,26 +368,33 @@ export function CaseDetail({
         </TabsContent>
 
         <TabsContent value="data" className="flex flex-col gap-4">
-          <Section
-            icon={PackageSearch}
-            title="Order"
-            description="The order record looked up before deciding on a refund."
-          >
+          <Section icon={PackageSearch} title="Order">
             {c.orderLookup?.found && c.orderLookup.order ? (
-              <dl className="grid grid-cols-2 gap-x-4 gap-y-1">
-                <dt className="text-muted-foreground">Order ID</dt>
-                <dd>{c.orderLookup.order.orderId}</dd>
-                <dt className="text-muted-foreground">Product</dt>
-                <dd>{c.orderLookup.order.product}</dd>
-                <dt className="text-muted-foreground">Amount</dt>
-                <dd>
-                  {c.orderLookup.order.amount} {c.orderLookup.order.currency}
-                </dd>
-                <dt className="text-muted-foreground">Charges</dt>
-                <dd>{c.orderLookup.order.chargeCount}</dd>
-                <dt className="text-muted-foreground">Status</dt>
-                <dd className="capitalize">{c.orderLookup.order.status}</dd>
-              </dl>
+              <EvidenceCard title={c.orderLookup.order.product}>
+                <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+                  <dt className="text-muted-foreground">Order ID</dt>
+                  <dd>{c.orderLookup.order.orderId}</dd>
+                  <dt className="text-muted-foreground">Product</dt>
+                  <dd>{c.orderLookup.order.product}</dd>
+                  <dt className="text-muted-foreground">Amount</dt>
+                  <dd>
+                    {money(
+                      c.orderLookup.order.amount,
+                      c.orderLookup.order.currency,
+                    )}
+                  </dd>
+                  <dt className="text-muted-foreground">Charges</dt>
+                  <dd>{c.orderLookup.order.chargeCount}</dd>
+                  <dt className="text-muted-foreground">Status</dt>
+                  <dd className="capitalize">{c.orderLookup.order.status}</dd>
+                  <dt className="text-muted-foreground">Placed</dt>
+                  <dd>
+                    {new Date(
+                      c.orderLookup.order.placedAt,
+                    ).toLocaleDateString()}
+                  </dd>
+                </dl>
+              </EvidenceCard>
             ) : (
               <p className="text-muted-foreground">
                 No order on file for this customer.
@@ -303,25 +405,48 @@ export function CaseDetail({
           {c.subscriptionLookup?.found && c.subscriptionLookup.subscription && (
             <>
               <Separator />
-              <Section
-                icon={Receipt}
-                title="Subscription"
-                description="Current subscription status for this customer."
-              >
-                <dl className="grid grid-cols-2 gap-x-4 gap-y-1">
-                  <dt className="text-muted-foreground">Plan</dt>
-                  <dd>{c.subscriptionLookup.subscription.plan}</dd>
-                  <dt className="text-muted-foreground">Status</dt>
-                  <dd className="capitalize">
-                    {c.subscriptionLookup.subscription.status}
-                  </dd>
-                  <dt className="text-muted-foreground">Renews</dt>
-                  <dd>
-                    {new Date(
-                      c.subscriptionLookup.subscription.renewsAt,
-                    ).toLocaleDateString()}
-                  </dd>
-                </dl>
+              <Section icon={Receipt} title="Subscription">
+                <EvidenceCard
+                  title={subscriptionDisplayName(
+                    c.subscriptionLookup.subscription.plan,
+                  )}
+                >
+                  <dl className="grid grid-cols-2 gap-x-4 gap-y-1">
+                    <dt className="text-muted-foreground">Billing</dt>
+                    <dd>
+                      {money(
+                        c.subscriptionLookup.subscription.amount,
+                        c.subscriptionLookup.subscription.currency,
+                      )}{" "}
+                      /{" "}
+                      {subscriptionInterval(
+                        c.subscriptionLookup.subscription.recurringInterval,
+                        c.subscriptionLookup.subscription
+                          .recurringIntervalCount,
+                      )}
+                    </dd>
+                    {/^price_[A-Za-z0-9]+$/.test(
+                      c.subscriptionLookup.subscription.plan,
+                    ) && (
+                      <>
+                        <dt className="text-muted-foreground">Plan ID</dt>
+                        <dd className="break-all text-muted-foreground">
+                          {c.subscriptionLookup.subscription.plan}
+                        </dd>
+                      </>
+                    )}
+                    <dt className="text-muted-foreground">Status</dt>
+                    <dd className="capitalize">
+                      {c.subscriptionLookup.subscription.status}
+                    </dd>
+                    <dt className="text-muted-foreground">Renews</dt>
+                    <dd>
+                      {new Date(
+                        c.subscriptionLookup.subscription.renewsAt,
+                      ).toLocaleDateString()}
+                    </dd>
+                  </dl>
+                </EvidenceCard>
               </Section>
             </>
           )}
@@ -329,11 +454,7 @@ export function CaseDetail({
           {c.refundHistory && c.refundHistory.refunds.length > 0 && (
             <>
               <Separator />
-              <Section
-                icon={BadgeCheck}
-                title="Prior refunds"
-                description="Earlier refunds issued to the same customer."
-              >
+              <Section icon={BadgeCheck} title="Prior refunds">
                 <div className="flex flex-col gap-2">
                   {c.refundHistory.refunds.map((r) => (
                     <div
@@ -342,7 +463,8 @@ export function CaseDetail({
                     >
                       <span>{r.reason}</span>
                       <span className="text-muted-foreground">
-                        {r.amount} {r.currency}
+                        {money(r.amount, r.currency)} ·{" "}
+                        {new Date(r.issuedAt).toLocaleDateString()}
                       </span>
                     </div>
                   ))}

@@ -4,6 +4,7 @@ import { bindingsForCase } from "../providers/contracts";
 import { intercomDevelopmentConfig } from "../providers/intercom/config";
 import {
   isCustomerConversationEvent,
+  isAdminClosedConversationEvent,
   MAX_INTERCOM_WEBHOOK_BYTES,
   verifyIntercomWebhook,
 } from "../providers/intercom/webhook";
@@ -72,6 +73,17 @@ export const intercomWebhookRoute = registerApiRoute(
       // or trigger workflow/remote effects.
       if (event.kind === "ping")
         return c.json({ accepted: true, ignored: true });
+      if (isAdminClosedConversationEvent(event)) {
+        const receipt = await caseStore.recordIntercomCloseIntent({
+          tenantId: event.binding.tenantId,
+          providerAccountId: event.binding.providerAccountId,
+          eventId: event.id,
+          externalConversationId: event.binding.externalConversationId,
+        });
+        // The worker, not the webhook handler, obtains a fresh Conversation
+        // state. The signed payload is never used as close authority.
+        return c.json({ accepted: true, duplicate: !receipt.accepted });
+      }
       // Admin replies/notes and all non-customer events are acknowledged but
       // cannot feed a self-generated reply loop.
       if (!isCustomerConversationEvent(event))

@@ -784,6 +784,14 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                           "triage": {
                             "additionalProperties": false,
                             "properties": {
+                              "accountIssueSubtype": {
+                                "enum": [
+                                  "informational_credit_status",
+                                  "account_change",
+                                  "unknown",
+                                ],
+                                "type": "string",
+                              },
                               "confidence": {
                                 "maximum": 1,
                                 "minimum": 0,
@@ -1530,6 +1538,14 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                     "triage": {
                       "additionalProperties": false,
                       "properties": {
+                        "accountIssueSubtype": {
+                          "enum": [
+                            "informational_credit_status",
+                            "account_change",
+                            "unknown",
+                          ],
+                          "type": "string",
+                        },
                         "confidence": {
                           "maximum": 1,
                           "minimum": 0,
@@ -2339,6 +2355,14 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                     "triage": {
                       "additionalProperties": false,
                       "properties": {
+                        "accountIssueSubtype": {
+                          "enum": [
+                            "informational_credit_status",
+                            "account_change",
+                            "unknown",
+                          ],
+                          "type": "string",
+                        },
                         "confidence": {
                           "maximum": 1,
                           "minimum": 0,
@@ -3214,6 +3238,14 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                     "triage": {
                       "additionalProperties": false,
                       "properties": {
+                        "accountIssueSubtype": {
+                          "enum": [
+                            "informational_credit_status",
+                            "account_change",
+                            "unknown",
+                          ],
+                          "type": "string",
+                        },
                         "confidence": {
                           "maximum": 1,
                           "minimum": 0,
@@ -4058,6 +4090,14 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                     "triage": {
                       "additionalProperties": false,
                       "properties": {
+                        "accountIssueSubtype": {
+                          "enum": [
+                            "informational_credit_status",
+                            "account_change",
+                            "unknown",
+                          ],
+                          "type": "string",
+                        },
                         "confidence": {
                           "maximum": 1,
                           "minimum": 0,
@@ -4282,6 +4322,1073 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
               },
             },
             "description": "Follow-up resolution failed",
+          },
+        },
+      },
+    },
+    "/support/cases/{caseId}/manual-resolution": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "caseId",
+            "required": true,
+            "schema": {
+              "type": "string",
+            },
+          },
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": false,
+                  "properties": {
+                    "activeTurnId": {
+                      "type": "string",
+                    },
+                    "receipt": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "actorId": {
+                          "type": "string",
+                        },
+                        "closeState": {
+                          "type": "string",
+                        },
+                        "createdAt": {
+                          "type": "string",
+                        },
+                        "id": {
+                          "type": "string",
+                        },
+                        "noteState": {
+                          "type": "string",
+                        },
+                        "turnId": {
+                          "type": "string",
+                        },
+                      },
+                      "required": [
+                        "id",
+                        "actorId",
+                        "turnId",
+                        "createdAt",
+                        "noteState",
+                        "closeState",
+                      ],
+                      "type": "object",
+                    },
+                    "version": {
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991,
+                      "type": "integer",
+                    },
+                  },
+                  "required": [
+                    "version",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Manual-resolution delivery receipt and active version",
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Authentication required",
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Caller is not authorized staff",
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Case was not found",
+          },
+        },
+      },
+      "post": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "caseId",
+            "required": true,
+            "schema": {
+              "type": "string",
+            },
+          },
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "additionalProperties": false,
+                "properties": {
+                  "expectedTurnId": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "type": "string",
+                  },
+                  "expectedVersion": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer",
+                  },
+                  "idempotencyKey": {
+                    "maxLength": 200,
+                    "minLength": 16,
+                    "type": "string",
+                  },
+                  "internalNote": {
+                    "maxLength": 4000,
+                    "minLength": 1,
+                    "type": "string",
+                  },
+                },
+                "required": [
+                  "expectedVersion",
+                  "expectedTurnId",
+                  "idempotencyKey",
+                  "internalNote",
+                ],
+                "type": "object",
+              },
+            },
+          },
+          "required": true,
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": false,
+                  "properties": {
+                    "case": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "agentUsage": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "inputTokens": {
+                              "type": "number",
+                            },
+                            "model": {
+                              "type": "string",
+                            },
+                            "outputTokens": {
+                              "type": "number",
+                            },
+                          },
+                          "required": [
+                            "inputTokens",
+                            "outputTokens",
+                          ],
+                          "type": "object",
+                        },
+                        "approval": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "approved": {
+                              "type": "boolean",
+                            },
+                            "approverId": {
+                              "type": "string",
+                            },
+                            "note": {
+                              "type": "string",
+                            },
+                            "serviceProblemConfirmed": {
+                              "const": true,
+                              "type": "boolean",
+                            },
+                          },
+                          "required": [
+                            "approved",
+                            "approverId",
+                          ],
+                          "type": "object",
+                        },
+                        "createdAt": {
+                          "type": "string",
+                        },
+                        "customer": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "email": {
+                              "format": "email",
+                              "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                              "type": "string",
+                            },
+                            "name": {
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "email",
+                          ],
+                          "type": "object",
+                        },
+                        "draft": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "citedSources": {
+                              "description": "Titles/sources of policy documents actually used.",
+                              "items": {
+                                "type": "string",
+                              },
+                              "type": "array",
+                            },
+                            "draftResponse": {
+                              "description": "The grounded, customer-facing reply.",
+                              "type": "string",
+                            },
+                            "escalationReason": {
+                              "type": "string",
+                            },
+                            "recommendRefund": {
+                              "type": "boolean",
+                            },
+                            "refundAmount": {
+                              "type": "number",
+                            },
+                            "refundCurrency": {
+                              "type": "string",
+                            },
+                            "refundReason": {
+                              "type": "string",
+                            },
+                            "requiresEscalation": {
+                              "type": "boolean",
+                            },
+                            "resolutionAction": {
+                              "enum": [
+                                "none",
+                                "refund",
+                                "subscription_credit",
+                              ],
+                              "type": "string",
+                            },
+                            "selectedPolicyExcerpts": {
+                              "default": [],
+                              "description": "Exact, relevant excerpts from cited policy documents. These are rendered as policy guidance, never as a completed account effect.",
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "excerpt": {
+                                    "maxLength": 600,
+                                    "minLength": 1,
+                                    "type": "string",
+                                  },
+                                  "source": {
+                                    "type": "string",
+                                  },
+                                },
+                                "required": [
+                                  "source",
+                                  "excerpt",
+                                ],
+                                "type": "object",
+                              },
+                              "maxItems": 3,
+                              "type": "array",
+                            },
+                            "subscriptionCreditAmount": {
+                              "type": "number",
+                            },
+                            "subscriptionCreditCurrency": {
+                              "type": "string",
+                            },
+                            "subscriptionCreditReason": {
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "draftResponse",
+                            "citedSources",
+                            "selectedPolicyExcerpts",
+                            "recommendRefund",
+                            "requiresEscalation",
+                          ],
+                          "type": "object",
+                        },
+                        "escalationReason": {
+                          "type": "string",
+                        },
+                        "externalId": {
+                          "type": "string",
+                        },
+                        "feedback": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "actorId": {
+                              "type": "string",
+                            },
+                            "comment": {
+                              "type": "string",
+                            },
+                            "rating": {
+                              "enum": [
+                                "up",
+                                "down",
+                              ],
+                              "type": "string",
+                            },
+                            "runId": {
+                              "type": "string",
+                            },
+                            "submittedAt": {
+                              "type": "string",
+                            },
+                            "traceId": {
+                              "type": "string",
+                            },
+                            "turnId": {
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "rating",
+                            "submittedAt",
+                          ],
+                          "type": "object",
+                        },
+                        "finalResponse": {
+                          "type": "string",
+                        },
+                        "id": {
+                          "type": "string",
+                        },
+                        "messages": {
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "author": {
+                                "enum": [
+                                  "customer",
+                                  "agent",
+                                  "internal",
+                                ],
+                                "type": "string",
+                              },
+                              "authorName": {
+                                "type": "string",
+                              },
+                              "body": {
+                                "type": "string",
+                              },
+                              "createdAt": {
+                                "type": "string",
+                              },
+                              "id": {
+                                "type": "string",
+                              },
+                            },
+                            "required": [
+                              "id",
+                              "author",
+                              "body",
+                              "createdAt",
+                            ],
+                            "type": "object",
+                          },
+                          "type": "array",
+                        },
+                        "metadata": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "refundCommand": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "fingerprint": {
+                                  "minLength": 1,
+                                  "type": "string",
+                                },
+                              },
+                              "required": [
+                                "fingerprint",
+                              ],
+                              "type": "object",
+                            },
+                            "subscriptionCreditCommand": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "fingerprint": {
+                                  "minLength": 1,
+                                  "type": "string",
+                                },
+                              },
+                              "required": [
+                                "fingerprint",
+                              ],
+                              "type": "object",
+                            },
+                          },
+                          "type": "object",
+                        },
+                        "orderLookup": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "found": {
+                              "type": "boolean",
+                            },
+                            "order": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "amount": {
+                                  "type": "number",
+                                },
+                                "chargeCount": {
+                                  "type": "number",
+                                },
+                                "currency": {
+                                  "type": "string",
+                                },
+                                "customerEmail": {
+                                  "format": "email",
+                                  "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                                  "type": "string",
+                                },
+                                "orderId": {
+                                  "type": "string",
+                                },
+                                "placedAt": {
+                                  "type": "string",
+                                },
+                                "product": {
+                                  "type": "string",
+                                },
+                                "status": {
+                                  "enum": [
+                                    "fulfilled",
+                                    "shipped",
+                                    "processing",
+                                    "cancelled",
+                                    "refunded",
+                                  ],
+                                  "type": "string",
+                                },
+                              },
+                              "required": [
+                                "orderId",
+                                "customerEmail",
+                                "product",
+                                "amount",
+                                "currency",
+                                "status",
+                                "chargeCount",
+                                "placedAt",
+                              ],
+                              "type": "object",
+                            },
+                          },
+                          "required": [
+                            "found",
+                          ],
+                          "type": "object",
+                        },
+                        "policyMatches": {
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "documentHash": {
+                                "type": "string",
+                              },
+                              "effectiveAt": {
+                                "type": "string",
+                              },
+                              "expiresAt": {
+                                "type": "string",
+                              },
+                              "generationId": {
+                                "type": "string",
+                              },
+                              "indexedAt": {
+                                "type": "string",
+                              },
+                              "providerAccountId": {
+                                "type": "string",
+                              },
+                              "providerKind": {
+                                "type": "string",
+                              },
+                              "score": {
+                                "type": "number",
+                              },
+                              "source": {
+                                "type": "string",
+                              },
+                              "text": {
+                                "type": "string",
+                              },
+                              "title": {
+                                "type": "string",
+                              },
+                              "version": {
+                                "type": "string",
+                              },
+                            },
+                            "required": [
+                              "title",
+                              "text",
+                              "source",
+                              "score",
+                            ],
+                            "type": "object",
+                          },
+                          "type": "array",
+                        },
+                        "refundHistory": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "refunds": {
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "amount": {
+                                    "type": "number",
+                                  },
+                                  "currency": {
+                                    "type": "string",
+                                  },
+                                  "issuedAt": {
+                                    "type": "string",
+                                  },
+                                  "orderId": {
+                                    "type": "string",
+                                  },
+                                  "reason": {
+                                    "type": "string",
+                                  },
+                                  "refundId": {
+                                    "type": "string",
+                                  },
+                                },
+                                "required": [
+                                  "refundId",
+                                  "orderId",
+                                  "amount",
+                                  "currency",
+                                  "reason",
+                                  "issuedAt",
+                                ],
+                                "type": "object",
+                              },
+                              "type": "array",
+                            },
+                          },
+                          "required": [
+                            "refunds",
+                          ],
+                          "type": "object",
+                        },
+                        "refundResult": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "amount": {
+                              "type": "number",
+                            },
+                            "currency": {
+                              "type": "string",
+                            },
+                            "executedAt": {
+                              "type": "string",
+                            },
+                            "idempotencyKey": {
+                              "type": "string",
+                            },
+                            "orderId": {
+                              "type": "string",
+                            },
+                            "refundId": {
+                              "type": "string",
+                            },
+                            "status": {
+                              "enum": [
+                                "executed",
+                                "skipped",
+                                "pending",
+                                "failed",
+                              ],
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "refundId",
+                            "orderId",
+                            "amount",
+                            "currency",
+                            "status",
+                            "idempotencyKey",
+                            "executedAt",
+                          ],
+                          "type": "object",
+                        },
+                        "source": {
+                          "enum": [
+                            "mock-email",
+                            "chat",
+                            "intercom-conversation",
+                          ],
+                          "type": "string",
+                        },
+                        "status": {
+                          "enum": [
+                            "new",
+                            "processing",
+                            "waiting_approval",
+                            "resolved",
+                            "escalated",
+                            "failed",
+                          ],
+                          "type": "string",
+                        },
+                        "subject": {
+                          "type": "string",
+                        },
+                        "subscriptionCreditResult": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "amount": {
+                              "type": "number",
+                            },
+                            "creditId": {
+                              "type": "string",
+                            },
+                            "currency": {
+                              "type": "string",
+                            },
+                            "customerId": {
+                              "type": "string",
+                            },
+                            "executedAt": {
+                              "type": "string",
+                            },
+                            "idempotencyKey": {
+                              "type": "string",
+                            },
+                            "status": {
+                              "enum": [
+                                "executed",
+                                "skipped",
+                                "pending",
+                                "failed",
+                              ],
+                              "type": "string",
+                            },
+                            "subscriptionId": {
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "creditId",
+                            "customerId",
+                            "subscriptionId",
+                            "amount",
+                            "currency",
+                            "status",
+                            "idempotencyKey",
+                            "executedAt",
+                          ],
+                          "type": "object",
+                        },
+                        "subscriptionLookup": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "found": {
+                              "type": "boolean",
+                            },
+                            "subscription": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "amount": {
+                                  "type": "number",
+                                },
+                                "cancelAtPeriodEnd": {
+                                  "const": true,
+                                  "type": "boolean",
+                                },
+                                "cancelsAt": {
+                                  "type": "string",
+                                },
+                                "currency": {
+                                  "type": "string",
+                                },
+                                "customerEmail": {
+                                  "format": "email",
+                                  "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                                  "type": "string",
+                                },
+                                "customerId": {
+                                  "type": "string",
+                                },
+                                "plan": {
+                                  "type": "string",
+                                },
+                                "quantity": {
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 9007199254740991,
+                                  "type": "integer",
+                                },
+                                "recurringInterval": {
+                                  "enum": [
+                                    "month",
+                                    "year",
+                                  ],
+                                  "type": "string",
+                                },
+                                "recurringIntervalCount": {
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 9007199254740991,
+                                  "type": "integer",
+                                },
+                                "refundOrderId": {
+                                  "type": "string",
+                                },
+                                "renewsAt": {
+                                  "type": "string",
+                                },
+                                "status": {
+                                  "enum": [
+                                    "active",
+                                    "cancelled",
+                                    "past_due",
+                                  ],
+                                  "type": "string",
+                                },
+                                "subscriptionId": {
+                                  "type": "string",
+                                },
+                              },
+                              "required": [
+                                "subscriptionId",
+                                "customerEmail",
+                                "plan",
+                                "amount",
+                                "currency",
+                                "status",
+                                "renewsAt",
+                              ],
+                              "type": "object",
+                            },
+                          },
+                          "required": [
+                            "found",
+                          ],
+                          "type": "object",
+                        },
+                        "traceId": {
+                          "type": "string",
+                        },
+                        "triage": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "accountIssueSubtype": {
+                              "enum": [
+                                "informational_credit_status",
+                                "account_change",
+                                "unknown",
+                              ],
+                              "type": "string",
+                            },
+                            "confidence": {
+                              "maximum": 1,
+                              "minimum": 0,
+                              "type": "number",
+                            },
+                            "intent": {
+                              "enum": [
+                                "refund_request",
+                                "duplicate_charge",
+                                "order_status",
+                                "cancellation",
+                                "damaged_item",
+                                "account_issue",
+                                "service_problem",
+                                "other",
+                              ],
+                              "type": "string",
+                            },
+                            "rationale": {
+                              "type": "string",
+                            },
+                            "requiresHumanReview": {
+                              "type": "boolean",
+                            },
+                            "sentiment": {
+                              "enum": [
+                                "positive",
+                                "neutral",
+                                "negative",
+                                "angry",
+                              ],
+                              "type": "string",
+                            },
+                            "urgency": {
+                              "enum": [
+                                "low",
+                                "normal",
+                                "high",
+                                "critical",
+                              ],
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "intent",
+                            "urgency",
+                            "sentiment",
+                            "requiresHumanReview",
+                            "confidence",
+                            "rationale",
+                          ],
+                          "type": "object",
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                        },
+                        "workflowRunId": {
+                          "type": "string",
+                        },
+                      },
+                      "required": [
+                        "id",
+                        "externalId",
+                        "source",
+                        "customer",
+                        "subject",
+                        "messages",
+                        "status",
+                        "createdAt",
+                        "updatedAt",
+                        "metadata",
+                      ],
+                      "type": "object",
+                    },
+                    "context": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "activeTurnId": {
+                          "type": "string",
+                        },
+                        "receipt": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "actorId": {
+                              "type": "string",
+                            },
+                            "closeState": {
+                              "type": "string",
+                            },
+                            "createdAt": {
+                              "type": "string",
+                            },
+                            "id": {
+                              "type": "string",
+                            },
+                            "noteState": {
+                              "type": "string",
+                            },
+                            "turnId": {
+                              "type": "string",
+                            },
+                          },
+                          "required": [
+                            "id",
+                            "actorId",
+                            "turnId",
+                            "createdAt",
+                            "noteState",
+                            "closeState",
+                          ],
+                          "type": "object",
+                        },
+                        "version": {
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991,
+                          "type": "integer",
+                        },
+                      },
+                      "required": [
+                        "version",
+                      ],
+                      "type": "object",
+                    },
+                    "replayed": {
+                      "type": "boolean",
+                    },
+                  },
+                  "required": [
+                    "case",
+                    "context",
+                    "replayed",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Manually resolved case and Intercom delivery receipt",
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Invalid manual-resolution payload",
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Authentication required",
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Caller is not authorized staff",
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Case was not found",
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "additionalProperties": {},
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                    },
+                    "result": {},
+                  },
+                  "required": [
+                    "error",
+                  ],
+                  "type": "object",
+                },
+              },
+            },
+            "description": "Case version or active turn is stale",
           },
         },
       },
@@ -4951,6 +6058,14 @@ exports[`support API contract > matches the complete normalized Zod-derived Open
                     "triage": {
                       "additionalProperties": false,
                       "properties": {
+                        "accountIssueSubtype": {
+                          "enum": [
+                            "informational_credit_status",
+                            "account_change",
+                            "unknown",
+                          ],
+                          "type": "string",
+                        },
                         "confidence": {
                           "maximum": 1,
                           "minimum": 0,

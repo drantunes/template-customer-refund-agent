@@ -102,6 +102,7 @@ async function startSupportApi(runtime: Runtime) {
   app.post("/support/auth/login", routes.supportLoginRoute.handler);
   app.post("/support/inbound", routes.supportInboundRoute.handler);
   app.get("/support/cases", routes.supportCasesListRoute.handler);
+  app.get("/support/cases/:caseId", routes.supportCaseDetailRoute.handler);
   app.post(
     "/support/cases/:caseId/approve",
     routes.supportCaseApproveRoute.handler,
@@ -136,6 +137,7 @@ async function signIn(
 test("keeps the local admin approval UI after the customer portal is removed", async ({
   page,
 }) => {
+  test.setTimeout(60_000);
   const runtime = await loadDeterministicRuntime();
   const stopServer = await startSupportApi(runtime);
   try {
@@ -177,6 +179,35 @@ test("keeps the local admin approval UI after the customer portal is removed", a
     await page
       .getByRole("button", { name: "Approve this synthetic refund" })
       .click();
+    await expect(page).toHaveURL(new RegExp(`/admin/${caseId}$`));
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Conversation" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "AI Analysis" })).toBeVisible();
+    await expect(
+      page.getByRole("tab", { name: "Order & policy data" }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page).toHaveURL(/\/admin$/);
+    await expect(page.getByRole("dialog")).toBeHidden();
+    await page
+      .getByRole("button", { name: "Approve this synthetic refund" })
+      .click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    const bounds = await dialog.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+    await expect(
+      page.getByRole("tab", { name: "Order & policy data" }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
+    await page.setViewportSize({ width: 1280, height: 720 });
     await expect(page.getByText("Refund approval requested")).toBeVisible();
     await page.route(`**/support/cases/${caseId}/approve`, (route) =>
       route.fulfill({

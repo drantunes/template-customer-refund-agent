@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { runSetup } from "../../src/setup.js";
+import { displayName, runSetup } from "../../src/setup.js";
 import { openDatabase, verifyCustomer } from "../../src/db.js";
 
 const original = { ...process.env };
@@ -219,8 +219,23 @@ describe("demo setup transport", () => {
     );
     expect((await stat(manifest)).mode & 0o777).toBe(0o600);
     const credentials = JSON.parse(await readFile(manifest, "utf8")) as {
-      customers: Record<string, { email: string; password: string }>;
+      customers: Record<
+        string,
+        { email: string; password: string; name: string }
+      >;
     };
+    // Names derive from the new round identifier, but are persisted before
+    // provider setup. A retry therefore keeps provider and login identities
+    // stable instead of producing a fresh random name mid-round.
+    expect(credentials.customers.alex?.name).toBe(
+      displayName("setup-test-001", "alex"),
+    );
+    expect(credentials.customers.jordan?.name).toBe(
+      displayName("setup-test-001", "jordan"),
+    );
+    expect(displayName("setup-test-002", "alex")).not.toBe(
+      credentials.customers.alex?.name,
+    );
     const database = openDatabase();
     try {
       for (const customer of Object.values(credentials.customers))

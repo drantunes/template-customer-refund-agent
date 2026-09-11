@@ -383,6 +383,19 @@ export class IntercomSupportProvider implements SupportChannelProvider {
       conversationResponse,
     );
   }
+  async currentConversationState(
+    binding: ProviderBinding,
+  ): Promise<{ id: string; state: "open" | "closed" }> {
+    this.assert(binding);
+    const response = await this.conversation(binding);
+    this.assertConversation(binding, response);
+    if (response.state !== "open" && response.state !== "closed")
+      throw new Error("Intercom conversation has an unsupported state.");
+    return {
+      id: String(response.id),
+      state: response.state === "closed" ? "closed" : "open",
+    };
+  }
   async deliver(
     binding: ProviderBinding,
     body: string,

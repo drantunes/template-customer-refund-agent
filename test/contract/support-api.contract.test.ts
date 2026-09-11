@@ -51,6 +51,7 @@ describe("support API contract", () => {
       "/support/cases/{caseId}/approve",
       "/support/cases/{caseId}/reject",
       "/support/cases/{caseId}/feedback",
+      "/support/cases/{caseId}/manual-resolution",
     ]) {
       const operation =
         supportOpenApiDocument.paths[
@@ -428,7 +429,7 @@ describe("support API contract", () => {
     }));
 
     expect(Object.keys(supportOpenApiDocument.paths).sort()).toEqual(
-      registeredRoutes.map((route) => route.path).sort(),
+      [...new Set(registeredRoutes.map((route) => route.path))].sort(),
     );
     for (const { method, path } of registeredRoutes) {
       const operation =
@@ -518,6 +519,7 @@ describe("support API contract", () => {
         "410",
         "500",
       ],
+      "/support/cases/{caseId}/manual-resolution": ["200", "401", "403", "404"],
       "/support/knowledge/reindex": ["200", "400", "401", "403", "500"],
       "/support/monitoring/summary": ["200", "401", "403"],
       "/support/openapi.json": ["200", "401"],
@@ -537,6 +539,17 @@ describe("support API contract", () => {
           );
       }
     }
+    const manual =
+      supportOpenApiDocument.paths["/support/cases/{caseId}/manual-resolution"]
+        .post;
+    expect(Object.keys(manual.responses).sort()).toEqual([
+      "200",
+      "400",
+      "401",
+      "403",
+      "404",
+      "409",
+    ]);
   });
 
   it("documents the local bearer boundary and explicit public exceptions", () => {

@@ -15,6 +15,8 @@ import { CaseStoreActions } from "./case-store-actions";
 import { CaseStoreFinancial } from "./case-store-financial";
 import { CaseStoreRetention } from "./case-store-retention";
 import { CaseStoreCancellation } from "./case-store-cancellation";
+import { CaseStoreManualResolution } from "./case-store-manual-resolution";
+import { CaseStoreIntercomClose } from "./case-store-intercom-close";
 import type {
   CaseFeedback,
   CaseMessage,
@@ -85,6 +87,8 @@ export class CaseStore {
   private readonly financial: CaseStoreFinancial;
   private readonly retention: CaseStoreRetention;
   private readonly cancellation: CaseStoreCancellation;
+  private readonly manualResolution: CaseStoreManualResolution;
+  private readonly intercomClose: CaseStoreIntercomClose;
 
   constructor(options: { client?: Client; url?: string } = {}) {
     if (options.client) {
@@ -107,6 +111,8 @@ export class CaseStore {
     this.financial = new CaseStoreFinancial(this.client);
     this.retention = new CaseStoreRetention(this.client);
     this.cancellation = new CaseStoreCancellation(this.client);
+    this.manualResolution = new CaseStoreManualResolution(this.client);
+    this.intercomClose = new CaseStoreIntercomClose(this.client);
   }
 
   async close() {
@@ -123,8 +129,71 @@ export class CaseStore {
     await this.ready;
   }
 
-  async migrate(target = 24): Promise<void> {
+  async migrate(target = 26): Promise<void> {
     await this.migrations.migrate(target);
+  }
+
+  async manualResolutionContext(caseId: string) {
+    await this.ensured();
+    return this.manualResolution.context(caseId);
+  }
+
+  async resolveManually(input: {
+    caseId: string;
+    tenantId: string;
+    actorId: string;
+    expectedVersion: number;
+    expectedTurnId: string;
+    idempotencyKey: string;
+    internalNote: string;
+  }) {
+    await this.ensured();
+    return this.manualResolution.resolve(input);
+  }
+
+  async recordIntercomCloseIntent(input: {
+    tenantId: string;
+    providerAccountId: string;
+    eventId: string;
+    externalConversationId: string;
+  }) {
+    await this.ensured();
+    return this.intercomClose.record(input);
+  }
+
+  async claimIntercomCloseIntents(limit = 10) {
+    await this.ensured();
+    return this.intercomClose.claim(limit);
+  }
+
+  async deferIntercomCloseIntent(
+    id: string,
+    leaseToken: string,
+    error: string,
+  ) {
+    await this.ensured();
+    return this.intercomClose.defer(id, leaseToken, error);
+  }
+
+  async completeIntercomCloseIntent(
+    id: string,
+    leaseToken: string,
+    state: "applied" | "superseded",
+  ) {
+    await this.ensured();
+    return this.intercomClose.complete(id, leaseToken, state);
+  }
+
+  async applyIntercomClose(input: {
+    intentId: string;
+    leaseToken: string;
+    tenantId: string;
+    providerAccountId: string;
+    externalConversationId: string;
+    expectedVersion: number;
+  }) {
+    await this.ensured();
+    return this.intercomClose.apply(input);
   }
 
   async findByExternalId(source: string, externalId: string) {
@@ -145,9 +214,16 @@ export class CaseStore {
   async findConversation(
     tenantId: string,
     externalConversationId: string,
+    providerKind = "local",
+    providerAccountId = "local-demo",
   ): Promise<SupportCase | undefined> {
     await this.ensured();
-    return this.cases.findConversation(tenantId, externalConversationId);
+    return this.cases.findConversation(
+      tenantId,
+      externalConversationId,
+      providerKind,
+      providerAccountId,
+    );
   }
 
   async canonicalConversationOwner(input: {
@@ -156,6 +232,21 @@ export class CaseStore {
   }) {
     await this.ensured();
     return this.cases.canonicalConversationOwner(input);
+  }
+
+  async conversationSnapshot(
+    tenantId: string,
+    externalConversationId: string,
+    providerKind: string,
+    providerAccountId: string,
+  ) {
+    await this.ensured();
+    return this.cases.conversationSnapshot(
+      tenantId,
+      externalConversationId,
+      providerKind,
+      providerAccountId,
+    );
   }
 
   async create(case_: SupportCase) {
@@ -401,6 +492,11 @@ export class CaseStore {
   async completeOutbox(id: string, receipt: unknown, leaseToken?: string) {
     await this.ensured();
     return this.outbox.completeOutbox(id, receipt, leaseToken);
+  }
+
+  async supersedeOutbox(id: string, leaseToken: string, reason: string) {
+    await this.ensured();
+    return this.outbox.supersedeOutbox(id, leaseToken, reason);
   }
 
   async markOutboxStarted(id: string, leaseToken: string) {

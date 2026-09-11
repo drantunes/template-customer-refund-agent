@@ -64,6 +64,10 @@ export interface SupportChannelProvider {
     status: string,
     idempotencyKey: string,
   ): Promise<DeliveryReceipt>;
+  /** Read-only provider state used to fence signed provider close events. */
+  currentConversationState?(
+    binding: ProviderBinding,
+  ): Promise<{ id: string; state: "open" | "closed" }>;
   /** Provider-owned follow-up operations for a terminal case. The workflow
    * persists this normalized plan atomically with its canonical reply. */
   planFinalizationOutbox?(input: {

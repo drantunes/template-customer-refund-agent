@@ -54,6 +54,9 @@ export const triageResultSchema = z.object({
   requiresHumanReview: z.boolean(),
   confidence: z.number().min(0).max(1),
   rationale: z.string(),
+  accountIssueSubtype: z
+    .enum(["informational_credit_status", "account_change", "unknown"])
+    .optional(),
 });
 export type TriageResult = z.infer<typeof triageResultSchema>;
 

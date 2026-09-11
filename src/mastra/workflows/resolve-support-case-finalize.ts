@@ -1,6 +1,9 @@
 import { createStep } from "@mastra/core/workflows";
 import { z } from "zod";
-import { type SupportCase } from "../domain/support-case";
+import {
+  subscriptionCreditResultSchema,
+  type SupportCase,
+} from "../domain/support-case";
 import {
   renderGroundedSupportResponse,
   safeEscalationResponse,
@@ -48,6 +51,20 @@ const durableRefundEffectSchema = z.object({
   idempotencyKey: z.string(),
   executedAt: z.string().refine((value) => Number.isFinite(Date.parse(value))),
   replayed: z.boolean().optional(),
+});
+
+const durableSubscriptionCreditEffectSchema = z.object({
+  creditId: z.string(),
+  customerId: z.string(),
+  subscriptionId: z.string(),
+  amount: z.object({
+    currency: z.string(),
+    minor: z.number().int().positive(),
+  }),
+  idempotencyKey: z.string(),
+  executedAt: z.string().refine((value) => Number.isFinite(Date.parse(value))),
+  replayed: z.boolean().optional(),
+  status: z.string().optional(),
 });
 
 /** A completed refund message is permitted only when every customer-visible
@@ -204,6 +221,76 @@ async function completedSubscriptionCreditResponse(
   return `A credit of ${result.amount} ${result.currency} has been added to your billing balance for a future invoice. Your subscription remains active.`;
 }
 
+/** An informational follow-up can mention an earlier credit only after every
+ * part of that earlier approval is still present in the immutable ledger. A
+ * fresh subscription lookup supplies the current active-state statement; the
+ * model draft never supplies a customer-visible financial claim. */
+export async function priorSubscriptionCreditStatusResponse(
+  supportCase: SupportCase,
+) {
+  const subscription = supportCase.subscriptionLookup?.subscription;
+  if (!subscription || subscription.status !== "active") return undefined;
+  const turns = await caseStore.turns(supportCase.id);
+  for (const turn of [...turns].reverse()) {
+    const result = subscriptionCreditResultSchema.safeParse(
+      turn.outcome?.subscriptionCreditResult,
+    );
+    const fingerprint = turn.commandFingerprint;
+    if (
+      !result.success ||
+      !fingerprint ||
+      !["executed", "skipped"].includes(result.data.status) ||
+      result.data.subscriptionId !== subscription.subscriptionId
+    )
+      continue;
+    const command = persistedSubscriptionCreditCommandSchema.safeParse(
+      await caseStore.getAction(
+        supportCase.id,
+        "subscription-credit-command",
+        fingerprint,
+      ),
+    );
+    const decision = await caseStore.approvalDecision(supportCase.id, turn.id);
+    const receipt = await caseStore.idempotency(result.data.idempotencyKey);
+    const effect = durableSubscriptionCreditEffectSchema.safeParse(
+      receipt?.effect,
+    );
+    let expectedAmount;
+    try {
+      expectedAmount = legacyAmountToMoney(
+        command.success ? command.data.amount : 0,
+        command.success ? command.data.currency : "USD",
+      );
+    } catch {
+      continue;
+    }
+    if (
+      !command.success ||
+      command.data.approvalCaseId !== supportCase.id ||
+      command.data.fingerprint !== fingerprint ||
+      command.data.customerId !== result.data.customerId ||
+      command.data.subscriptionId !== result.data.subscriptionId ||
+      command.data.amount !== result.data.amount ||
+      command.data.currency !== result.data.currency ||
+      command.data.idempotencyKey !== result.data.idempotencyKey ||
+      !decision?.approved ||
+      decision.commandFingerprint !== fingerprint ||
+      receipt?.fingerprint !== fingerprint ||
+      !effect.success ||
+      effect.data.creditId !== result.data.creditId ||
+      effect.data.customerId !== result.data.customerId ||
+      effect.data.subscriptionId !== result.data.subscriptionId ||
+      effect.data.amount.currency !== expectedAmount.currency ||
+      effect.data.amount.minor !== expectedAmount.minor ||
+      effect.data.idempotencyKey !== result.data.idempotencyKey ||
+      effect.data.executedAt !== result.data.executedAt
+    )
+      continue;
+    return `Your subscription is active. A ${result.data.amount} ${result.data.currency} billing credit was created for a future invoice. This confirms the credit was issued; it does not establish whether an invoice has already used it.`;
+  }
+  return undefined;
+}
+
 const approvalOutputSchema = z.object({
   caseId: z.string(),
   turnId: z.string(),
@@ -242,6 +329,27 @@ export const resolveCaseStep = createStep({
     let escalationReason = triageReason ?? draft.escalationReason;
     if (triageReason) status = "escalated";
     const mustEscalate = Boolean(triageReason || draft.requiresEscalation);
+
+    const informationalCreditStatus =
+      !mustEscalate &&
+      supportCase.triage?.intent === "account_issue" &&
+      supportCase.triage.accountIssueSubtype ===
+        "informational_credit_status" &&
+      !draft.recommendRefund &&
+      draft.resolutionAction === "none";
+    if (informationalCreditStatus) {
+      const priorCredit =
+        await priorSubscriptionCreditStatusResponse(supportCase);
+      if (priorCredit) {
+        status = "resolved";
+        finalResponse = priorCredit;
+      } else {
+        status = "escalated";
+        escalationReason =
+          "The earlier subscription credit could not be verified from durable approval and receipt evidence.";
+        finalResponse = safeEscalationResponse;
+      }
+    }
 
     const cancellation = supportCase.metadata.cancellationEffect;
     if (

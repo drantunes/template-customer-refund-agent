@@ -330,6 +330,18 @@ export class CaseStoreRetention {
         sql: "DELETE FROM support_stripe_webhook_receipts WHERE created_at < ? AND state IN ('completed', 'failed')",
         args: [rawCutoff],
       });
+      // Reverse-close hints carry external conversation identifiers. Retain a
+      // live lease for recovery, but drop terminal dedupe records at the same
+      // webhook boundary. Manual command receipts are case-scoped audit data,
+      // so their replay metadata cannot outlive the case-content window.
+      await this.client.execute({
+        sql: "DELETE FROM support_intercom_close_intents WHERE created_at < ? AND state IN ('applied', 'superseded')",
+        args: [rawCutoff],
+      });
+      await this.client.execute({
+        sql: "DELETE FROM support_manual_resolutions WHERE created_at < ?",
+        args: [caseCutoff],
+      });
     } catch (error) {
       if (!String(error).includes("no such table")) throw error;
     }

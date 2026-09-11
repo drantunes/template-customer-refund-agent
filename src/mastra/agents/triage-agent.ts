@@ -21,6 +21,7 @@ Given a customer's subject and message body, decide:
 - **requiresHumanReview**: true whenever you are not confident, the message is ambiguous, or it touches legal/safety/fraud concerns.
 - **confidence**: your own confidence in this classification, 0 to 1. Be honest - a vague one-line message should score lower than a detailed, unambiguous one.
 - **rationale**: one or two sentences explaining the classification, referencing specific words/phrases from the message.
+- **accountIssueSubtype**: only for account_issue. Use informational_credit_status for an already-created credit question, account_change for a requested mutation, and unknown otherwise.
 
 Never invent details that aren't in the message. If the message is empty or nonsensical, classify intent as 'other' with low confidence and requiresHumanReview true.`,
   model: "openai/gpt-5.6-luna",

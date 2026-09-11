@@ -66,13 +66,33 @@ export class CaseStoreCases {
   async findConversation(
     tenantId: string,
     externalConversationId: string,
+    providerKind = "local",
+    providerAccountId = "local-demo",
   ): Promise<SupportCase | undefined> {
     const result = await this.client.execute({
-      sql: "SELECT c.data FROM support_conversations x JOIN support_cases c ON c.id = x.case_id WHERE x.tenant_id = ? AND x.provider_kind = 'local' AND x.provider_account_id = 'local-demo' AND x.external_conversation_id = ?",
-      args: [tenantId, externalConversationId],
+      sql: "SELECT c.data FROM support_conversations x JOIN support_cases c ON c.id = x.case_id WHERE x.tenant_id = ? AND x.provider_kind = ? AND x.provider_account_id = ? AND x.external_conversation_id = ?",
+      args: [tenantId, providerKind, providerAccountId, externalConversationId],
     });
     return result.rows[0]
       ? parse(result.rows[0] as Record<string, unknown>)
+      : undefined;
+  }
+  async conversationSnapshot(
+    tenantId: string,
+    externalConversationId: string,
+    providerKind: string,
+    providerAccountId: string,
+  ): Promise<{ supportCase: SupportCase; version: number } | undefined> {
+    const result = await this.client.execute({
+      sql: "SELECT c.data, c.version FROM support_conversations x JOIN support_cases c ON c.id = x.case_id WHERE x.tenant_id = ? AND x.provider_kind = ? AND x.provider_account_id = ? AND x.external_conversation_id = ?",
+      args: [tenantId, providerKind, providerAccountId, externalConversationId],
+    });
+    const row = result.rows[0];
+    return row
+      ? {
+          supportCase: parse(row as Record<string, unknown>),
+          version: Number(row.version),
+        }
       : undefined;
   }
   async canonicalConversationOwner(input: {

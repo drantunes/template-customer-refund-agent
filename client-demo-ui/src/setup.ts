@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmod,
   mkdir,
@@ -15,6 +15,39 @@ const INTERCOM_VERSION = "2.16";
 const stripeOrigin = "https://api.stripe.com";
 const intercomOrigin = "https://api.intercom.io";
 const RETRY_WINDOW_MS = 23 * 60 * 60 * 1_000;
+const GIVEN_NAMES = [
+  "Avery",
+  "Cameron",
+  "Devon",
+  "Emery",
+  "Harper",
+  "Jules",
+  "Kai",
+  "Lena",
+  "Marlowe",
+  "Noor",
+  "Quinn",
+  "Rowan",
+] as const;
+const FAMILY_NAMES = [
+  "Bennett",
+  "Caldwell",
+  "Dawson",
+  "Ellis",
+  "Foster",
+  "Garcia",
+  "Hale",
+  "Irving",
+  "Jensen",
+  "Kim",
+  "Linden",
+  "Morgan",
+] as const;
+
+export function displayName(run: string, scenario: string) {
+  const digest = createHash("sha256").update(`${run}:${scenario}`).digest();
+  return `${GIVEN_NAMES[digest[0]! % GIVEN_NAMES.length]} ${FAMILY_NAMES[digest[1]! % FAMILY_NAMES.length]}`;
+}
 
 type Manifest = {
   run: string;
@@ -353,7 +386,9 @@ export async function runSetup({ fetchImpl = fetch } = {}) {
     const current = manifest.customers[name];
     const entry = current ?? {
       id: `demo-${run}-${name}`,
-      name: name[0].toUpperCase() + name.slice(1),
+      // Persist this immediately with the rest of the manifest. A resumed
+      // --run reads the same entry and cannot rename a provider identity.
+      name: displayName(run, name),
       email: `${name}.${run}@example.test`,
       password: password(),
       scenario,

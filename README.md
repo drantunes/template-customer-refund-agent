@@ -49,6 +49,7 @@ Open [Mastra Studio](http://localhost:4111) in local development, select **Suppo
 ## Making it yours
 
 - Change the policies and review limits to match your support process.
+- Read [how policies differ from executable support actions](docs/policies-and-actions.md) before adding a new offer or account operation.
 - Connect the optional [Intercom development or Stripe sandbox adapter](docs/external-adapters.md) to try the same flow with a representative integration.
 
 The separate [Northstar demo](client-demo-ui/README.md) needs its own synthetic accounts and external Intercom credentials. It is not required for the Studio-first quick start.

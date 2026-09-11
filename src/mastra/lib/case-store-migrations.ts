@@ -6,7 +6,7 @@ import { now, parseLegacyCase, caseBinding } from "./case-store-shared";
 
 export class CaseStoreMigrations {
   constructor(private readonly client: Client) {}
-  async migrate(target = 24): Promise<void> {
+  async migrate(target = 26): Promise<void> {
     await this.client.execute(
       "CREATE TABLE IF NOT EXISTS support_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
     );
@@ -14,7 +14,7 @@ export class CaseStoreMigrations {
       "SELECT version FROM support_schema_migrations ORDER BY version",
     );
     let version = Number(applied.rows.at(-1)?.version ?? 0);
-    if (!Number.isInteger(target) || target < 0 || target > 24)
+    if (!Number.isInteger(target) || target < 0 || target > 26)
       throw new Error("Unsupported support schema target version.");
     // Versions 6 through 8 introduced append-only turn, decision, and audit
     // records. Their inverse would discard or weaken durable financial/replay
@@ -135,6 +135,14 @@ export class CaseStoreMigrations {
     }
     if (version === 24) {
       await this.up24();
+      return;
+    }
+    if (version === 25) {
+      await this.up25();
+      return;
+    }
+    if (version === 26) {
+      await this.up26();
       return;
     }
     if (version === 14) {
@@ -1015,6 +1023,59 @@ export class CaseStoreMigrations {
       } catch {}
       throw error;
     }
+  }
+  /** Manual support resolution is a non-financial command.  Its immutable
+   * receipt and ordered provider intents are deliberately separate from the
+   * workflow finalizer and from approval/ledger records. */
+  private async up25() {
+    await this.client.executeMultiple(`
+      CREATE TABLE IF NOT EXISTS support_manual_resolutions (
+        id TEXT PRIMARY KEY,
+        case_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        expected_version INTEGER NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        note_message_id TEXT NOT NULL,
+        note_outbox_id TEXT NOT NULL,
+        close_outbox_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(tenant_id, idempotency_key)
+      );
+      CREATE INDEX IF NOT EXISTS support_manual_resolutions_case
+        ON support_manual_resolutions(case_id, created_at DESC);
+      CREATE TABLE IF NOT EXISTS support_intercom_close_intents (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        provider_account_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        external_conversation_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending','claimed','applied','superseded','deferred')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        lease_token TEXT,
+        lease_until TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(tenant_id, provider_account_id, event_id)
+      );
+      CREATE INDEX IF NOT EXISTS support_intercom_close_intents_claimable
+        ON support_intercom_close_intents(state, lease_until, created_at);
+    `);
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (25, ?)",
+      args: [now()],
+    });
+  }
+  /** Keep provider-close audit data append-only and independent of the case
+   * projection so a later customer follow-up remains authoritative. */
+  private async up26() {
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (26, ?)",
+      args: [now()],
+    });
   }
   private async down(version: number) {
     if (version === 3) {

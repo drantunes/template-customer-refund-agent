@@ -91,7 +91,7 @@ export class CaseStoreOutbox {
           AND candidate.attempts < 3
           AND (candidate.next_attempt_at IS NULL OR candidate.next_attempt_at <= ?)
           AND NOT EXISTS (SELECT 1 FROM support_outbox_account_limits l WHERE l.tenant_id = json_extract(candidate.binding, '$.tenantId') AND l.provider_kind = json_extract(candidate.binding, '$.providerKind') AND l.provider_account_id = json_extract(candidate.binding, '$.providerAccountId') AND l.blocked_until > ?)
-          AND NOT EXISTS (SELECT 1 FROM support_outbox earlier WHERE earlier.case_id = candidate.case_id AND (earlier.created_at < candidate.created_at OR (earlier.created_at = candidate.created_at AND earlier.id < candidate.id)) AND earlier.state <> 'delivered')
+          AND NOT EXISTS (SELECT 1 FROM support_outbox earlier WHERE earlier.case_id = candidate.case_id AND (earlier.created_at < candidate.created_at OR (earlier.created_at = candidate.created_at AND earlier.id < candidate.id)) AND earlier.state NOT IN ('delivered', 'superseded'))
           ${excluded} ORDER BY candidate.created_at, candidate.id LIMIT ?`,
       args: [claimedAt, claimedAt, claimedAt, ...excludeIds, limit],
     });
@@ -101,7 +101,7 @@ export class CaseStoreOutbox {
       const changed = await this.client.execute({
         sql: `UPDATE support_outbox SET state = 'claimed', attempts = attempts + 1, lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND (state = 'pending' OR (state = 'claimed' AND lease_until < ?)) AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
           AND NOT EXISTS (SELECT 1 FROM support_outbox_account_limits l WHERE l.tenant_id = json_extract(support_outbox.binding, '$.tenantId') AND l.provider_kind = json_extract(support_outbox.binding, '$.providerKind') AND l.provider_account_id = json_extract(support_outbox.binding, '$.providerAccountId') AND l.blocked_until > ?)
-          AND NOT EXISTS (SELECT 1 FROM support_outbox earlier WHERE earlier.case_id = support_outbox.case_id AND (earlier.created_at < support_outbox.created_at OR (earlier.created_at = support_outbox.created_at AND earlier.id < support_outbox.id)) AND earlier.state <> 'delivered')`,
+          AND NOT EXISTS (SELECT 1 FROM support_outbox earlier WHERE earlier.case_id = support_outbox.case_id AND (earlier.created_at < support_outbox.created_at OR (earlier.created_at = support_outbox.created_at AND earlier.id < support_outbox.id)) AND earlier.state NOT IN ('delivered', 'superseded'))`,
         args: [
           leaseUntil,
           leaseToken,
@@ -140,6 +140,19 @@ export class CaseStoreOutbox {
         ? [JSON.stringify(receipt), now(), id, leaseToken]
         : [JSON.stringify(receipt), now(), id],
     });
+  }
+  async supersedeOutbox(id: string, leaseToken: string, reason: string) {
+    const changed = await this.client.execute({
+      sql: "UPDATE support_outbox SET state = 'superseded', receipt = ?, last_error = ?, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE id = ? AND state = 'claimed' AND lease_token = ?",
+      args: [
+        JSON.stringify({ superseded: true, reason }),
+        reason,
+        now(),
+        id,
+        leaseToken,
+      ],
+    });
+    return Number(changed.rowsAffected) === 1;
   }
   /** Durable pre-effect boundary for providers without a documented idempotency
    * key.  It is intentionally not used by the local provider's recovery path. */

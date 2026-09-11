@@ -37,6 +37,33 @@ export const approvalRequestSchema = z.object({
 export const followUpRequestSchema = z.object({
   body: z.string().min(1).max(10_000),
 });
+export const manualResolutionRequestSchema = z
+  .object({
+    expectedVersion: z.number().int().positive(),
+    expectedTurnId: z.string().min(1).max(200),
+    idempotencyKey: z.string().min(16).max(200),
+    internalNote: z.string().min(1).max(4_000),
+  })
+  .strict();
+export const manualResolutionContextSchema = z.object({
+  version: z.number().int().positive(),
+  activeTurnId: z.string().optional(),
+  receipt: z
+    .object({
+      id: z.string(),
+      actorId: z.string(),
+      turnId: z.string(),
+      createdAt: z.string(),
+      noteState: z.string(),
+      closeState: z.string(),
+    })
+    .optional(),
+});
+export const manualResolutionResponseSchema = z.object({
+  case: publicSupportCaseSchema,
+  context: manualResolutionContextSchema,
+  replayed: z.boolean(),
+});
 
 export const loginRequestSchema = z.object({
   email: z.email(),
@@ -597,6 +624,51 @@ export const supportOpenApiDocument = {
           "500": {
             ...errorResponse("Follow-up resolution failed"),
           },
+        },
+      },
+    },
+    "/support/cases/{caseId}/manual-resolution": {
+      get: {
+        parameters: [caseIdParameter],
+        responses: {
+          "200": {
+            description:
+              "Manual-resolution delivery receipt and active version",
+            content: {
+              "application/json": {
+                schema: jsonSchema(manualResolutionContextSchema),
+              },
+            },
+          },
+          "401": { ...errorResponse("Authentication required") },
+          "403": { ...errorResponse("Caller is not authorized staff") },
+          "404": { ...errorResponse("Case was not found") },
+        },
+      },
+      post: {
+        parameters: [caseIdParameter],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: jsonSchema(manualResolutionRequestSchema),
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Manually resolved case and Intercom delivery receipt",
+            content: {
+              "application/json": {
+                schema: jsonSchema(manualResolutionResponseSchema),
+              },
+            },
+          },
+          "400": { ...errorResponse("Invalid manual-resolution payload") },
+          "401": { ...errorResponse("Authentication required") },
+          "403": { ...errorResponse("Caller is not authorized staff") },
+          "404": { ...errorResponse("Case was not found") },
+          "409": { ...errorResponse("Case version or active turn is stale") },
         },
       },
     },

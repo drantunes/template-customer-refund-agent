@@ -14,7 +14,13 @@ import {
 export type DispatchState =
   "pending" | "claimed" | "completed" | "suspended" | "failed";
 export type OutboxState =
-  "pending" | "claimed" | "started" | "delivered" | "failed" | "uncertain";
+  | "pending"
+  | "claimed"
+  | "started"
+  | "delivered"
+  | "failed"
+  | "uncertain"
+  | "superseded";
 export type OutboxOperation = "reply" | "note" | "status" | "ticket";
 export interface OutboxRecord {
   id: string;

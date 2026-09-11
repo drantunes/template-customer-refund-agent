@@ -69,6 +69,13 @@ export function startLocalRuntimeWorkers(
           logger?.warn("Stripe cancellation reconciliation failed.", { error }),
         );
       await deliverOutbox(undefined, 10, caseStore, { mastra });
+      await import("./intercom-close-recovery")
+        .then(({ recoverIntercomCloseIntents }) =>
+          recoverIntercomCloseIntents(caseStore),
+        )
+        .catch((error) =>
+          logger?.warn("Intercom close recovery failed.", { error }),
+        );
       if (Date.now() - lastRetentionSweep >= retentionInterval) {
         const caseRetention = await caseStore.enforceRetention();
         const storage = mastra.getStorage?.();

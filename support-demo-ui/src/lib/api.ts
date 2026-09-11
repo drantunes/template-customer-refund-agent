@@ -130,6 +130,51 @@ export function getCase(caseId: string): Promise<SupportCase> {
   return request(`/support/cases/${caseId}`);
 }
 
+export type ManualResolutionContext = {
+  version: number;
+  activeTurnId?: string;
+  receipt?: {
+    id: string;
+    actorId: string;
+    turnId: string;
+    createdAt: string;
+    noteState: string;
+    closeState: string;
+  };
+};
+
+export function getManualResolutionContext(
+  caseId: string,
+  session?: SupportSession,
+): Promise<ManualResolutionContext> {
+  return request(
+    `/support/cases/${caseId}/manual-resolution`,
+    undefined,
+    session,
+  );
+}
+
+export function resolveManually(
+  caseId: string,
+  payload: {
+    expectedVersion: number;
+    expectedTurnId: string;
+    idempotencyKey: string;
+    internalNote: string;
+  },
+  session?: SupportSession,
+): Promise<{
+  case: SupportCase;
+  context: ManualResolutionContext;
+  replayed: boolean;
+}> {
+  return request(
+    `/support/cases/${caseId}/manual-resolution`,
+    { method: "POST", body: JSON.stringify(payload) },
+    session,
+  );
+}
+
 export function submitCase(
   payload: MockEmailPayload,
   session?: SupportSession,

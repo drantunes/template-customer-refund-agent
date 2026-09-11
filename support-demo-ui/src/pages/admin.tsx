@@ -35,17 +35,27 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CaseDetail } from "@/components/admin/case-detail";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { MonitoringSection } from "@/components/admin/monitoring-section";
 import { StatusBadge } from "@/components/status-badge";
 import {
   approveCase,
   clearSession,
+  getManualResolutionContext,
   hasAnyRole,
   listCases,
   rejectCase,
+  resolveManually,
   reindexKnowledge,
   SessionExpiredError,
   type SupportSession,
+  type ManualResolutionContext,
 } from "@/lib/api";
 import { useMountedSession } from "@/lib/mounted-session";
 import { SessionLogin } from "@/components/session-login";
@@ -71,11 +81,11 @@ export function Admin() {
         onSession={setSession}
       />
     );
-  if (!hasAnyRole(session, ["approver", "admin"]))
+  if (!hasAnyRole(session, ["support-agent", "approver", "admin"]))
     return (
       <div className="flex flex-col items-start gap-3">
         <p className="text-muted-foreground">
-          This session cannot review refunds.
+          This session cannot access the support queue.
         </p>
         <Button
           variant="outline"
@@ -120,6 +130,7 @@ function AdminSession({
     useState<(typeof FILTERS)[number]["value"]>("all");
   const [reindexing, setReindexing] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [manualContext, setManualContext] = useState<ManualResolutionContext>();
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -171,6 +182,21 @@ function AdminSession({
   }, [cases, filter]);
 
   const selectedCase = cases.find((c) => c.id === caseId);
+
+  useEffect(() => {
+    if (
+      !selectedCase ||
+      !["escalated", "resolved"].includes(selectedCase.status)
+    ) {
+      setManualContext(undefined);
+      return;
+    }
+    getManualResolutionContext(selectedCase.id, session)
+      .then((context) => mounted.current && setManualContext(context))
+      .catch((error) => {
+        if (error instanceof SessionExpiredError) onSessionExpired(session);
+      });
+  }, [selectedCase, session, onSessionExpired]);
 
   async function handleReindex() {
     setReindexing(true);
@@ -224,6 +250,49 @@ function AdminSession({
     }
   }
 
+  async function handleManualResolution(note: string, idempotencyKey: string) {
+    if (!selectedCase || !manualContext?.activeTurnId) return;
+    try {
+      const result = await resolveManually(
+        selectedCase.id,
+        {
+          expectedVersion: manualContext.version,
+          expectedTurnId: manualContext.activeTurnId,
+          idempotencyKey,
+          internalNote: note,
+        },
+        session,
+      );
+      if (!mounted.current) return;
+      setCases((previous) =>
+        previous.map((item) =>
+          item.id === result.case.id ? result.case : item,
+        ),
+      );
+      setManualContext(result.context);
+      toast.success(
+        result.replayed
+          ? "Manual close already recorded"
+          : "Internal note recorded and close queued",
+      );
+    } catch (error) {
+      if (error instanceof SessionExpiredError) {
+        onSessionExpired(session);
+        return;
+      }
+      if (mounted.current)
+        toast.error(
+          error instanceof Error ? error.message : "Manual resolution failed",
+        );
+      // A 409 can be caused by a follow-up. Reload the immutable context before
+      // allowing the same human to make a deliberate new decision.
+      if (mounted.current && selectedCase)
+        getManualResolutionContext(selectedCase.id, session)
+          .then(setManualContext)
+          .catch(() => undefined);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <section className="flex flex-wrap items-start justify-between gap-4">
@@ -232,10 +301,7 @@ function AdminSession({
             Support admin
           </h1>
           <p className="max-w-2xl text-muted-foreground">
-            This is what your support team would see: review cases, inspect how
-            the AI investigated each one, and approve or reject the refunds it
-            recommends. Cases it can't resolve on its own show up here waiting
-            for a decision.
+            Review cases and their supporting evidence.
           </p>
         </div>
         <DropdownMenu>
@@ -376,34 +442,29 @@ function AdminSession({
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Case detail</CardTitle>
-            <CardDescription>
-              Review the selected case, including its customer conversation,
-              evidence, and pending approval decision.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {selectedCase ? (
+        <Dialog
+          open={Boolean(caseId && selectedCase)}
+          onOpenChange={(open) => !open && navigate("/admin")}
+        >
+          {selectedCase && (
+            <DialogContent className="max-h-[85vh] sm:max-w-4xl overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle>Case details</DialogTitle>
+                <DialogDescription>
+                  Conversation, analysis, and evidence.
+                </DialogDescription>
+              </DialogHeader>
               <CaseDetail
                 supportCase={selectedCase}
                 approverId={session.principal.id}
                 onDecision={handleDecision}
+                canApprove={hasAnyRole(session, ["approver", "admin"])}
+                manualResolution={manualContext}
+                onManualResolution={handleManualResolution}
               />
-            ) : (
-              <Empty className="border">
-                <EmptyHeader>
-                  <EmptyTitle>Select a case</EmptyTitle>
-                  <EmptyDescription>
-                    Choose a case from the queue to see the conversation, draft,
-                    and approval controls.
-                  </EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-            )}
-          </CardContent>
-        </Card>
+            </DialogContent>
+          )}
+        </Dialog>
       </section>
 
       <Separator />

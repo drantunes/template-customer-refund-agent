@@ -38,6 +38,24 @@ export async function deliverOutbox(
       // case that enqueued it. Never attach an arbitrary queue item to the
       // workflow that happened to trigger this sweep.
       const ownerCase = await store.get(item.caseId);
+      if (
+        ownerCase &&
+        ((item.id.startsWith("manual_") &&
+          item.originatingTurnId &&
+          ownerCase.metadata.activeTurnId !== item.originatingTurnId) ||
+          // A provider-originated close has already converged this local case.
+          // Do not let an older escalation finalization reopen it later.
+          (ownerCase.status === "resolved" && item.status === "escalated"))
+      ) {
+        // A later customer follow-up reopened this conversation. Neither the
+        // staff note nor its close may be delivered against the newer turn.
+        await store.supersedeOutbox(
+          item.id,
+          item.leaseToken!,
+          "A newer customer turn superseded this manual resolution.",
+        );
+        continue;
+      }
       const ownerBinding = ownerCase
         ? bindingsForPersistedCase(ownerCase).support
         : undefined;

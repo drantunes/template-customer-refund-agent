@@ -23,6 +23,32 @@ afterEach(async () => {
 });
 
 describe("DEC-015 retention", () => {
+  it("removes terminal reverse-close identifiers and expired manual replay metadata", async () => {
+    const store = await storeForTest();
+    const client = store.getClient();
+    const expired = "2025-01-01T00:00:00.000Z";
+    await client.execute({
+      sql: "INSERT INTO support_intercom_close_intents(id, tenant_id, provider_account_id, event_id, external_conversation_id, state, created_at, updated_at) VALUES ('old-close', 'tenant', 'account', 'event', 'conversation', 'applied', ?, ?)",
+      args: [expired, expired],
+    });
+    await client.execute({
+      sql: "INSERT INTO support_manual_resolutions(id, case_id, tenant_id, actor_id, turn_id, expected_version, idempotency_key, payload_hash, note_message_id, note_outbox_id, close_outbox_id, created_at) VALUES ('old-manual', 'case', 'tenant', 'actor', 'turn', 1, 'old-manual-key', 'hash', 'message', 'note', 'close', ?)",
+      args: [expired],
+    });
+    await store.enforceRetention(() => new Date("2026-09-11T12:00:00.000Z"));
+    expect(
+      await client.execute(
+        "SELECT id FROM support_intercom_close_intents WHERE id = 'old-close'",
+      ),
+    ).toMatchObject({ rows: [] });
+    expect(
+      await client.execute(
+        "SELECT id FROM support_manual_resolutions WHERE id = 'old-manual'",
+      ),
+    ).toMatchObject({ rows: [] });
+    await store.close();
+  });
+
   it("does not let reconciliation claim a prepared refund while its approval dispatch is live, then recovers it after lease expiry", async () => {
     const store = await storeForTest();
     const client = store.getClient();
