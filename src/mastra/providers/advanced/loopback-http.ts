@@ -11,6 +11,9 @@ import type {
   RefundCommand,
   RefundEffect,
   RefundQuote,
+  SubscriptionCreditCommand,
+  SubscriptionCreditEffect,
+  SubscriptionCreditQuote,
   SubscriptionCancellationCommand,
   SubscriptionCancellationEffect,
   SupportChannelProvider,
@@ -58,6 +61,23 @@ const quoteSchema = z
     commandFingerprint: z.string().min(1),
   })
   .strict();
+const subscriptionCreditEffectSchema = z
+  .object({
+    creditId: z.string().min(1),
+    customerId: z.string().min(1),
+    subscriptionId: z.string().min(1),
+    amount: moneySchema,
+    idempotencyKey: z.string().min(1),
+    executedAt: z.iso.datetime(),
+    replayed: z.boolean(),
+  })
+  .strict();
+const subscriptionCreditQuoteSchema = z
+  .object({
+    approvedAmount: moneySchema,
+    commandFingerprint: z.string().min(1),
+  })
+  .strict();
 const orderSchema = z
   .object({
     orderId: z.string().min(1),
@@ -78,8 +98,12 @@ const orderSchema = z
 const subscriptionSchema = z
   .object({
     subscriptionId: z.string().min(1),
+    customerId: z.string().min(1).optional(),
     customerEmail: z.string().min(1),
     plan: z.string().min(1),
+    recurringInterval: z.enum(["month", "year"]),
+    recurringIntervalCount: z.number().int().positive(),
+    quantity: z.number().int().positive(),
     amount: moneySchema,
     status: z.enum(["active", "cancelled", "past_due"]),
     renewsAt: z.iso.datetime(),
@@ -143,6 +167,18 @@ const commandSchema = z
     approvalCaseId: z.string().min(1),
     binding: bindingSchema,
     orderId: z.string().min(1),
+    amount: moneySchema,
+    reason: z.string().min(1),
+    idempotencyKey: z.string().min(1),
+    fingerprint: z.string().min(1),
+  })
+  .strict();
+const subscriptionCreditCommandSchema = z
+  .object({
+    approvalCaseId: z.string().min(1),
+    binding: bindingSchema,
+    customerId: z.string().min(1),
+    subscriptionId: z.string().min(1),
     amount: moneySchema,
     reason: z.string().min(1),
     idempotencyKey: z.string().min(1),
@@ -363,6 +399,65 @@ export function createLocalLoopbackFacade(
         if (injected === "drop-after-commit")
           return new Promise(() => undefined);
         return Response.json(effectSchema.parse(effect));
+      }
+      if (request.url.endsWith("/transactions/quote-subscription-credit")) {
+        const checked = subscriptionCreditCommandSchema.safeParse(body.command);
+        if (
+          !checked.success ||
+          !sameBinding(body.binding, checked.data.binding)
+        )
+          return Response.json(
+            { error: "invalid subscription credit command" },
+            { status: 400 },
+          );
+        return Response.json(
+          subscriptionCreditQuoteSchema.parse(
+            await provider
+              .transactions(body.binding)
+              .quoteSubscriptionCredit(checked.data),
+          ),
+        );
+      }
+      if (request.url.endsWith("/transactions/issue-subscription-credit")) {
+        const checked = subscriptionCreditCommandSchema.safeParse(body.command);
+        const authorization = nativeAuthorizationSchema.safeParse(
+          body.authorization,
+        );
+        if (
+          !checked.success ||
+          !authorization.success ||
+          !sameBinding(body.binding, checked.data.binding)
+        )
+          return Response.json(
+            { error: "invalid subscription credit request" },
+            { status: 400 },
+          );
+        const effect = await provider
+          .transactions(body.binding)
+          .issueSubscriptionCredit(checked.data, authorization.data);
+        if (injected === "drop-after-commit")
+          return new Promise(() => undefined);
+        return Response.json(subscriptionCreditEffectSchema.parse(effect));
+      }
+      if (request.url.endsWith("/transactions/retrieve-subscription-credit")) {
+        const checked = subscriptionCreditCommandSchema.safeParse(body.command);
+        if (
+          !checked.success ||
+          !sameBinding(body.binding, checked.data.binding)
+        )
+          return Response.json(
+            { error: "invalid subscription credit command" },
+            { status: 400 },
+          );
+        return Response.json(
+          subscriptionCreditEffectSchema
+            .nullable()
+            .parse(
+              (await provider
+                .transactions(body.binding)
+                .retrieveSubscriptionCredit(checked.data)) ?? null,
+            ),
+        );
       }
       if (
         request.url.endsWith("/transactions/schedule-subscription-cancellation")
@@ -680,6 +775,32 @@ class LoopbackHttpTransactionalProvider implements TransactionalActionProvider {
         authorization,
       },
       effectSchema,
+    );
+  }
+  quoteSubscriptionCredit(command: SubscriptionCreditCommand) {
+    return this.http.call<SubscriptionCreditQuote>(
+      "/transactions/quote-subscription-credit",
+      { binding: command.binding, command },
+      subscriptionCreditQuoteSchema,
+    );
+  }
+  issueSubscriptionCredit(
+    command: SubscriptionCreditCommand,
+    authorization?: NativeRefundExecutionAuthorization,
+  ) {
+    return this.http.call<SubscriptionCreditEffect>(
+      "/transactions/issue-subscription-credit",
+      { binding: command.binding, command, authorization },
+      subscriptionCreditEffectSchema,
+    );
+  }
+  retrieveSubscriptionCredit(command: SubscriptionCreditCommand) {
+    return this.http.call<SubscriptionCreditEffect | undefined>(
+      "/transactions/retrieve-subscription-credit",
+      { binding: command.binding, command },
+      subscriptionCreditEffectSchema
+        .nullable()
+        .transform((value) => value ?? undefined),
     );
   }
   scheduleSubscriptionCancellation(command: SubscriptionCancellationCommand) {

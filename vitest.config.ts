@@ -7,7 +7,7 @@ const inheritedDatabaseSentinel = `file:${join(tmpdir(), `phase001-vitest-inheri
 const databaseIsolationSetup = ["test/support/database-isolation.setup.ts"];
 const webResolve = {
   alias: {
-    "@": resolve(import.meta.dirname, "web/src"),
+    "@": resolve(import.meta.dirname, "support-demo-ui/src"),
   },
 };
 
@@ -67,7 +67,7 @@ export default defineConfig({
         resolve: webResolve,
         test: {
           name: "web-unit",
-          include: ["web/src/**/*.unit.test.{ts,tsx}"],
+          include: ["support-demo-ui/src/**/*.unit.test.{ts,tsx}"],
           environment: "node",
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",
@@ -80,7 +80,7 @@ export default defineConfig({
         resolve: webResolve,
         test: {
           name: "web-integration",
-          include: ["web/src/**/*.integration.test.{ts,tsx}"],
+          include: ["support-demo-ui/src/**/*.integration.test.{ts,tsx}"],
           environment: "node",
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",
@@ -93,7 +93,7 @@ export default defineConfig({
         resolve: webResolve,
         test: {
           name: "web-contract",
-          include: ["web/src/**/*.contract.test.{ts,tsx}"],
+          include: ["support-demo-ui/src/**/*.contract.test.{ts,tsx}"],
           environment: "node",
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",
@@ -106,7 +106,7 @@ export default defineConfig({
         resolve: webResolve,
         test: {
           name: "web-eval",
-          include: ["web/src/**/*.eval.test.{ts,tsx}"],
+          include: ["support-demo-ui/src/**/*.eval.test.{ts,tsx}"],
           environment: "node",
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",

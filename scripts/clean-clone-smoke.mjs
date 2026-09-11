@@ -128,7 +128,6 @@ async function runStudioJourney(port) {
   const page = await browser.newPage();
   const unexpectedFailures = [];
   const expectedAncillaryDenials = [];
-  let authenticatedStudioSession = false;
   let initialThreadInspectionAvailable = true;
   const expectedDeniedStudioPaths = new Set([
     "/api/processors",
@@ -155,17 +154,10 @@ async function runStudioJourney(port) {
     const isSignIn =
       method === "POST" && path === "/api/auth/credentials/sign-in";
     const isLogout = method === "POST" && path === "/api/auth/logout";
-    if (isSignIn) {
-      if (response.status() !== 200) unexpectedFailures.push(failure);
-      else authenticatedStudioSession = true;
+    if (isSignIn || isLogout) {
+      unexpectedFailures.push(failure);
       return;
     }
-    if (isLogout) {
-      if (response.status() !== 200) unexpectedFailures.push(failure);
-      else authenticatedStudioSession = false;
-      return;
-    }
-    if (!authenticatedStudioSession) return;
     if (
       response.status() === 403 &&
       isExpectedStudioAncillaryDenial(path, method)
@@ -191,12 +183,8 @@ async function runStudioJourney(port) {
   });
   try {
     // Studio configures its API host as localhost. Keeping the browser origin
-    // identical lets its HttpOnly same-site session cookie reach that API.
+    // identical avoids a loopback cross-origin request in login-free dev mode.
     await page.goto(`http://localhost:${port}`, { waitUntil: "networkidle" });
-    await page.getByRole("button", { name: "Sign in", exact: true }).click();
-    await page.locator("input[type=email]").fill("agent@local.test");
-    await page.locator("input[type=password]").fill("local-support-agent");
-    await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page
       .getByRole("link", { name: "Agents", exact: true })
       .waitFor({ timeout: 10_000 });
@@ -222,22 +210,6 @@ async function runStudioJourney(port) {
     await composer.press("Enter");
     await waitForCompletedRun(page, followUpAnswer);
 
-    await page.getByRole("button", { name: "A", exact: true }).click();
-    const logoutResponse = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        new URL(response.url()).pathname === "/api/auth/logout",
-    );
-    await page.getByRole("button", { name: "Sign out", exact: true }).click();
-    if ((await logoutResponse).status() !== 200)
-      throw new Error("Studio sign-out did not return HTTP 200.");
-    await page
-      .getByRole("button", { name: "Sign in", exact: true })
-      .waitFor({ timeout: 10_000 });
-    await page.reload({ waitUntil: "domcontentloaded" });
-    await page
-      .getByRole("button", { name: "Sign in", exact: true })
-      .waitFor({ timeout: 10_000 });
     if (unexpectedFailures.length)
       throw new Error(
         `Studio browser journey had unexpected failed responses: ${JSON.stringify(unexpectedFailures)}`,
@@ -291,6 +263,7 @@ try {
   for (const command of [
     ["run", "build"],
     ["run", "build:web"],
+    ["run", "build:demo"],
     ["run", "test:e2e"],
   ])
     run("npm", command, destination, env);
@@ -363,7 +336,7 @@ try {
         order: "ORD-1001 fulfilled",
         reloadHistory: true,
         followUpPrompt,
-        visualSignOut: true,
+        loginFreeStudio: true,
       },
     }),
   );

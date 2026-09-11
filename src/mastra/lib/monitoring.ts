@@ -90,6 +90,7 @@ export interface MonitoringSummary {
   casesConsidered: number;
   funnel: CaseFunnelMetrics;
   refunds: RefundApprovalMetrics;
+  credits: RefundApprovalMetrics;
   feedback: FeedbackMetrics;
   telemetry: {
     observedTraces: number;
@@ -357,14 +358,72 @@ function refundResult(value: unknown) {
     return {
       status: item.status,
       idempotencyKey: item.idempotencyKey,
+      creditId: item.creditId,
+      customerId: item.customerId,
+      subscriptionId: item.subscriptionId,
+      executedAt: item.executedAt,
       ...legacyAmountToMoney(item.amount, item.currency),
     };
   } catch {
     return undefined;
   }
 }
+
+async function confirmedRecoveredEffect(
+  result: ReturnType<typeof refundResult>,
+) {
+  if (result?.status !== "skipped" || !result.idempotencyKey) return false;
+  const durable = await caseStore.idempotency(String(result.idempotencyKey));
+  const effect = recordAt(durable?.effect);
+  return (
+    Boolean(effect) &&
+    effect?.status === "succeeded" &&
+    typeof effect?.creditId === "string" &&
+    effect.creditId === result.creditId &&
+    effect.customerId === result.customerId &&
+    effect.subscriptionId === result.subscriptionId &&
+    effect.idempotencyKey === result.idempotencyKey &&
+    effect.executedAt === result.executedAt &&
+    recordAt(effect.amount)?.currency === result.currency &&
+    recordAt(effect.amount)?.minor === result.minor
+  );
+}
 export async function computeRefundApprovalMetrics(
   cases: SupportCase[],
+): Promise<RefundApprovalMetrics> {
+  return computeFinancialApprovalMetrics(cases, {
+    actionKind: "refund-command",
+    failureKind: "refund",
+    recommended: (draft) => draft?.recommendRefund === true,
+    resultKey: "refundResult",
+    effectsKey: "refundEffects",
+  });
+}
+
+/** Credits have their own immutable command and receipt projection. Keeping
+ * them separate prevents a credit approval or provider failure from changing
+ * the refund rate shown to operators. */
+export async function computeSubscriptionCreditMetrics(
+  cases: SupportCase[],
+): Promise<RefundApprovalMetrics> {
+  return computeFinancialApprovalMetrics(cases, {
+    actionKind: "subscription-credit-command",
+    failureKind: "subscription-credit",
+    recommended: (draft) => draft?.resolutionAction === "subscription_credit",
+    resultKey: "subscriptionCreditResult",
+    effectsKey: "subscriptionCreditEffects",
+  });
+}
+
+async function computeFinancialApprovalMetrics(
+  cases: SupportCase[],
+  options: {
+    actionKind: string;
+    failureKind: string;
+    recommended: (draft: Record<string, unknown> | undefined) => boolean;
+    resultKey: "refundResult" | "subscriptionCreditResult";
+    effectsKey: "refundEffects" | "subscriptionCreditEffects";
+  },
 ): Promise<RefundApprovalMetrics> {
   let recommended = 0,
     autoEscalated = 0,
@@ -378,15 +437,19 @@ export async function computeRefundApprovalMetrics(
       const draft =
         recordAt(turn.outcome?.draft) ??
         (activeTurnId === turn.id ? recordAt(supportCase.draft) : undefined);
-      if (draft?.recommendRefund === true) recommended += 1;
+      if (options.recommended(draft)) recommended += 1;
       if (
         turn.outcome?.status === "escalated" &&
-        draft?.recommendRefund === true &&
+        options.recommended(draft) &&
         !recordAt(turn.outcome?.approval)
       )
         autoEscalated += 1;
-      const result = refundResult(turn.outcome?.refundResult);
-      if (result?.status === "executed") {
+      const result = refundResult(turn.outcome?.[options.resultKey]);
+      if (
+        result &&
+        (result.status === "executed" ||
+          (await confirmedRecoveredEffect(result)))
+      ) {
         const key = String(result.idempotencyKey ?? turn.id);
         if (!effectKeys.has(key)) {
           effectKeys.add(key);
@@ -398,11 +461,17 @@ export async function computeRefundApprovalMetrics(
         }
       }
     }
-    const effects = recordAt(supportCase.metadata.refundEffects);
+    const effects = recordAt(supportCase.metadata[options.effectsKey]);
     for (const effect of Object.values(effects ?? {})) {
       const result = refundResult(effect);
       const key = String(result?.idempotencyKey ?? "");
-      if (result?.status === "executed" && key && !effectKeys.has(key)) {
+      if (
+        result &&
+        (result.status === "executed" ||
+          (await confirmedRecoveredEffect(result))) &&
+        key &&
+        !effectKeys.has(key)
+      ) {
         effectKeys.add(key);
         executed += 1;
         totals.set(
@@ -411,10 +480,12 @@ export async function computeRefundApprovalMetrics(
         );
       }
     }
-    if (!turns.length && supportCase.draft?.recommendRefund) recommended += 1;
+    if (!turns.length && options.recommended(recordAt(supportCase.draft)))
+      recommended += 1;
   }
   const decisions = await caseStore.monitoringDecisions(
     cases.map((item) => item.id),
+    options.actionKind,
   );
   const approved = decisions.filter((item) => item.approved).length;
   const rejected = decisions.filter((item) => !item.approved).length;
@@ -425,6 +496,7 @@ export async function computeRefundApprovalMetrics(
     executed,
     failed: await caseStore.monitoringFinancialFailures(
       cases.map((item) => item.id),
+      options.failureKind,
     ),
     autoEscalated,
     approvalRate: approved + rejected ? approved / (approved + rejected) : null,
@@ -509,6 +581,7 @@ export async function computeMonitoringSummary(
     casesConsidered: cases.length,
     funnel: computeCaseFunnelMetrics(cases),
     refunds: await computeRefundApprovalMetrics(cases),
+    credits: await computeSubscriptionCreditMetrics(cases),
     feedback: await computeHistoricalFeedbackMetrics(cases),
     telemetry,
     failures,

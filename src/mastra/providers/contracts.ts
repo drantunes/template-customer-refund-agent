@@ -12,6 +12,28 @@ import {
  */
 export type ProviderBinding = PersistedProviderBinding;
 
+/** A provider adapter calls this immediately before its irreversible mutation.
+ * It lets a durable domain fence reject a stale operation after any provider
+ * preflight GET, rather than treating that earlier read as the mutation edge. */
+export type ProviderMutationFence = () => Promise<boolean>;
+
+/** The adapter checked its mutation fence before sending a provider POST. */
+export class ProviderEffectFenceRejectedError extends Error {
+  constructor() {
+    super("Provider mutation was superseded before the POST boundary.");
+    this.name = "ProviderEffectFenceRejectedError";
+  }
+}
+
+/** The persisted canonical support owner failed before any refund attempt or
+ * provider request could be created. Callers may safely classify this as a
+ * confirmed no-effect only when no earlier attempt exists. */
+export class VerifiedRefundOwnerRejectedError extends Error {
+  constructor() {
+    super("Refund execution requires the current verified case owner.");
+  }
+}
+
 /** A case persists each binding independently; local fixtures use the same
  * account by default, but that convenience never changes a saved case. */
 export type CaseProviderBindings = PersistedCaseProviderBindings;
@@ -49,12 +71,18 @@ export interface SupportChannelProvider {
     binding: ProviderBinding,
     body: string,
     idempotencyKey: string,
+    beforeMutation?: ProviderMutationFence,
   ): Promise<DeliveryReceipt>;
   updateStatus(
     binding: ProviderBinding,
     status: string,
     idempotencyKey: string,
+    beforeMutation?: ProviderMutationFence,
   ): Promise<DeliveryReceipt>;
+  /** Read-only provider state used to fence signed provider close events. */
+  currentConversationState?(
+    binding: ProviderBinding,
+  ): Promise<{ id: string; state: "open" | "closed" }>;
   /** Provider-owned follow-up operations for a terminal case. The workflow
    * persists this normalized plan atomically with its canonical reply. */
   planFinalizationOutbox?(input: {
@@ -96,6 +124,16 @@ export interface TransactionalActionProvider {
     command: RefundCommand,
     authorization?: import("./native-execution").NativeRefundExecutionAuthorization,
   ): Promise<RefundEffect>;
+  quoteSubscriptionCredit(
+    command: SubscriptionCreditCommand,
+  ): Promise<SubscriptionCreditQuote>;
+  issueSubscriptionCredit(
+    command: SubscriptionCreditCommand,
+    authorization?: import("./native-execution").NativeRefundExecutionAuthorization,
+  ): Promise<SubscriptionCreditEffect>;
+  retrieveSubscriptionCredit(
+    command: SubscriptionCreditCommand,
+  ): Promise<SubscriptionCreditEffect | undefined>;
   scheduleSubscriptionCancellation(
     command: SubscriptionCancellationCommand,
   ): Promise<SubscriptionCancellationEffect>;
@@ -136,8 +174,15 @@ export interface CommerceOrder {
 }
 export interface CommerceSubscription {
   subscriptionId: string;
+  /** Stable provider customer identity required for customer balance effects. */
+  customerId?: string;
   customerEmail: string;
   plan: string;
+  /** Provider-normalized billing terms.  A plan nickname is presentation
+   * data, never authority to issue a financial credit. */
+  recurringInterval: "month" | "year";
+  recurringIntervalCount: number;
+  quantity: number;
   amount: Money;
   status: "active" | "cancelled" | "past_due";
   renewsAt: string;
@@ -189,6 +234,35 @@ export interface RefundQuote {
   approvedAmount: Money;
   remainingAmount: Money;
   commandFingerprint: string;
+}
+/** A billing credit is a distinct financial action. It is available for a
+ * future finalized invoice; this receipt never claims invoice application. */
+export interface SubscriptionCreditCommand {
+  approvalCaseId: string;
+  binding: ProviderBinding;
+  customerId: string;
+  subscriptionId: string;
+  amount: Money;
+  reason: string;
+  idempotencyKey: string;
+  fingerprint: string;
+}
+export interface SubscriptionCreditQuote {
+  approvedAmount: Money;
+  commandFingerprint: string;
+}
+export interface SubscriptionCreditEffect {
+  creditId: string;
+  customerId: string;
+  subscriptionId: string;
+  amount: Money;
+  idempotencyKey: string;
+  executedAt: string;
+  replayed: boolean;
+  /** Created means balance credit exists. It is not proof of invoice use. */
+  status?: "pending" | "succeeded" | "failed" | "unknown";
+  providerStatus?: string;
+  providerRefs?: ProviderRef[];
 }
 /** The only non-refund cancellation supported by Phase 006: a verified owner
  * explicitly asks to cancel at period end and explicitly declines a refund. */

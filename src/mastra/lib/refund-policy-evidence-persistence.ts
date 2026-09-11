@@ -3,6 +3,7 @@ import {
   bindingsForCase,
   type ProviderBinding,
   type RefundCommand,
+  type SubscriptionCreditCommand,
 } from "../providers/contracts";
 import { knowledgeAccountKey } from "./knowledge-publications";
 import { refundPolicyEvidenceError } from "./refund-policy-evidence";
@@ -49,17 +50,19 @@ function isRefundPolicyEvidence(value: unknown): value is RefundPolicyEvidence {
  */
 export async function assertRefundPolicyEvidenceAtFirstEffect(
   tx: Transaction,
-  command: RefundCommand,
+  command: RefundCommand | SubscriptionCreditCommand,
   nativeTurnId: string,
 ) {
+  const commandKind =
+    "orderId" in command ? "refund-command" : "subscription-credit-command";
   const action = await tx.execute({
     sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = 'refund-policy-evidence' AND fingerprint = ?",
     args: [command.approvalCaseId, command.fingerprint],
   });
   if (!action.rows[0]) {
     const commandAction = await tx.execute({
-      sql: "SELECT id FROM support_actions WHERE case_id = ? AND kind = 'refund-command' AND fingerprint = ?",
-      args: [command.approvalCaseId, command.fingerprint],
+      sql: "SELECT id FROM support_actions WHERE case_id = ? AND kind = ? AND fingerprint = ?",
+      args: [command.approvalCaseId, commandKind, command.fingerprint],
     });
     if (!commandAction.rows[0]) return;
   }

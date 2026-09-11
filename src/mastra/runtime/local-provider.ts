@@ -3,8 +3,13 @@ import { createHash } from "node:crypto";
 import { caseStore, isFinancialRetentionTombstone } from "../lib/case-store";
 import { activeDispatchLeaseScope } from "../lib/dispatch-lease-scope";
 import { activeTrustedCancellationScope } from "../providers/cancellation-execution";
-import { refundFingerprint, structurallyEqual } from "../lib/money";
+import {
+  refundFingerprint,
+  structurallyEqual,
+  subscriptionCreditFingerprint,
+} from "../lib/money";
 import { exceedsStandardRefundReviewLimit } from "../domain/refund-review-limit";
+import { providerBindingSchema } from "../domain/support-case";
 import {
   initializeLocalFixtures,
   resetLocalFixtures,
@@ -21,18 +26,24 @@ import type {
   ProviderRegistry,
   RefundCommand,
   RefundEffect,
+  SubscriptionCreditCommand,
+  SubscriptionCreditEffect,
   SubscriptionCancellationCommand,
   SubscriptionCancellationEffect,
   SupportChannelProvider,
   TransactionalActionProvider,
 } from "../providers/contracts";
-import { bindingsForCase } from "../providers/contracts";
+import {
+  bindingsForCase,
+  VerifiedRefundOwnerRejectedError,
+} from "../providers/contracts";
 import {
   hasNativeRefundExecutionAuthorization,
   type NativeRefundExecutionAuthorization,
 } from "../providers/native-execution";
-import { activePrincipalHasRole, ownerIdForCustomer } from "../server/auth";
+import { activePrincipalHasRole } from "../server/auth";
 import { assertRefundPolicyEvidenceAtFirstEffect } from "../lib/refund-policy-evidence-persistence";
+import { canonicalConversationOwner } from "../lib/case-store-cases";
 import {
   defaultLocalBinding,
   LocalSupportProvider,
@@ -57,6 +68,28 @@ function matchesPersistedRefundCommand(
   return (
     stored.approvalCaseId === command.approvalCaseId &&
     stored.orderId === command.orderId &&
+    stored.reason === command.reason &&
+    stored.idempotencyKey === command.idempotencyKey &&
+    stored.fingerprint === command.fingerprint &&
+    stored.amount?.currency === command.amount.currency &&
+    stored.amount?.minor === command.amount.minor &&
+    binding?.tenantId === command.binding.tenantId &&
+    binding?.providerKind === command.binding.providerKind &&
+    binding?.providerAccountId === command.binding.providerAccountId &&
+    binding?.externalConversationId === command.binding.externalConversationId
+  );
+}
+function matchesPersistedSubscriptionCreditCommand(
+  value: unknown,
+  command: SubscriptionCreditCommand,
+): boolean {
+  if (!value || typeof value !== "object") return false;
+  const stored = value as Partial<SubscriptionCreditCommand>;
+  const binding = stored.binding;
+  return (
+    stored.approvalCaseId === command.approvalCaseId &&
+    stored.customerId === command.customerId &&
+    stored.subscriptionId === command.subscriptionId &&
     stored.reason === command.reason &&
     stored.idempotencyKey === command.idempotencyKey &&
     stored.fingerprint === command.fingerprint &&
@@ -225,8 +258,12 @@ export class LocalRuntime
     return row
       ? {
           subscriptionId: text(row.subscription_id),
+          customerId: `local:${binding.tenantId}:${text(row.customer_email).toLowerCase()}`,
           customerEmail: text(row.customer_email),
           plan: text(row.plan),
+          recurringInterval: text(row.recurring_interval) as "month" | "year",
+          recurringIntervalCount: Number(row.recurring_interval_count),
+          quantity: Number(row.quantity),
           amount: {
             minor: Number(row.amount_minor),
             currency: text(row.currency),
@@ -293,6 +330,8 @@ export class LocalRuntime
             draft?: { requiresEscalation?: boolean };
             metadata?: {
               ownerId?: string;
+              providerBinding?: unknown;
+              providerBindings?: { support?: unknown };
               refundCommand?: { fingerprint?: string };
               nativeApproval?: {
                 runId?: string;
@@ -411,18 +450,24 @@ export class LocalRuntime
           `Cannot issue refund: order ${command.orderId} not found.`,
         );
       const email = approvedCase?.customer?.email;
-      const verifiedOwner =
-        typeof email === "string" && email.length > 0
-          ? ownerIdForCustomer(command.binding.tenantId, email)
-          : undefined;
+      const persistedSupportBinding = providerBindingSchema.safeParse(
+        approvedCase?.metadata?.providerBindings?.support ??
+          approvedCase?.metadata?.providerBinding,
+      );
+      const verifiedOwner = persistedSupportBinding.success
+        ? await canonicalConversationOwner(tx, {
+            caseId: command.approvalCaseId,
+            binding: persistedSupportBinding.data,
+          })
+        : undefined;
       if (
         !verifiedOwner ||
         approvedCase?.metadata?.ownerId !== verifiedOwner ||
-        text(order.customer_email).toLowerCase() !== email!.toLowerCase()
+        typeof email !== "string" ||
+        email.length === 0 ||
+        text(order.customer_email).toLowerCase() !== email.toLowerCase()
       )
-        throw new Error(
-          "Refund execution requires the current verified order owner.",
-        );
+        throw new VerifiedRefundOwnerRejectedError();
       if (text(order.currency) !== command.amount.currency)
         throw new Error("Refund currency does not match the original charge.");
       const prior = await tx.execute({
@@ -478,13 +523,294 @@ export class LocalRuntime
       throw error;
     }
   }
+  async quoteSubscriptionCredit(command: SubscriptionCreditCommand) {
+    await this.ensured();
+    const fingerprint = subscriptionCreditFingerprint(command);
+    if (fingerprint !== command.fingerprint)
+      throw new Error(
+        "Subscription credit command fingerprint was tampered with.",
+      );
+    const caseRow = await this.client.execute({
+      sql: "SELECT data FROM support_cases WHERE id = ?",
+      args: [command.approvalCaseId],
+    });
+    const customerEmail = caseRow.rows[0]
+      ? (
+          JSON.parse(String(caseRow.rows[0].data)) as {
+            customer?: { email?: string };
+          }
+        ).customer?.email
+      : undefined;
+    const subscription = await this.findSubscription(
+      command.binding,
+      customerEmail ?? "",
+    );
+    if (
+      !subscription ||
+      subscription.subscriptionId !== command.subscriptionId ||
+      subscription.customerId !== command.customerId ||
+      subscription.status !== "active" ||
+      subscription.cancelAtPeriodEnd ||
+      subscription.recurringInterval !== "month" ||
+      subscription.recurringIntervalCount !== 1 ||
+      subscription.quantity !== 1 ||
+      subscription.amount.currency !== command.amount.currency ||
+      subscription.amount.minor !== command.amount.minor
+    )
+      throw new Error(
+        "Subscription credit requires one verified active monthly subscription with its exact monthly charge.",
+      );
+    const prior = await this.client.execute({
+      sql: "SELECT 1 FROM local_subscription_credits WHERE tenant_id = ? AND provider_account_id = ? AND customer_id = ? AND subscription_id = ? LIMIT 1",
+      args: [
+        command.binding.tenantId,
+        command.binding.providerAccountId,
+        command.customerId,
+        command.subscriptionId,
+      ],
+    });
+    if (prior.rows[0])
+      throw new Error(
+        "A prior subscription credit exists for this customer and subscription and requires specialist review.",
+      );
+    return {
+      approvedAmount: command.amount,
+      commandFingerprint: fingerprint,
+    };
+  }
+  async issueSubscriptionCredit(
+    command: SubscriptionCreditCommand,
+    authorization?: NativeRefundExecutionAuthorization,
+  ): Promise<SubscriptionCreditEffect> {
+    await this.ensured();
+    if (
+      !Number.isSafeInteger(command.amount.minor) ||
+      command.amount.minor <= 0 ||
+      subscriptionCreditFingerprint(command) !== command.fingerprint
+    )
+      throw new Error(
+        "Subscription credit command was invalid or tampered with.",
+      );
+    const tx = await this.client.transaction("write");
+    try {
+      const row = await tx.execute({
+        sql: "SELECT data FROM support_cases WHERE id = ?",
+        args: [command.approvalCaseId],
+      });
+      const supportCase = row.rows[0]
+        ? (JSON.parse(String(row.rows[0].data)) as {
+            approval?: {
+              approved?: boolean;
+              serviceProblemConfirmed?: true;
+            };
+            customer?: { email?: string };
+            draft?: { requiresEscalation?: boolean };
+            metadata?: {
+              ownerId?: string;
+              nativeApproval?: {
+                runId?: string;
+                toolCallId?: string;
+                fingerprint?: string;
+                turnId?: string;
+              };
+            };
+          })
+        : undefined;
+      const native = supportCase?.metadata?.nativeApproval;
+      const action = await tx.execute({
+        sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = ? AND fingerprint = ?",
+        args: [
+          command.approvalCaseId,
+          "subscription-credit-command",
+          command.fingerprint,
+        ],
+      });
+      const decision = native?.turnId
+        ? await tx.execute({
+            sql: "SELECT command_fingerprint, native_run_id, native_tool_call_id, principal_id, approved FROM support_decisions WHERE case_id = ? AND turn_id = ? AND command_fingerprint = ?",
+            args: [command.approvalCaseId, native.turnId, command.fingerprint],
+          })
+        : undefined;
+      const decisionRow = decision?.rows[0] as
+        Record<string, unknown> | undefined;
+      if (
+        !supportCase?.approval?.approved ||
+        !native?.runId ||
+        !native.toolCallId ||
+        native.fingerprint !== command.fingerprint ||
+        !hasNativeRefundExecutionAuthorization(authorization, {
+          nativeRunId: native.runId,
+          nativeToolCallId: native.toolCallId,
+          commandFingerprint: command.fingerprint,
+          caseId: command.approvalCaseId,
+        }) ||
+        !matchesPersistedSubscriptionCreditCommand(
+          action.rows[0] ? JSON.parse(String(action.rows[0].data)) : undefined,
+          command,
+        ) ||
+        !decisionRow ||
+        Number(decisionRow.approved) !== 1 ||
+        String(decisionRow.command_fingerprint) !== command.fingerprint ||
+        String(decisionRow.native_run_id) !== native.runId ||
+        String(decisionRow.native_tool_call_id) !== native.toolCallId ||
+        !activePrincipalHasRole(
+          String(decisionRow.principal_id),
+          command.binding.tenantId,
+          "approver",
+        ) ||
+        authorization?.turnId !== native.turnId ||
+        supportCase.draft?.requiresEscalation
+      )
+        throw new Error(
+          "Subscription credit requires the authorized native decision and immutable command.",
+        );
+      const lease = await tx.execute({
+        sql: "SELECT id FROM support_dispatch WHERE id = ? AND case_id = ? AND turn_id = ? AND lease_token = ? AND state IN ('claimed', 'started') AND lease_until > ?",
+        args: [
+          authorization!.dispatchId,
+          command.approvalCaseId,
+          authorization!.turnId,
+          authorization!.leaseToken,
+          new Date().toISOString(),
+        ],
+      });
+      if (!lease.rows[0])
+        throw new Error(
+          "Subscription credit requires the current durable workflow dispatch lease.",
+        );
+      const replay = await tx.execute({
+        sql: "SELECT fingerprint, effect FROM support_idempotency WHERE idempotency_key = ?",
+        args: [command.idempotencyKey],
+      });
+      if (replay.rows[0]) {
+        if (text(replay.rows[0].fingerprint) !== command.fingerprint)
+          throw new Error(
+            "Idempotency key was reused with a conflicting subscription credit command.",
+          );
+        const effect = JSON.parse(
+          text(replay.rows[0].effect),
+        ) as SubscriptionCreditEffect;
+        if (isFinancialRetentionTombstone(effect))
+          throw new Error(
+            "A retained terminal financial tombstone blocks replay or a new provider effect.",
+          );
+        await tx.rollback();
+        return { ...effect, replayed: true };
+      }
+      // The confirmation is required only to create a new effect. An existing
+      // idempotent effect above remains recoverable after an application
+      // upgrade, without manufacturing a new approval decision.
+      if (!supportCase.approval?.serviceProblemConfirmed)
+        throw new Error(
+          "Subscription credit requires the approver to confirm the reported service problem.",
+        );
+      await assertRefundPolicyEvidenceAtFirstEffect(tx, command, native.turnId);
+      const subscriptionRows = await tx.execute({
+        sql: "SELECT * FROM local_subscriptions WHERE tenant_id = ? AND provider_account_id = ? AND subscription_id = ?",
+        args: [
+          command.binding.tenantId,
+          command.binding.providerAccountId,
+          command.subscriptionId,
+        ],
+      });
+      const subscription = subscriptionRows.rows[0] as
+        Record<string, unknown> | undefined;
+      const email = supportCase.customer?.email?.toLowerCase();
+      if (
+        !subscription ||
+        !email ||
+        text(subscription.customer_email).toLowerCase() !== email ||
+        command.customerId !== `local:${command.binding.tenantId}:${email}` ||
+        text(subscription.status) !== "active" ||
+        Number(subscription.cancel_at_period_end) === 1 ||
+        text(subscription.recurring_interval) !== "month" ||
+        Number(subscription.recurring_interval_count) !== 1 ||
+        Number(subscription.quantity) !== 1 ||
+        text(subscription.currency) !== command.amount.currency ||
+        Number(subscription.amount_minor) !== command.amount.minor
+      )
+        throw new Error(
+          "Subscription credit requires an exact verified active monthly subscription.",
+        );
+      const priorCredit = await tx.execute({
+        sql: "SELECT 1 FROM local_subscription_credits WHERE tenant_id = ? AND provider_account_id = ? AND customer_id = ? AND subscription_id = ? LIMIT 1",
+        args: [
+          command.binding.tenantId,
+          command.binding.providerAccountId,
+          command.customerId,
+          command.subscriptionId,
+        ],
+      });
+      if (priorCredit.rows[0])
+        throw new Error(
+          "A prior subscription credit exists for this customer and subscription and requires specialist review.",
+        );
+      const executedAt = new Date().toISOString();
+      const effect: SubscriptionCreditEffect = {
+        creditId: `CR-${crypto.randomUUID()}`,
+        customerId: command.customerId,
+        subscriptionId: command.subscriptionId,
+        amount: command.amount,
+        idempotencyKey: command.idempotencyKey,
+        executedAt,
+        replayed: false,
+        status: "succeeded",
+        providerStatus: "created",
+      };
+      await tx.execute({
+        sql: "INSERT INTO local_subscription_credits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        args: [
+          effect.creditId,
+          command.binding.tenantId,
+          command.binding.providerAccountId,
+          effect.customerId,
+          effect.subscriptionId,
+          effect.amount.minor,
+          effect.amount.currency,
+          command.reason,
+          executedAt,
+        ],
+      });
+      await tx.execute({
+        sql: "INSERT INTO support_idempotency(idempotency_key, fingerprint, effect, created_at) VALUES (?, ?, ?, ?)",
+        args: [
+          command.idempotencyKey,
+          command.fingerprint,
+          JSON.stringify(effect),
+          executedAt,
+        ],
+      });
+      await tx.commit();
+      return effect;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
+  async retrieveSubscriptionCredit(command: SubscriptionCreditCommand) {
+    const replay = await this.client.execute({
+      sql: "SELECT fingerprint, effect FROM support_idempotency WHERE idempotency_key = ?",
+      args: [command.idempotencyKey],
+    });
+    const row = replay.rows[0] as Record<string, unknown> | undefined;
+    if (!row || text(row.fingerprint) !== command.fingerprint) return undefined;
+    const effect = JSON.parse(text(row.effect)) as SubscriptionCreditEffect;
+    return effect.creditId && effect.subscriptionId === command.subscriptionId
+      ? { ...effect, replayed: true }
+      : undefined;
+  }
   async scheduleSubscriptionCancellation(
     command: SubscriptionCancellationCommand,
   ): Promise<SubscriptionCancellationEffect> {
     await this.ensured();
     const supportCase = await caseStore.get(command.caseId);
     const owner = supportCase
-      ? ownerIdForCustomer(command.binding.tenantId, supportCase.customer.email)
+      ? await caseStore.canonicalConversationOwner({
+          caseId: command.caseId,
+          binding: bindingsForCase(supportCase).support,
+        })
       : undefined;
     if (
       !supportCase ||
@@ -573,7 +899,10 @@ export class LocalRuntime
     await this.ensured();
     const supportCase = await caseStore.get(command.caseId);
     const owner = supportCase
-      ? ownerIdForCustomer(command.binding.tenantId, supportCase.customer.email)
+      ? await caseStore.canonicalConversationOwner({
+          caseId: command.caseId,
+          binding: bindingsForCase(supportCase).support,
+        })
       : undefined;
     const turn = await caseStore.turn(command.caseId, command.turnId);
     const immutable = await caseStore.getAction(

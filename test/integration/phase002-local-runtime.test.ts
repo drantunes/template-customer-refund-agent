@@ -15,6 +15,7 @@ import {
   money,
   moneyToLegacyAmount,
   refundFingerprint,
+  subscriptionCreditFingerprint,
 } from "../../src/mastra/lib/money";
 import {
   deliverOutbox,
@@ -127,6 +128,69 @@ async function approvedCommand(store: CaseStore, key: string, minor: number) {
   });
   return command;
 }
+async function approvedSubscriptionCreditCommand(
+  store: CaseStore,
+  key: string,
+) {
+  const amount = money("USD", 4900);
+  const base = {
+    approvalCaseId: `credit-${key}`,
+    binding,
+    customerId: "local:local-demo:alex@example.com",
+    subscriptionId: "SUB-1001",
+    amount,
+    reason: "service_problem",
+    idempotencyKey: `credit-${key}`,
+  };
+  const command = {
+    ...base,
+    fingerprint: subscriptionCreditFingerprint(base),
+  };
+  const turnId = `native-credit-turn-${key}`;
+  const nativeRunId = `native-credit-run-${key}`;
+  const nativeToolCallId = `native-credit-call-${key}`;
+  await store.create({
+    ...supportCase(base.approvalCaseId),
+    status: "waiting_approval",
+    approval: { approved: true, approverId: "approver-demo" },
+    metadata: {
+      providerBinding: binding,
+      subscriptionCreditCommand: {
+        approvalCaseId: base.approvalCaseId,
+        customerId: base.customerId,
+        subscriptionId: base.subscriptionId,
+        amount: moneyToLegacyAmount(base.amount),
+        currency: base.amount.currency,
+        reason: base.reason,
+        idempotencyKey: base.idempotencyKey,
+        fingerprint: command.fingerprint,
+      },
+      activeTurnId: turnId,
+      nativeApproval: {
+        runId: nativeRunId,
+        toolCallId: nativeToolCallId,
+        fingerprint: command.fingerprint,
+        turnId,
+      },
+    },
+  });
+  await store.saveAction(
+    base.approvalCaseId,
+    "subscription-credit-command",
+    command.fingerprint,
+    command,
+  );
+  await store.recordApprovalDecision({
+    caseId: base.approvalCaseId,
+    turnId,
+    commandFingerprint: command.fingerprint,
+    principalId: "approver-demo",
+    approved: true,
+    nativeRunId,
+    nativeToolCallId,
+  });
+  return command;
+}
 async function runtime() {
   const path = join(tmpdir(), `phase002-${crypto.randomUUID()}.db`);
   files.push(path, `${path}-shm`, `${path}-wal`);
@@ -190,7 +254,7 @@ describe("Phase 002 persistent local runtime", () => {
       .execute("INSERT INTO mastra_owned_probe VALUES ('keep')");
     await store.create(supportCase("legacy"));
     await expect(store.migrate(1)).rejects.toThrow(
-      "Refusing unsupported downgrade from support schema v22 to v1.",
+      "Refusing unsupported downgrade from support schema v26 to v1.",
     );
     expect((await store.get("legacy"))?.externalId).toBe("legacy");
     expect(
@@ -271,7 +335,7 @@ describe("Phase 002 persistent local runtime", () => {
     const { store } = await runtime();
     await store.create(supportCase("bad-migration"));
     await expect(store.migrate(3)).rejects.toThrow(
-      "Refusing unsupported downgrade from support schema v22 to v3.",
+      "Refusing unsupported downgrade from support schema v26 to v3.",
     );
     const versions = await store
       .getClient()
@@ -280,7 +344,7 @@ describe("Phase 002 persistent local runtime", () => {
       );
     expect(versions.rows.map((row) => Number(row.version))).toEqual([
       1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-      22,
+      22, 23, 24, 25, 26,
     ]);
     expect(
       await store
@@ -579,6 +643,30 @@ describe("Phase 002 persistent local runtime", () => {
     expect(results.every((result) => result.status === "rejected")).toBe(true);
     expect(await local.refunds(binding, "ORD-1001")).toEqual([]);
     secondClient.close();
+    await store.close();
+  });
+
+  it("quotes only the exact seeded monthly subscription and refuses a direct credit effect", async () => {
+    const { store, local } = await runtime();
+    await local.seed(binding);
+    const command = await approvedSubscriptionCreditCommand(store, "quote");
+    await expect(local.quoteSubscriptionCredit(command)).resolves.toEqual({
+      approvedAmount: money("USD", 4900),
+      commandFingerprint: command.fingerprint,
+    });
+    await expect(local.issueSubscriptionCredit(command)).rejects.toThrow(
+      "authorized native decision",
+    );
+    await expect(
+      local.quoteSubscriptionCredit({
+        ...command,
+        amount: money("USD", 1901),
+      }),
+    ).rejects.toThrow("fingerprint was tampered with");
+    const credits = await store.getClient().execute({
+      sql: "SELECT COUNT(*) AS total FROM local_subscription_credits",
+    });
+    expect(credits.rows[0]).toMatchObject({ total: 0 });
     await store.close();
   });
 

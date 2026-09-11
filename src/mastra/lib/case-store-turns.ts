@@ -298,8 +298,8 @@ export class CaseStoreTurns {
     const claimedAt = now();
     const leaseToken = crypto.randomUUID();
     const row = await this.client.execute({
-      sql: "SELECT * FROM support_dispatch WHERE case_id = ? AND (state = 'suspended' OR (state = 'claimed' AND lease_until < ?)) AND (? IS NULL OR turn_id = ?) ORDER BY created_at LIMIT 1",
-      args: [caseId, claimedAt, turnId ?? null, turnId ?? null],
+      sql: "SELECT * FROM support_dispatch d WHERE d.case_id = ? AND (d.state = 'suspended' OR (d.state = 'claimed' AND d.lease_until < ?)) AND (? IS NULL OR d.turn_id = ?) AND NOT EXISTS (SELECT 1 FROM support_stripe_refund_attempts r WHERE r.dispatch_id = d.id AND r.reconcile_lease_until > ?) ORDER BY d.created_at LIMIT 1",
+      args: [caseId, claimedAt, turnId ?? null, turnId ?? null, claimedAt],
     });
     if (!row.rows[0]) {
       // Phase 001 and direct Studio workflow runs may have a durable case/run
@@ -324,12 +324,12 @@ export class CaseStoreTurns {
       // A raced worker may have created or advanced the row.  Do one bounded
       // reread rather than recursively trying to insert forever.
       const backfilled = await this.client.execute({
-        sql: "SELECT * FROM support_dispatch WHERE case_id = ? AND state = 'suspended' AND (? IS NULL OR turn_id = ?) ORDER BY created_at LIMIT 1",
-        args: [caseId, turnId ?? null, turnId ?? null],
+        sql: "SELECT * FROM support_dispatch d WHERE d.case_id = ? AND d.state = 'suspended' AND (? IS NULL OR d.turn_id = ?) AND NOT EXISTS (SELECT 1 FROM support_stripe_refund_attempts r WHERE r.dispatch_id = d.id AND r.reconcile_lease_until > ?) ORDER BY d.created_at LIMIT 1",
+        args: [caseId, turnId ?? null, turnId ?? null, claimedAt],
       });
       if (!backfilled.rows[0]) return undefined;
       const update = await this.client.execute({
-        sql: "UPDATE support_dispatch SET state = 'claimed', lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND case_id = ? AND turn_id = ? AND (state = 'suspended' OR (state = 'claimed' AND lease_until < ?))",
+        sql: "UPDATE support_dispatch SET state = 'claimed', lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND case_id = ? AND turn_id = ? AND (state = 'suspended' OR (state = 'claimed' AND lease_until < ?)) AND NOT EXISTS (SELECT 1 FROM support_stripe_refund_attempts r WHERE r.dispatch_id = support_dispatch.id AND r.reconcile_lease_until > ?)",
         args: [
           dispatchLeaseUntil(),
           leaseToken,
@@ -337,6 +337,7 @@ export class CaseStoreTurns {
           String(backfilled.rows[0].id),
           caseId,
           turnId ?? `legacy:${caseId}`,
+          claimedAt,
           claimedAt,
         ],
       });
@@ -354,7 +355,7 @@ export class CaseStoreTurns {
       };
     }
     const update = await this.client.execute({
-      sql: "UPDATE support_dispatch SET state = 'claimed', lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND case_id = ? AND turn_id = ? AND (state = 'suspended' OR (state = 'claimed' AND lease_until < ?))",
+      sql: "UPDATE support_dispatch SET state = 'claimed', lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND case_id = ? AND turn_id = ? AND (state = 'suspended' OR (state = 'claimed' AND lease_until < ?)) AND NOT EXISTS (SELECT 1 FROM support_stripe_refund_attempts r WHERE r.dispatch_id = support_dispatch.id AND r.reconcile_lease_until > ?)",
       args: [
         dispatchLeaseUntil(),
         leaseToken,
@@ -362,6 +363,7 @@ export class CaseStoreTurns {
         String(row.rows[0].id),
         caseId,
         turnId ?? String(row.rows[0].turn_id),
+        claimedAt,
         claimedAt,
       ],
     });

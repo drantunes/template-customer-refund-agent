@@ -4,8 +4,9 @@ import {
   bindingsForCase,
   type RefundCommand,
   type SubscriptionCancellationCommand,
+  type SubscriptionCreditCommand,
 } from "../providers/contracts";
-import { ownerIdForCustomer } from "../server/auth";
+import { canonicalConversationOwner } from "./case-store-cases";
 import type { DispatchLeaseScope } from "./dispatch-lease-scope";
 import {
   now,
@@ -22,16 +23,16 @@ export class CaseStoreDispatch {
   async claimDispatch(limit = 10): Promise<DispatchRecord[]> {
     const claimedAt = now();
     const exhausted = await this.client.execute({
-      sql: "SELECT case_id, id FROM support_dispatch WHERE state IN ('claimed', 'started') AND lease_until < ? AND attempts >= 3",
-      args: [claimedAt],
+      sql: "SELECT d.case_id, d.id FROM support_dispatch d WHERE d.state IN ('claimed', 'started') AND d.lease_until < ? AND d.attempts >= 3 AND NOT EXISTS (SELECT 1 FROM support_stripe_refund_attempts r WHERE r.dispatch_id = d.id AND r.reconcile_lease_until > ?)",
+      args: [claimedAt, claimedAt],
     });
     for (const row of exhausted.rows) {
       const caseId = String(row.case_id);
       const tx = await this.client.transaction("write");
       try {
         const changed = await tx.execute({
-          sql: "UPDATE support_dispatch SET state = 'failed', lease_until = NULL, lease_token = NULL, last_error = COALESCE(last_error, 'Dispatch lease exhausted after three attempts.'), updated_at = ? WHERE case_id = ? AND state IN ('claimed', 'started') AND lease_until < ? AND attempts >= 3",
-          args: [claimedAt, caseId, claimedAt],
+          sql: "UPDATE support_dispatch SET state = 'failed', lease_until = NULL, lease_token = NULL, last_error = COALESCE(last_error, 'Dispatch lease exhausted after three attempts.'), updated_at = ? WHERE case_id = ? AND state IN ('claimed', 'started') AND lease_until < ? AND attempts >= 3 AND NOT EXISTS (SELECT 1 FROM support_stripe_refund_attempts r WHERE r.dispatch_id = support_dispatch.id AND r.reconcile_lease_until > ?)",
+          args: [claimedAt, caseId, claimedAt, claimedAt],
         });
         if (Number(changed.rowsAffected) === 1) {
           const caseRow = await tx.execute({
@@ -89,15 +90,22 @@ export class CaseStoreDispatch {
     }
     const leaseUntil = dispatchLeaseUntil();
     const rows = await this.client.execute({
-      sql: "SELECT candidate.* FROM support_dispatch AS candidate JOIN support_turns AS candidate_turn ON candidate_turn.id = candidate.turn_id WHERE (candidate.state = 'pending' OR (candidate.state IN ('claimed', 'started') AND candidate.lease_until < ?)) AND candidate.attempts < 3 AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS earlier JOIN support_turns AS earlier_turn ON earlier_turn.id = earlier.turn_id WHERE earlier.case_id = candidate.case_id AND earlier.state = 'pending' AND earlier_turn.sequence < candidate_turn.sequence) ORDER BY candidate.created_at, candidate_turn.sequence, candidate.id LIMIT ?",
-      args: [claimedAt, limit],
+      sql: "SELECT candidate.* FROM support_dispatch AS candidate JOIN support_turns AS candidate_turn ON candidate_turn.id = candidate.turn_id WHERE (candidate.state = 'pending' OR (candidate.state IN ('claimed', 'started') AND candidate.lease_until < ?)) AND candidate.attempts < 3 AND NOT EXISTS (SELECT 1 FROM support_stripe_refund_attempts r WHERE r.dispatch_id = candidate.id AND r.reconcile_lease_until > ?) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS earlier JOIN support_turns AS earlier_turn ON earlier_turn.id = earlier.turn_id WHERE earlier.case_id = candidate.case_id AND earlier.state = 'pending' AND earlier_turn.sequence < candidate_turn.sequence) ORDER BY candidate.created_at, candidate_turn.sequence, candidate.id LIMIT ?",
+      args: [claimedAt, claimedAt, limit],
     });
     const claimed: DispatchRecord[] = [];
     for (const row of rows.rows) {
       const leaseToken = crypto.randomUUID();
       const update = await this.client.execute({
-        sql: "UPDATE support_dispatch AS candidate SET state = 'claimed', attempts = attempts + 1, lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND (state = 'pending' OR (state IN ('claimed', 'started') AND lease_until < ?)) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS earlier JOIN support_turns AS earlier_turn ON earlier_turn.id = earlier.turn_id JOIN support_turns AS candidate_turn ON candidate_turn.id = candidate.turn_id WHERE earlier.case_id = candidate.case_id AND earlier.state = 'pending' AND earlier_turn.sequence < candidate_turn.sequence)",
-        args: [leaseUntil, leaseToken, claimedAt, String(row.id), claimedAt],
+        sql: "UPDATE support_dispatch AS candidate SET state = 'claimed', attempts = attempts + 1, lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND (state = 'pending' OR (state IN ('claimed', 'started') AND lease_until < ?)) AND NOT EXISTS (SELECT 1 FROM support_stripe_refund_attempts r WHERE r.dispatch_id = candidate.id AND r.reconcile_lease_until > ?) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS active WHERE active.case_id = candidate.case_id AND active.id <> candidate.id AND active.state IN ('claimed', 'started', 'suspended')) AND NOT EXISTS (SELECT 1 FROM support_dispatch AS earlier JOIN support_turns AS earlier_turn ON earlier_turn.id = earlier.turn_id JOIN support_turns AS candidate_turn ON candidate_turn.id = candidate.turn_id WHERE earlier.case_id = candidate.case_id AND earlier.state = 'pending' AND earlier_turn.sequence < candidate_turn.sequence)",
+        args: [
+          leaseUntil,
+          leaseToken,
+          claimedAt,
+          String(row.id),
+          claimedAt,
+          claimedAt,
+        ],
       });
       if (Number(update.rowsAffected) === 1)
         claimed.push({
@@ -193,13 +201,16 @@ export class CaseStoreDispatch {
       const request = attempt?.stripe_request_data
         ? JSON.parse(String(attempt.stripe_request_data))
         : undefined;
+      const canonicalOwner = supportCase
+        ? await canonicalConversationOwner(tx, {
+            caseId: command.approvalCaseId,
+            binding: bindingsForCase(supportCase).support,
+          })
+        : undefined;
       const ownerCurrent =
         supportCase &&
-        supportCase.metadata.ownerId === input.ownerId &&
-        ownerIdForCustomer(
-          command.binding.tenantId,
-          supportCase.customer.email,
-        ) === input.ownerId;
+        canonicalOwner === input.ownerId &&
+        supportCase.metadata.ownerId === canonicalOwner;
       const commandCurrent =
         attempt &&
         ["prepared", "unknown"].includes(String(attempt.status)) &&
@@ -257,6 +268,103 @@ export class CaseStoreDispatch {
       // in flight. A stale worker must observe that current prohibition at
       // the same transaction boundary as its lease and command checks.
       if (supportCase.draft?.requiresEscalation) {
+        await tx.rollback();
+        return false;
+      }
+      await input.validatePolicy(tx);
+      await tx.commit();
+      return true;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
+  /**
+   * The credit ledger is written before Stripe's balance-transaction POST so a
+   * lost response can be reconciled safely. That durable preparation is not
+   * authority for a new effect: re-check the immutable command, current lease,
+   * and published policy in one transaction immediately before that first POST.
+   */
+  async authorizeStripeSubscriptionCreditFirstEffect(input: {
+    command: SubscriptionCreditCommand;
+    dispatch: DispatchLeaseScope;
+    validatePolicy: (
+      tx: Awaited<ReturnType<Client["transaction"]>>,
+    ) => Promise<void>;
+  }) {
+    const tx = await this.client.transaction("write");
+    try {
+      const command = input.command;
+      const attemptResult = await tx.execute({
+        sql: "SELECT * FROM support_stripe_subscription_credit_attempts WHERE idempotency_key = ? AND command_fingerprint = ?",
+        args: [command.idempotencyKey, command.fingerprint],
+      });
+      const attempt = attemptResult.rows[0] as
+        Record<string, unknown> | undefined;
+      const caseResult = await tx.execute({
+        sql: "SELECT data FROM support_cases WHERE id = ?",
+        args: [command.approvalCaseId],
+      });
+      const supportCase = caseResult.rows[0]
+        ? parse({ data: caseResult.rows[0].data })
+        : undefined;
+      const actionResult = await tx.execute({
+        sql: "SELECT data FROM support_actions WHERE case_id = ? AND kind = 'subscription-credit-command' AND fingerprint = ?",
+        args: [command.approvalCaseId, command.fingerprint],
+      });
+      const immutable = actionResult.rows[0]
+        ? JSON.parse(String(actionResult.rows[0].data))
+        : undefined;
+      const turnResult = await tx.execute({
+        sql: "SELECT command_fingerprint FROM support_turns WHERE id = ? AND case_id = ?",
+        args: [String(attempt?.turn_id ?? ""), command.approvalCaseId],
+      });
+      const dispatch = await tx.execute({
+        sql: "SELECT id FROM support_dispatch WHERE id = ? AND case_id = ? AND turn_id = ? AND lease_token = ? AND state IN ('claimed', 'started') AND lease_until > ?",
+        args: [
+          input.dispatch.dispatchId,
+          input.dispatch.caseId,
+          input.dispatch.turnId,
+          input.dispatch.leaseToken,
+          now(),
+        ],
+      });
+      const commandCurrent =
+        attempt &&
+        String(attempt.status) === "prepared" &&
+        String(attempt.case_id) === command.approvalCaseId &&
+        String(attempt.tenant_id) === command.binding.tenantId &&
+        String(attempt.provider_account_id) ===
+          command.binding.providerAccountId &&
+        String(attempt.command_fingerprint) === command.fingerprint &&
+        structurallyEqual(
+          attempt.command_data
+            ? JSON.parse(String(attempt.command_data))
+            : undefined,
+          command,
+        ) &&
+        structurallyEqual(immutable, command) &&
+        String(turnResult.rows[0]?.command_fingerprint ?? "") ===
+          command.fingerprint &&
+        supportCase !== undefined &&
+        structurallyEqual(
+          bindingsForCase(supportCase).transactions,
+          command.binding,
+        );
+      const leaseCurrent =
+        Boolean(dispatch.rows[0]) &&
+        String(attempt?.dispatch_id ?? "") === input.dispatch.dispatchId &&
+        String(attempt?.lease_token ?? "") === input.dispatch.leaseToken &&
+        String(attempt?.turn_id ?? "") === input.dispatch.turnId &&
+        supportCase?.metadata.activeTurnId === input.dispatch.turnId;
+      if (
+        !commandCurrent ||
+        !leaseCurrent ||
+        !supportCase.approval?.serviceProblemConfirmed ||
+        supportCase.draft?.requiresEscalation
+      ) {
         await tx.rollback();
         return false;
       }
@@ -336,10 +444,10 @@ export class CaseStoreDispatch {
         supportCase !== undefined &&
         supportCase.metadata.activeTurnId === command.turnId &&
         supportCase.metadata.ownerId === command.ownerId &&
-        ownerIdForCustomer(
-          command.binding.tenantId,
-          supportCase.customer.email,
-        ) === command.ownerId &&
+        (await canonicalConversationOwner(tx, {
+          caseId: command.caseId,
+          binding: bindingsForCase(supportCase).support,
+        })) === command.ownerId &&
         structurallyEqual(
           bindingsForCase(supportCase).transactions,
           command.binding,
@@ -432,6 +540,7 @@ export class CaseStoreDispatch {
             draft: current?.draft,
             approval: current?.approval,
             refundResult: current?.refundResult,
+            subscriptionCreditResult: current?.subscriptionCreditResult,
             finalResponse: current?.finalResponse,
             escalationReason: String(error),
             workflowRunId: current?.workflowRunId,
@@ -572,6 +681,7 @@ export class CaseStoreDispatch {
               draft: current.draft,
               approval: current.approval,
               refundResult: current.refundResult,
+              subscriptionCreditResult: current.subscriptionCreditResult,
               finalResponse: current.finalResponse,
               escalationReason: current.escalationReason,
               workflowRunId: current.workflowRunId,
@@ -594,6 +704,9 @@ export class CaseStoreDispatch {
         draft: switchesTurn ? undefined : current.draft,
         approval: switchesTurn ? undefined : current.approval,
         refundResult: switchesTurn ? undefined : current.refundResult,
+        subscriptionCreditResult: switchesTurn
+          ? undefined
+          : current.subscriptionCreditResult,
         finalResponse: switchesTurn ? undefined : current.finalResponse,
         escalationReason: switchesTurn ? undefined : current.escalationReason,
         traceId: switchesTurn ? undefined : current.traceId,
@@ -606,8 +719,10 @@ export class CaseStoreDispatch {
           ...(switchesTurn
             ? {
                 refundCommand: undefined,
+                subscriptionCreditCommand: undefined,
                 nativeApproval: undefined,
                 refundEffects: undefined,
+                subscriptionCreditEffects: undefined,
               }
             : {}),
         },

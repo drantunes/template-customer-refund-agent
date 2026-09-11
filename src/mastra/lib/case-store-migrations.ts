@@ -6,7 +6,7 @@ import { now, parseLegacyCase, caseBinding } from "./case-store-shared";
 
 export class CaseStoreMigrations {
   constructor(private readonly client: Client) {}
-  async migrate(target = 22): Promise<void> {
+  async migrate(target = 26): Promise<void> {
     await this.client.execute(
       "CREATE TABLE IF NOT EXISTS support_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
     );
@@ -14,7 +14,7 @@ export class CaseStoreMigrations {
       "SELECT version FROM support_schema_migrations ORDER BY version",
     );
     let version = Number(applied.rows.at(-1)?.version ?? 0);
-    if (!Number.isInteger(target) || target < 0 || target > 22)
+    if (!Number.isInteger(target) || target < 0 || target > 26)
       throw new Error("Unsupported support schema target version.");
     // Versions 6 through 8 introduced append-only turn, decision, and audit
     // records. Their inverse would discard or weaken durable financial/replay
@@ -127,6 +127,22 @@ export class CaseStoreMigrations {
     }
     if (version === 22) {
       await this.up22();
+      return;
+    }
+    if (version === 23) {
+      await this.up23();
+      return;
+    }
+    if (version === 24) {
+      await this.up24();
+      return;
+    }
+    if (version === 25) {
+      await this.up25();
+      return;
+    }
+    if (version === 26) {
+      await this.up26();
       return;
     }
     if (version === 14) {
@@ -904,6 +920,160 @@ export class CaseStoreMigrations {
     `);
     await this.client.execute({
       sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (22, ?)",
+      args: [now()],
+    });
+  }
+  /** CREDIT is a separate financial action, but Stripe's bounded idempotency
+   * window creates the same crash boundary as refunds. Persist its exact
+   * command before POST so recovery can search the customer's balance ledger
+   * instead of ever issuing a second credit blindly. */
+  private async up23() {
+    await this.client.executeMultiple(`
+      CREATE TABLE IF NOT EXISTS support_stripe_subscription_credit_attempts (
+        id TEXT PRIMARY KEY,
+        case_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        provider_account_id TEXT NOT NULL,
+        command_fingerprint TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        dispatch_id TEXT NOT NULL,
+        lease_token TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        command_data TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('prepared','succeeded','unknown','quarantined')),
+        credit_id TEXT,
+        provider_status TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS support_stripe_credit_attempt_command
+        ON support_stripe_subscription_credit_attempts(case_id, command_fingerprint);
+    `);
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (23, ?)",
+      args: [now()],
+    });
+  }
+  /** A customer/subscription credit is compensation, not a per-case effect.
+   * Reserve that target before any provider preflight so separately approved
+   * cases cannot both observe an empty Stripe ledger and post twice. */
+  private async up24() {
+    const tx = await this.client.transaction("write");
+    try {
+      await tx.executeMultiple(`
+      CREATE TABLE support_stripe_subscription_credit_attempts_v24 (
+        id TEXT PRIMARY KEY,
+        case_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        provider_account_id TEXT NOT NULL,
+        command_fingerprint TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        dispatch_id TEXT NOT NULL,
+        lease_token TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        command_data TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('prepared','succeeded','unknown','failed','quarantined')),
+        credit_id TEXT,
+        provider_status TEXT,
+        terminal_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO support_stripe_subscription_credit_attempts_v24(id, case_id, tenant_id, provider_account_id, command_fingerprint, idempotency_key, dispatch_id, lease_token, turn_id, command_data, status, credit_id, provider_status, terminal_at, created_at, updated_at)
+        SELECT id, case_id, tenant_id, provider_account_id, command_fingerprint, idempotency_key, dispatch_id, lease_token, turn_id, command_data, status, credit_id, provider_status,
+          CASE WHEN status IN ('succeeded','quarantined') THEN updated_at ELSE NULL END,
+          created_at, updated_at
+        FROM support_stripe_subscription_credit_attempts;
+      DROP TABLE support_stripe_subscription_credit_attempts;
+      ALTER TABLE support_stripe_subscription_credit_attempts_v24 RENAME TO support_stripe_subscription_credit_attempts;
+      CREATE UNIQUE INDEX support_stripe_credit_attempt_command
+        ON support_stripe_subscription_credit_attempts(case_id, command_fingerprint);
+      CREATE TABLE IF NOT EXISTS support_stripe_subscription_credit_reservations (
+        tenant_id TEXT NOT NULL,
+        provider_account_id TEXT NOT NULL,
+        customer_id TEXT NOT NULL,
+        subscription_id TEXT NOT NULL,
+        case_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        command_fingerprint TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL CHECK(status IN ('prepared','succeeded','unknown','failed','quarantined')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(tenant_id, provider_account_id, customer_id, subscription_id)
+      );
+      CREATE INDEX IF NOT EXISTS support_stripe_credit_reservation_retention
+        ON support_stripe_subscription_credit_reservations(status, updated_at);
+      INSERT OR IGNORE INTO support_stripe_subscription_credit_reservations(tenant_id, provider_account_id, customer_id, subscription_id, case_id, turn_id, command_fingerprint, idempotency_key, status, created_at, updated_at)
+        SELECT tenant_id, provider_account_id,
+          json_extract(command_data, '$.customerId'), json_extract(command_data, '$.subscriptionId'),
+          case_id, turn_id, command_fingerprint, idempotency_key, status, created_at, updated_at
+        FROM support_stripe_subscription_credit_attempts
+        WHERE json_extract(command_data, '$.customerId') IS NOT NULL
+          AND json_extract(command_data, '$.subscriptionId') IS NOT NULL;
+      `);
+      await tx.execute({
+        sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (24, ?)",
+        args: [now()],
+      });
+      await tx.commit();
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
+  /** Manual support resolution is a non-financial command.  Its immutable
+   * receipt and ordered provider intents are deliberately separate from the
+   * workflow finalizer and from approval/ledger records. */
+  private async up25() {
+    await this.client.executeMultiple(`
+      CREATE TABLE IF NOT EXISTS support_manual_resolutions (
+        id TEXT PRIMARY KEY,
+        case_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        expected_version INTEGER NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        note_message_id TEXT NOT NULL,
+        note_outbox_id TEXT NOT NULL,
+        close_outbox_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(tenant_id, idempotency_key)
+      );
+      CREATE INDEX IF NOT EXISTS support_manual_resolutions_case
+        ON support_manual_resolutions(case_id, created_at DESC);
+      CREATE TABLE IF NOT EXISTS support_intercom_close_intents (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        provider_account_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        external_conversation_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending','claimed','applied','superseded','deferred')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        lease_token TEXT,
+        lease_until TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(tenant_id, provider_account_id, event_id)
+      );
+      CREATE INDEX IF NOT EXISTS support_intercom_close_intents_claimable
+        ON support_intercom_close_intents(state, lease_until, created_at);
+    `);
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (25, ?)",
+      args: [now()],
+    });
+  }
+  /** Keep provider-close audit data append-only and independent of the case
+   * projection so a later customer follow-up remains authoritative. */
+  private async up26() {
+    await this.client.execute({
+      sql: "INSERT INTO support_schema_migrations(version, applied_at) VALUES (26, ?)",
       args: [now()],
     });
   }

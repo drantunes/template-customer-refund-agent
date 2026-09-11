@@ -117,6 +117,7 @@ export class CaseStoreRetention {
           supportCase.status,
         );
         const command = metadata.refundCommand;
+        const subscriptionCreditCommand = metadata.subscriptionCreditCommand;
         updated = {
           ...updated,
           customer: { email: "redacted@invalid.local" },
@@ -156,6 +157,19 @@ export class CaseStoreRetention {
                           fingerprint: command.fingerprint,
                           ...(command.idempotencyKey
                             ? { idempotencyKey: command.idempotencyKey }
+                            : {}),
+                        },
+                      }
+                    : {}),
+                  ...(subscriptionCreditCommand?.fingerprint
+                    ? {
+                        subscriptionCreditCommand: {
+                          fingerprint: subscriptionCreditCommand.fingerprint,
+                          ...(subscriptionCreditCommand.idempotencyKey
+                            ? {
+                                idempotencyKey:
+                                  subscriptionCreditCommand.idempotencyKey,
+                              }
                             : {}),
                         },
                       }
@@ -273,6 +287,15 @@ export class CaseStoreRetention {
     } catch (error) {
       if (!String(error).includes("no such table")) throw error;
     }
+    try {
+      const creditReasons = await this.client.execute({
+        sql: "UPDATE local_subscription_credits SET reason = '[redacted]' WHERE issued_at < ? AND reason <> '[redacted]'",
+        args: [caseCutoff],
+      });
+      financialReasonsRedacted += Number(creditReasons.rowsAffected ?? 0);
+    } catch (error) {
+      if (!String(error).includes("no such table")) throw error;
+    }
     // Stripe attempts retain an immutable command for reconciliation, but its
     // free-form reason is customer content and follows the normal case window.
     try {
@@ -281,6 +304,11 @@ export class CaseStoreRetention {
         args: [caseCutoff],
       });
       financialReasonsRedacted += Number(stripeReasons.rowsAffected ?? 0);
+      const stripeCreditReasons = await this.client.execute({
+        sql: "UPDATE support_stripe_subscription_credit_attempts SET command_data = json_set(command_data, '$.reason', '[redacted]') WHERE created_at < ? AND command_data IS NOT NULL AND json_extract(command_data, '$.reason') <> '[redacted]'",
+        args: [caseCutoff],
+      });
+      financialReasonsRedacted += Number(stripeCreditReasons.rowsAffected ?? 0);
       // At the financial-audit boundary provider IDs and immutable command
       // metadata are no longer retained. Before removing a terminal attempt,
       // irreversibly replace any effect with a non-executable tombstone. The
@@ -301,6 +329,18 @@ export class CaseStoreRetention {
       await this.client.execute({
         sql: "DELETE FROM support_stripe_webhook_receipts WHERE created_at < ? AND state IN ('completed', 'failed')",
         args: [rawCutoff],
+      });
+      // Reverse-close hints carry external conversation identifiers. Retain a
+      // live lease for recovery, but drop terminal dedupe records at the same
+      // webhook boundary. Manual command receipts are case-scoped audit data,
+      // so their replay metadata cannot outlive the case-content window.
+      await this.client.execute({
+        sql: "DELETE FROM support_intercom_close_intents WHERE created_at < ? AND state IN ('applied', 'superseded')",
+        args: [rawCutoff],
+      });
+      await this.client.execute({
+        sql: "DELETE FROM support_manual_resolutions WHERE created_at < ?",
+        args: [caseCutoff],
       });
     } catch (error) {
       if (!String(error).includes("no such table")) throw error;
@@ -345,6 +385,10 @@ export class CaseStoreRetention {
           sql: "SELECT idempotency_key, fingerprint, created_at FROM support_subscription_cancellation_attempts WHERE status IN ('scheduled', 'failed', 'quarantined') AND COALESCE(terminal_at, created_at) < ?",
           args: [auditCutoff],
         }),
+        tx.execute({
+          sql: "SELECT idempotency_key, command_fingerprint AS fingerprint, created_at FROM support_stripe_subscription_credit_attempts WHERE status IN ('succeeded', 'failed', 'quarantined') AND COALESCE(terminal_at, created_at) < ?",
+          args: [auditCutoff],
+        }),
       ]);
       for (const result of candidates)
         for (const row of result.rows) {
@@ -387,6 +431,14 @@ export class CaseStoreRetention {
       });
       await tx.execute({
         sql: "DELETE FROM support_subscription_cancellation_attempts WHERE status IN ('scheduled', 'failed', 'quarantined') AND COALESCE(terminal_at, created_at) < ?",
+        args: [auditCutoff],
+      });
+      await tx.execute({
+        sql: "DELETE FROM support_stripe_subscription_credit_reservations WHERE status IN ('succeeded', 'failed', 'quarantined') AND updated_at < ?",
+        args: [auditCutoff],
+      });
+      await tx.execute({
+        sql: "DELETE FROM support_stripe_subscription_credit_attempts WHERE status IN ('succeeded', 'failed', 'quarantined') AND COALESCE(terminal_at, created_at) < ?",
         args: [auditCutoff],
       });
       await tx.commit();

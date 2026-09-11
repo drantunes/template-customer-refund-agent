@@ -52,22 +52,34 @@ jobs:
         run: npm run test:eval
       - name: Backend build
         run: npm run build
+      - name: Customer demo format
+        run: npm run --workspace client-demo-ui format:check
+      - name: Customer demo style
+        run: npm run lint:demo
+      - name: Customer demo typecheck
+        run: npm run typecheck:demo
+      - name: Customer demo unit tests
+        run: npm run test:unit:demo
+      - name: Customer demo integration tests
+        run: npm run test:integration:demo
+      - name: Customer demo build
+        run: npm run build:demo
       - name: Frontend format
-        run: npm run --workspace support-refund-agent-web format:check
+        run: npm run --workspace support-demo-ui format:check
       - name: Frontend style
-        run: npm run --workspace support-refund-agent-web lint
+        run: npm run --workspace support-demo-ui lint
       - name: Frontend typecheck
-        run: npm run --workspace support-refund-agent-web typecheck
+        run: npm run --workspace support-demo-ui typecheck
       - name: Frontend unit tests
-        run: npm run --workspace support-refund-agent-web test:unit
+        run: npm run --workspace support-demo-ui test:unit
       - name: Frontend integration tests
-        run: npm run --workspace support-refund-agent-web test:integration
+        run: npm run --workspace support-demo-ui test:integration
       - name: Frontend contract tests
-        run: npm run --workspace support-refund-agent-web test:contract
+        run: npm run --workspace support-demo-ui test:contract
       - name: Frontend evals
-        run: npm run --workspace support-refund-agent-web test:eval
+        run: npm run --workspace support-demo-ui test:eval
       - name: Frontend build
-        run: npm run --workspace support-refund-agent-web build
+        run: npm run --workspace support-demo-ui build
       - name: Runtime check
         run: npm run check:runtime
       - name: Frozen install check

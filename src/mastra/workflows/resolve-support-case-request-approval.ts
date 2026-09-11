@@ -2,9 +2,14 @@ import { createStep } from "@mastra/core/workflows";
 import { z } from "zod";
 import { type SupportCase } from "../domain/support-case";
 import { persistedRefundCommandSchema } from "../domain/refund-command";
+import { persistedSubscriptionCreditCommandSchema } from "../domain/subscription-credit-command";
 import { STANDARD_REFUND_REVIEW_LIMIT } from "../domain/refund-review-limit";
 import { caseStore } from "../lib/case-store";
-import { legacyAmountToMoney, refundFingerprint } from "../lib/money";
+import {
+  legacyAmountToMoney,
+  refundFingerprint,
+  subscriptionCreditFingerprint,
+} from "../lib/money";
 import { traceOperationalPort } from "../lib/operational-spans";
 import {
   ensureProviderFixtures,
@@ -13,6 +18,7 @@ import {
 } from "../providers/registry";
 import { bindingsForPersistedCase } from "../runtime/provider-bindings";
 import { refundExecutionInputSchema } from "../tools/issue-refund";
+import { subscriptionCreditExecutionInputSchema } from "../tools/issue-subscription-credit";
 import {
   getActiveCaseOrThrow,
   resolveSupportCaseInputSchema,
@@ -76,6 +82,47 @@ async function recoveredApprovalDecision(
   if (!decision.approverId)
     throw new Error("The persisted approval decision is missing its approver.");
   if (decision.approved) {
+    const credit = persistedSubscriptionCreditCommandSchema.safeParse(
+      supportCase.metadata.subscriptionCreditCommand,
+    );
+    if (credit.success) {
+      const binding = resolveConfiguredBinding(
+        bindingsForPersistedCase(supportCase).transactions,
+      );
+      const amount = legacyAmountToMoney(
+        credit.data.amount,
+        credit.data.currency,
+      );
+      const fingerprint = subscriptionCreditFingerprint({
+        binding,
+        approvalCaseId: supportCase.id,
+        customerId: credit.data.customerId,
+        subscriptionId: credit.data.subscriptionId,
+        amount,
+        reason: credit.data.reason,
+        idempotencyKey: credit.data.idempotencyKey,
+      });
+      if (fingerprint !== credit.data.fingerprint)
+        throw new Error(
+          "The persisted subscription credit command fingerprint is invalid.",
+        );
+      const action = await caseStore.getAction(
+        supportCase.id,
+        "subscription-credit-command",
+        fingerprint,
+      );
+      if (!action)
+        throw new Error(
+          "The persisted subscription credit command is missing its immutable action.",
+        );
+      return {
+        caseId: supportCase.id,
+        turnId,
+        approved: decision.approved,
+        approverId: decision.approverId,
+        note: decision.note,
+      };
+    }
     const stored = persistedRefundCommandSchema.safeParse(
       supportCase.metadata.refundCommand,
     );
@@ -133,6 +180,7 @@ export const requestApprovalStep = createStep({
   }),
   suspendSchema: z.object({
     caseId: z.string(),
+    action: z.enum(["refund", "subscription_credit"]),
     refundAmount: z.number(),
     refundCurrency: z.string(),
     refundReason: z.string(),
@@ -155,7 +203,8 @@ export const requestApprovalStep = createStep({
     const bindings = bindingsForPersistedCase(supportCase);
     const draft = supportCase.draft;
 
-    if (!draft?.recommendRefund) {
+    const isCredit = draft?.resolutionAction === "subscription_credit";
+    if (!draft?.recommendRefund && !isCredit) {
       return {
         caseId: supportCase.id,
         turnId: inputData.turnId,
@@ -168,7 +217,7 @@ export const requestApprovalStep = createStep({
     // rule is repeated by LocalRuntime in its provider write transaction.
     if (
       draft.requiresEscalation ||
-      (draft.refundAmount ?? 0) > STANDARD_REFUND_REVIEW_LIMIT
+      (!isCredit && (draft.refundAmount ?? 0) > STANDARD_REFUND_REVIEW_LIMIT)
     ) {
       if (!draft.requiresEscalation)
         await caseStore.update(supportCase.id, {
@@ -191,6 +240,148 @@ export const requestApprovalStep = createStep({
         inputData.turnId,
       );
       if (recovered) return recovered;
+      if (isCredit) {
+        const subscription = supportCase.subscriptionLookup?.subscription;
+        const amount = draft.subscriptionCreditAmount ?? 0;
+        const currency = draft.subscriptionCreditCurrency ?? "USD";
+        const binding = resolveConfiguredBinding(bindings.transactions);
+        const customerId = subscription?.customerId;
+        if (
+          !subscription ||
+          !customerId ||
+          subscription.status !== "active" ||
+          subscription.cancelAtPeriodEnd ||
+          subscription.recurringInterval !== "month" ||
+          subscription.recurringIntervalCount !== 1 ||
+          subscription.quantity !== 1 ||
+          subscription.currency !== currency ||
+          subscription.amount !== amount
+        )
+          throw new Error(
+            "Subscription credit requires one verified active monthly subscription and its exact monthly amount.",
+          );
+        const turnId = inputData.turnId;
+        const immutableCommand = {
+          binding,
+          approvalCaseId: supportCase.id,
+          customerId,
+          subscriptionId: subscription.subscriptionId,
+          amount: legacyAmountToMoney(amount, currency),
+          reason:
+            draft.subscriptionCreditReason ??
+            "Approved service-problem subscription credit",
+          idempotencyKey: `${supportCase.id}:${turnId}:subscription-credit`,
+        };
+        const fingerprint = subscriptionCreditFingerprint(immutableCommand);
+        const command = {
+          approvalCaseId: supportCase.id,
+          customerId,
+          subscriptionId: subscription.subscriptionId,
+          amount,
+          currency,
+          reason: immutableCommand.reason,
+          idempotencyKey: immutableCommand.idempotencyKey,
+          fingerprint,
+        };
+        await ensureProviderFixtures(binding);
+        const approvedCommand = { ...immutableCommand, fingerprint };
+        await traceOperationalPort({
+          mastra,
+          tracingContext,
+          kind: "provider",
+          operation: "transactions.quote_subscription_credit",
+          run: () =>
+            providerRegistry(binding)
+              .transactions(binding)
+              .quoteSubscriptionCredit(approvedCommand),
+        });
+        await caseStore.saveAction(
+          supportCase.id,
+          "subscription-credit-command",
+          fingerprint,
+          approvedCommand,
+        );
+        await caseStore.saveAction(
+          supportCase.id,
+          "refund-policy-evidence",
+          fingerprint,
+          {
+            turnId,
+            binding: {
+              tenantId: bindings.knowledge.tenantId,
+              providerKind: bindings.knowledge.providerKind,
+              providerAccountId: bindings.knowledge.providerAccountId,
+            },
+            citations: parsedDraftEvidence(supportCase, draft.citedSources),
+          },
+        );
+        await caseStore.bindTurnCommand(supportCase.id, turnId, fingerprint);
+        if (!mastra)
+          throw new Error(
+            "Native subscription credit approval requires the registered Mastra instance.",
+          );
+        const native = await mastra
+          .getAgent("refundExecutionAgent")
+          .generate(
+            `Call issue_subscription_credit once with exactly this immutable command JSON: ${JSON.stringify({ caseId: supportCase.id, customerId, subscriptionId: subscription.subscriptionId, amount, currency, reason: command.reason, idempotencyKey: command.idempotencyKey, fingerprint })}`,
+            { requestContext, tracingContext },
+          );
+        const suspended = native as {
+          finishReason?: string;
+          runId?: string;
+          suspendPayload?: {
+            toolCallId?: string;
+            toolName?: string;
+            args?: unknown;
+          };
+        };
+        const nativeArgs = subscriptionCreditExecutionInputSchema.safeParse(
+          suspended.suspendPayload?.args,
+        );
+        if (
+          suspended.finishReason !== "suspended" ||
+          !suspended.runId ||
+          suspended.suspendPayload?.toolName !== "issue_subscription_credit" ||
+          !suspended.suspendPayload.toolCallId ||
+          !nativeArgs.success ||
+          JSON.stringify(nativeArgs.data) !==
+            JSON.stringify({
+              caseId: supportCase.id,
+              customerId,
+              subscriptionId: subscription.subscriptionId,
+              amount,
+              currency,
+              reason: command.reason,
+              idempotencyKey: command.idempotencyKey,
+              fingerprint,
+            })
+        )
+          throw new Error(
+            "Native subscription credit agent did not suspend on the immutable tool call.",
+          );
+        await caseStore.update(supportCase.id, {
+          status: "waiting_approval",
+          metadata: {
+            ...supportCase.metadata,
+            subscriptionCreditCommand: command,
+            nativeApproval: {
+              runId: suspended.runId,
+              toolCallId: suspended.suspendPayload.toolCallId,
+              fingerprint,
+              turnId,
+            },
+          },
+        });
+        return suspend({
+          caseId: supportCase.id,
+          action: "subscription_credit",
+          refundAmount: amount,
+          refundCurrency: currency,
+          refundReason: command.reason,
+          orderId: subscription.subscriptionId,
+          draftResponse: draft.draftResponse,
+        });
+      }
       const amount = draft.refundAmount ?? 0;
       const currency = draft.refundCurrency ?? "USD";
       const turnId = inputData.turnId;
@@ -345,6 +536,7 @@ export const requestApprovalStep = createStep({
       });
       return await suspend({
         caseId: supportCase.id,
+        action: "refund",
         refundAmount: draft.refundAmount ?? 0,
         refundCurrency: draft.refundCurrency ?? "USD",
         refundReason: draft.refundReason ?? "",
@@ -356,8 +548,11 @@ export const requestApprovalStep = createStep({
       });
     }
 
-    if (!supportCase.metadata.refundCommand)
-      throw new Error("The persisted refund command is missing.");
+    if (
+      !supportCase.metadata.refundCommand &&
+      !supportCase.metadata.subscriptionCreditCommand
+    )
+      throw new Error("The persisted financial command is missing.");
     // HTTP records the authenticated decision atomically before it resumes the
     // workflow. This step must only consume that record, never manufacture a
     // second decision from resume data (which is network-controlled input).

@@ -25,8 +25,32 @@ export const retrievePolicyStep = createStep({
     const bindings = bindingsForPersistedCase(supportCase);
     if (!supportCase.metadata.ownerId)
       throw new Error("The active support case is missing its owner.");
-    const queryText =
-      `${supportCase.triage?.intent ?? ""} ${supportCase.subject} ${turn.message!.body}`.trim();
+    // Follow-ups can be confirmations that omit the policy's vocabulary. Build
+    // a new query for every turn from only this durable case's customer turns;
+    // do not carry forward old policy matches as evidence.
+    const turnsThroughActive = (await caseStore.turns(supportCase.id))
+      .filter((candidate) => candidate.sequence <= turn.sequence)
+      .slice(-8);
+    const customerMessageHistory = turnsThroughActive
+      .filter((candidate) => candidate.message?.author === "customer")
+      .slice(-8)
+      .map((candidate) => candidate.message!.body.slice(0, 2_000));
+    const historicalTriageIntents = turnsThroughActive
+      .flatMap((candidate) => {
+        const triage = candidate.outcome?.triage;
+        if (!triage || typeof triage !== "object") return [];
+        const intent = (triage as Record<string, unknown>).intent;
+        return typeof intent === "string" ? [intent] : [];
+      })
+      .map((intent) => intent.replaceAll("_", " "));
+    const queryText = [
+      supportCase.triage?.intent.replaceAll("_", " "),
+      ...historicalTriageIntents,
+      supportCase.subject,
+      ...customerMessageHistory,
+    ]
+      .filter(Boolean)
+      .join("\n");
     if (!mastra)
       throw new Error(
         "The resolve workflow must run through a registered Mastra instance.",

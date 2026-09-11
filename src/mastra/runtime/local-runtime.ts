@@ -17,3 +17,4 @@ export {
   recoverApprovedNativeDecisions,
 } from "./native-approval-recovery";
 export { startLocalRuntimeWorkers } from "./local-runtime-workers";
+export { recoverIntercomCloseIntents } from "./intercom-close-recovery";

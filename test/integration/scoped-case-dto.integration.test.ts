@@ -1,10 +1,12 @@
 import { Hono } from "hono";
+import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { supportCaseSchema } from "../../src/mastra/domain/support-case";
 import { caseStore } from "../../src/mastra/lib/case-store";
 import { issueLocalSession } from "../../src/mastra/server/auth";
 import {
   supportCaseDetailRoute,
+  supportCustomerFinancialRequestsRoute,
   supportCasesListRoute,
 } from "../../src/mastra/server/routes";
 
@@ -15,6 +17,10 @@ const headers = (id: string) => ({
 function app() {
   const server = new Hono();
   server.get("/support/cases", supportCasesListRoute.handler);
+  server.get(
+    "/support/customer/financial-requests",
+    supportCustomerFinancialRequestsRoute.handler,
+  );
   server.get("/support/cases/:caseId", supportCaseDetailRoute.handler);
   return server;
 }
@@ -110,6 +116,25 @@ function fixture(id: string, ownerId: string, tenantId = "local-demo") {
   });
 }
 
+function bridgeHeaders(contactId: string) {
+  const key = "demo-bridge-signing-key-with-at-least-32-characters";
+  process.env.DEMO_AUTH_BRIDGE_SIGNING_KEY = key;
+  const payload = Buffer.from(
+    JSON.stringify({
+      id: `demo:${contactId}`,
+      email: "customer@example.test",
+      tenantId: "local-demo",
+      roles: ["customer"],
+      intercomContactId: contactId,
+      stripeCustomerId: "cus_demo",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+  ).toString("base64url");
+  return {
+    authorization: `Bearer ${payload}.${createHmac("sha256", key).update(payload).digest("base64url")}`,
+  };
+}
+
 afterEach(() => vi.restoreAllMocks());
 
 describe("scoped support case DTOs", () => {
@@ -167,5 +192,70 @@ describe("scoped support case DTOs", () => {
     expect(body.metadata).toEqual({
       refundCommand: { fingerprint: "immutable-command-hash" },
     });
+  });
+
+  it("returns only an owned customer's safe durable financial history", async () => {
+    const owned = fixture("case-financial", "customer-alex");
+    vi.spyOn(caseStore, "list").mockResolvedValue([
+      owned,
+      fixture("case-financial-foreign", "customer-jordan"),
+    ]);
+    vi.spyOn(caseStore, "customerFinancialRequests").mockResolvedValue([
+      {
+        caseId: owned.id,
+        turnId: "turn-credit",
+        type: "subscription_credit",
+        amount: 5,
+        currency: "USD",
+        status: "executed",
+        requestedAt: "2026-09-05T00:00:00.000Z",
+      },
+    ]);
+
+    const response = await app().request(
+      "http://support.test/support/customer/financial-requests",
+      { headers: headers("customer-alex") },
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toEqual({
+      requests: [
+        {
+          caseId: owned.id,
+          turnId: "turn-credit",
+          type: "subscription_credit",
+          amount: 5,
+          currency: "USD",
+          status: "executed",
+          requestedAt: "2026-09-05T00:00:00.000Z",
+        },
+      ],
+    });
+    expect(caseStore.customerFinancialRequests).toHaveBeenCalledWith([
+      owned.id,
+    ]);
+    expect(JSON.stringify(body)).not.toContain("private-idempotency-key");
+  });
+
+  it("accepts the signed demo bridge only for its exact Intercom contact", async () => {
+    const owned = fixture(
+      "case-bridge-owned",
+      "intercom:local-demo:contact:contact-owned",
+    );
+    const foreign = fixture(
+      "case-bridge-foreign",
+      "intercom:local-demo:contact:contact-foreign",
+    );
+    vi.spyOn(caseStore, "list").mockResolvedValue([owned, foreign]);
+    vi.spyOn(caseStore, "customerFinancialRequests").mockResolvedValue([]);
+
+    const response = await app().request(
+      "http://support.test/support/customer/financial-requests",
+      { headers: bridgeHeaders("contact-owned") },
+    );
+    expect(response.status).toBe(200);
+    expect(caseStore.customerFinancialRequests).toHaveBeenCalledWith([
+      owned.id,
+    ]);
   });
 });

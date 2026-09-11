@@ -63,13 +63,15 @@ const normalizeAndPersistStep = createStep({
     // Intercom ownership is derived from the signed event's contact reference,
     // never from an email/body claim. Local ingress retains seeded identity.
     const contactId = normalized.rawPayload.contactId;
+    const customerIngress =
+      inputData.ingress?.roles.includes("customer") ?? false;
     const verifiedOwner = verified
       ? typeof contactId === "string"
         ? `intercom:${support.tenantId}:contact:${contactId}`
         : undefined
-      : ownerIdForCustomer(support.tenantId, normalized.customer.email);
-    const customerIngress =
-      inputData.ingress?.roles.includes("customer") ?? false;
+      : customerIngress
+        ? inputData.ingress?.id
+        : ownerIdForCustomer(support.tenantId, normalized.customer.email);
     if (
       !verifiedOwner ||
       (customerIngress &&

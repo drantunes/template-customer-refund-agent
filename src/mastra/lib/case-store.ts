@@ -15,6 +15,8 @@ import { CaseStoreActions } from "./case-store-actions";
 import { CaseStoreFinancial } from "./case-store-financial";
 import { CaseStoreRetention } from "./case-store-retention";
 import { CaseStoreCancellation } from "./case-store-cancellation";
+import { CaseStoreManualResolution } from "./case-store-manual-resolution";
+import { CaseStoreIntercomClose } from "./case-store-intercom-close";
 import type {
   CaseFeedback,
   CaseMessage,
@@ -24,6 +26,7 @@ import type {
   ProviderBinding,
   RefundCommand,
   SubscriptionCancellationCommand,
+  SubscriptionCreditCommand,
 } from "../providers/contracts";
 import type { DispatchLeaseScope } from "./dispatch-lease-scope";
 import {
@@ -84,6 +87,8 @@ export class CaseStore {
   private readonly financial: CaseStoreFinancial;
   private readonly retention: CaseStoreRetention;
   private readonly cancellation: CaseStoreCancellation;
+  private readonly manualResolution: CaseStoreManualResolution;
+  private readonly intercomClose: CaseStoreIntercomClose;
 
   constructor(options: { client?: Client; url?: string } = {}) {
     if (options.client) {
@@ -106,6 +111,8 @@ export class CaseStore {
     this.financial = new CaseStoreFinancial(this.client);
     this.retention = new CaseStoreRetention(this.client);
     this.cancellation = new CaseStoreCancellation(this.client);
+    this.manualResolution = new CaseStoreManualResolution(this.client);
+    this.intercomClose = new CaseStoreIntercomClose(this.client);
   }
 
   async close() {
@@ -122,8 +129,71 @@ export class CaseStore {
     await this.ready;
   }
 
-  async migrate(target = 22): Promise<void> {
+  async migrate(target = 26): Promise<void> {
     await this.migrations.migrate(target);
+  }
+
+  async manualResolutionContext(caseId: string) {
+    await this.ensured();
+    return this.manualResolution.context(caseId);
+  }
+
+  async resolveManually(input: {
+    caseId: string;
+    tenantId: string;
+    actorId: string;
+    expectedVersion: number;
+    expectedTurnId: string;
+    idempotencyKey: string;
+    internalNote: string;
+  }) {
+    await this.ensured();
+    return this.manualResolution.resolve(input);
+  }
+
+  async recordIntercomCloseIntent(input: {
+    tenantId: string;
+    providerAccountId: string;
+    eventId: string;
+    externalConversationId: string;
+  }) {
+    await this.ensured();
+    return this.intercomClose.record(input);
+  }
+
+  async claimIntercomCloseIntents(limit = 10) {
+    await this.ensured();
+    return this.intercomClose.claim(limit);
+  }
+
+  async deferIntercomCloseIntent(
+    id: string,
+    leaseToken: string,
+    error: string,
+  ) {
+    await this.ensured();
+    return this.intercomClose.defer(id, leaseToken, error);
+  }
+
+  async completeIntercomCloseIntent(
+    id: string,
+    leaseToken: string,
+    state: "applied" | "superseded",
+  ) {
+    await this.ensured();
+    return this.intercomClose.complete(id, leaseToken, state);
+  }
+
+  async applyIntercomClose(input: {
+    intentId: string;
+    leaseToken: string;
+    tenantId: string;
+    providerAccountId: string;
+    externalConversationId: string;
+    expectedVersion: number;
+  }) {
+    await this.ensured();
+    return this.intercomClose.apply(input);
   }
 
   async findByExternalId(source: string, externalId: string) {
@@ -144,9 +214,39 @@ export class CaseStore {
   async findConversation(
     tenantId: string,
     externalConversationId: string,
+    providerKind = "local",
+    providerAccountId = "local-demo",
   ): Promise<SupportCase | undefined> {
     await this.ensured();
-    return this.cases.findConversation(tenantId, externalConversationId);
+    return this.cases.findConversation(
+      tenantId,
+      externalConversationId,
+      providerKind,
+      providerAccountId,
+    );
+  }
+
+  async canonicalConversationOwner(input: {
+    caseId: string;
+    binding: ProviderBinding;
+  }) {
+    await this.ensured();
+    return this.cases.canonicalConversationOwner(input);
+  }
+
+  async conversationSnapshot(
+    tenantId: string,
+    externalConversationId: string,
+    providerKind: string,
+    providerAccountId: string,
+  ) {
+    await this.ensured();
+    return this.cases.conversationSnapshot(
+      tenantId,
+      externalConversationId,
+      providerKind,
+      providerAccountId,
+    );
   }
 
   async create(case_: SupportCase) {
@@ -240,6 +340,17 @@ export class CaseStore {
   }) {
     await this.ensured();
     return this.dispatch.authorizeStripeRefundFirstEffect(input);
+  }
+
+  async authorizeStripeSubscriptionCreditFirstEffect(input: {
+    command: SubscriptionCreditCommand;
+    dispatch: DispatchLeaseScope;
+    validatePolicy: (
+      tx: Awaited<ReturnType<Client["transaction"]>>,
+    ) => Promise<void>;
+  }) {
+    await this.ensured();
+    return this.dispatch.authorizeStripeSubscriptionCreditFirstEffect(input);
   }
 
   async authorizeSubscriptionCancellationFirstEffect(input: {
@@ -383,6 +494,40 @@ export class CaseStore {
     return this.outbox.completeOutbox(id, receipt, leaseToken);
   }
 
+  async manualOutboxEffectIsCurrent(id: string, leaseToken: string) {
+    await this.ensured();
+    return this.outbox.manualOutboxEffectIsCurrent(id, leaseToken);
+  }
+
+  async supersedeManualOutboxAfterFence(
+    id: string,
+    receipt: unknown,
+    reason: string,
+  ) {
+    await this.ensured();
+    return this.outbox.supersedeManualOutboxAfterFence(id, receipt, reason);
+  }
+
+  async manualOutboxNeedsReopen(id: string) {
+    await this.ensured();
+    return this.outbox.manualOutboxNeedsReopen(id);
+  }
+
+  async manualOutboxIsUncertain(id: string) {
+    await this.ensured();
+    return this.outbox.manualOutboxIsUncertain(id);
+  }
+
+  async markManualOutboxReconciliationStarted(id: string) {
+    await this.ensured();
+    return this.outbox.markManualOutboxReconciliationStarted(id);
+  }
+
+  async supersedeOutbox(id: string, leaseToken: string, reason: string) {
+    await this.ensured();
+    return this.outbox.supersedeOutbox(id, leaseToken, reason);
+  }
+
   async markOutboxStarted(id: string, leaseToken: string) {
     await this.ensured();
     return this.outbox.markOutboxStarted(id, leaseToken);
@@ -460,6 +605,7 @@ export class CaseStore {
     principalId: string;
     approved: boolean;
     note?: string;
+    serviceProblemConfirmed?: true;
     nativeRunId?: string;
     nativeToolCallId?: string;
   }): Promise<{ won: boolean; decisionId?: string }> {
@@ -472,9 +618,14 @@ export class CaseStore {
     return this.actions.approvalDecision(caseId, turnId);
   }
 
-  async monitoringDecisions(caseIds: string[]) {
+  async customerFinancialRequests(caseIds: string[]) {
     await this.ensured();
-    return this.actions.monitoringDecisions(caseIds);
+    return this.actions.customerFinancialRequests(caseIds);
+  }
+
+  async monitoringDecisions(caseIds: string[], actionKind?: string) {
+    await this.ensured();
+    return this.actions.monitoringDecisions(caseIds, actionKind);
   }
 
   async monitoringOperationalFailures(caseIds: string[]) {
@@ -482,9 +633,9 @@ export class CaseStore {
     return this.actions.monitoringOperationalFailures(caseIds);
   }
 
-  async monitoringFinancialFailures(caseIds: string[]) {
+  async monitoringFinancialFailures(caseIds: string[], actionKind?: string) {
     await this.ensured();
-    return this.actions.monitoringFinancialFailures(caseIds);
+    return this.actions.monitoringFinancialFailures(caseIds, actionKind);
   }
 
   async nativeDecisionsNeedingRecovery(limit = 10) {
@@ -514,6 +665,18 @@ export class CaseStore {
     return this.financial.projectRefundToolExecution(input);
   }
 
+  async projectSubscriptionCreditToolExecution(input: {
+    caseId: string;
+    turnId: string;
+    fingerprint: string;
+    idempotencyKey: string;
+    result: NonNullable<SupportCase["subscriptionCreditResult"]>;
+    effect: unknown;
+  }) {
+    await this.ensured();
+    return this.financial.projectSubscriptionCreditToolExecution(input);
+  }
+
   async prepareStripeRefundAttempt(input: {
     caseId: string;
     binding: ProviderBinding;
@@ -526,6 +689,60 @@ export class CaseStore {
   }) {
     await this.ensured();
     return this.financial.prepareStripeRefundAttempt(input);
+  }
+
+  async prepareStripeSubscriptionCreditAttempt(input: {
+    caseId: string;
+    binding: ProviderBinding;
+    customerId: string;
+    subscriptionId: string;
+    fingerprint: string;
+    idempotencyKey: string;
+    dispatchId: string;
+    leaseToken: string;
+    turnId: string;
+    command: unknown;
+  }) {
+    await this.ensured();
+    return this.financial.prepareStripeSubscriptionCreditAttempt(input);
+  }
+  async finalizeStripeSubscriptionCreditNoEffectFailure(input: {
+    idempotencyKey: string;
+    fingerprint: string;
+    dispatch: { dispatchId: string; leaseToken: string; turnId: string };
+  }) {
+    await this.ensured();
+    return this.financial.finalizeStripeSubscriptionCreditNoEffectFailure(
+      input,
+    );
+  }
+  async markStripeSubscriptionCreditPrePostNoEffect(input: {
+    idempotencyKey: string;
+    fingerprint: string;
+    dispatch: { dispatchId: string; leaseToken: string; turnId: string };
+  }) {
+    await this.ensured();
+    return this.financial.markStripeSubscriptionCreditPrePostNoEffect(input);
+  }
+
+  async updateStripeSubscriptionCreditAttempt(
+    idempotencyKey: string,
+    update: {
+      status: "succeeded" | "unknown" | "failed" | "quarantined";
+      creditId?: string;
+      providerStatus?: string;
+    },
+  ) {
+    await this.ensured();
+    return this.financial.updateStripeSubscriptionCreditAttempt(
+      idempotencyKey,
+      update,
+    );
+  }
+
+  async stripeSubscriptionCreditAttempt(idempotencyKey: string) {
+    await this.ensured();
+    return this.financial.stripeSubscriptionCreditAttempt(idempotencyKey);
   }
 
   async updateStripeRefundAttempt(
@@ -576,6 +793,14 @@ export class CaseStore {
   async finalizeStripeRefundNoEffectFailure(input: {
     idempotencyKey: string;
     fingerprint: string;
+    diagnostic?: {
+      stage: "preflight" | "post";
+      status?: number;
+      ambiguity?: boolean;
+      code?: string;
+      type?: string;
+      requestId?: string;
+    };
   }) {
     await this.ensured();
     return this.financial.finalizeStripeRefundNoEffectFailure(input);

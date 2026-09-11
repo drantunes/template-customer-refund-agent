@@ -14,11 +14,17 @@ import { temporaryDatabasePath } from "../support/temp-path";
 const databaseFiles: string[] = [];
 const mastraRuntimes: Array<{ shutdown(): Promise<void> }> = [];
 
-async function loadCharacterizationRuntime(draft: {
-  recommendRefund: boolean;
-  requiresEscalation: boolean;
-  refundAmount?: number;
-}) {
+async function loadCharacterizationRuntime(
+  draft: {
+    recommendRefund: boolean;
+    requiresEscalation: boolean;
+    refundAmount?: number;
+  },
+  input = {
+    subject: "I was charged twice",
+    body: "Please refund the duplicate subscription charge.",
+  },
+) {
   const databasePath = temporaryDatabasePath("phase001-characterization");
   databaseFiles.push(
     databasePath,
@@ -93,12 +99,16 @@ async function loadCharacterizationRuntime(draft: {
   const normalized = await mockSupportAdapter.normalizeInbound({
     externalId: `characterization-${crypto.randomUUID()}`,
     from: "alex@example.com",
-    subject: "I was charged twice",
-    body: "Please refund the duplicate subscription charge.",
+    ...input,
   });
   const runId = `characterization-run-${crypto.randomUUID()}`;
   const accepted = await caseStore.acceptInbound(
-    { id: `case_${crypto.randomUUID()}`, status: "new", ...normalized },
+    {
+      id: `case_${crypto.randomUUID()}`,
+      status: "new",
+      ...normalized,
+      metadata: { ...normalized.metadata, ownerId: "customer-alex" },
+    },
     `event_${crypto.randomUUID()}`,
     runId,
   );
@@ -225,16 +235,32 @@ describe("resolve support case WIP characterization", () => {
       });
     const caseId = `recovery_${crypto.randomUUID()}`;
     const runId = `run_${crypto.randomUUID()}`;
+    const externalId = `recovery-event-${crypto.randomUUID()}`;
+    const bindings = supportCase.metadata.providerBindings as {
+      support: ProviderBinding;
+      commerce: ProviderBinding;
+      transactions: ProviderBinding;
+      knowledge: ProviderBinding;
+    };
+    const binding = {
+      ...bindings.support,
+      externalConversationId: externalId,
+    };
     await caseStore.acceptInbound(
       {
         ...supportCase,
         id: caseId,
-        externalId: `recovery-event-${crypto.randomUUID()}`,
+        externalId,
         messages: supportCase.messages.map((message) => ({
           ...message,
           id: `message_${crypto.randomUUID()}`,
         })),
-        metadata: { ...supportCase.metadata, ownerId: "customer-alex" },
+        metadata: {
+          ...supportCase.metadata,
+          ownerId: "customer-alex",
+          providerBinding: binding,
+          providerBindings: { ...bindings, support: binding },
+        },
       },
       `event_${crypto.randomUUID()}`,
       runId,
@@ -389,6 +415,170 @@ describe("resolve support case WIP characterization", () => {
       `outbox_${supportCase.id}_${turns[0]!.id}_final`,
       `outbox_${supportCase.id}_${turns[1]!.id}_final`,
     ]);
+  });
+
+  it("does not include a queued later turn in the current policy search", async () => {
+    const runtime = await loadCharacterizationRuntime({
+      recommendRefund: false,
+      requiresEscalation: false,
+    });
+    const { knowledgePublicationStore } =
+      await import("../../src/mastra/lib/knowledge-publications");
+    const search = vi.spyOn(knowledgePublicationStore, "search");
+    const futureMessage =
+      "future-only policy signal must not affect this search";
+    const queued = await runtime.caseStore.appendFollowUp({
+      caseId: runtime.supportCase.id,
+      eventId: `future-turn-${crypto.randomUUID()}`,
+      runId: `future-turn-run-${crypto.randomUUID()}`,
+      message: {
+        id: `future-turn-message-${crypto.randomUUID()}`,
+        author: "customer",
+        body: futureMessage,
+        createdAt: new Date().toISOString(),
+      },
+    });
+    const { recoverLocalWorkflows } =
+      await import("../../src/mastra/runtime/local-runtime");
+
+    expect(queued.appended).toBe(true);
+    expect(
+      await recoverLocalWorkflows(runtime.mastra, 1, runtime.caseStore),
+    ).toBe(1);
+    const queryTexts = search.mock.calls.map(([, queryText]) => queryText);
+    expect(
+      queryTexts.some((queryText) =>
+        queryText.includes("Please refund the duplicate subscription charge."),
+      ),
+    ).toBe(true);
+    expect(
+      queryTexts.some((queryText) => queryText.includes(futureMessage)),
+    ).toBe(false);
+  });
+
+  it("freshly retrieves policy evidence for a contextual follow-up and a later topic switch", async () => {
+    const runtime = await loadCharacterizationRuntime(
+      { recommendRefund: false, requiresEscalation: false },
+      {
+        subject: "Dúvida sobre assinatura",
+        body: "Quero entender as regras para cancelar a assinatura.",
+      },
+    );
+    const { triageAgent } =
+      await import("../../src/mastra/agents/triage-agent");
+    const { caseStore, responseAgent, supportCase } = runtime;
+    const { recoverLocalWorkflows } =
+      await import("../../src/mastra/runtime/local-runtime");
+    const subscriptionExcerpt =
+      "Customers can cancel a subscription at any time. Cancellation takes effect at the end of the current billing period unless the customer explicitly asks for an immediate cancellation with a prorated refund.";
+
+    triageAgent.__updateModel({
+      model: deterministicJsonModel({
+        intent: "cancellation",
+        urgency: "low",
+        sentiment: "neutral",
+        requiresHumanReview: false,
+        confidence: 1,
+        rationale: "Informational cancellation-policy question.",
+      }),
+    });
+    responseAgent.__updateModel({
+      model: deterministicJsonModel({
+        draftResponse:
+          "The subscription cancellation policy explains the timing.",
+        citedSources: ["subscription-cancellation-policy"],
+        selectedPolicyExcerpts: [
+          {
+            source: "subscription-cancellation-policy",
+            excerpt: subscriptionExcerpt,
+          },
+        ],
+        recommendRefund: false,
+        requiresEscalation: false,
+      }),
+    });
+    expect(await recoverLocalWorkflows(runtime.mastra, 1, caseStore)).toBe(1);
+    expect((await caseStore.get(supportCase.id))?.policyMatches).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: "subscription-cancellation-policy" }),
+      ]),
+    );
+
+    const followUp = await caseStore.appendFollowUp({
+      caseId: supportCase.id,
+      eventId: `contextual-follow-up-${crypto.randomUUID()}`,
+      runId: `contextual-follow-up-run-${crypto.randomUUID()}`,
+      message: {
+        id: `contextual-follow-up-message-${crypto.randomUUID()}`,
+        author: "customer",
+        body: "Meu período pago continua ativo até o fim do ciclo, certo? Só quero confirmar a regra.",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    triageAgent.__updateModel({
+      model: deterministicJsonModel({
+        intent: "other",
+        urgency: "low",
+        sentiment: "neutral",
+        requiresHumanReview: false,
+        confidence: 1,
+        rationale: "Informational follow-up.",
+      }),
+    });
+    expect(followUp.appended).toBe(true);
+    expect(await recoverLocalWorkflows(runtime.mastra, 1, caseStore)).toBe(1);
+    expect(await caseStore.get(supportCase.id)).toMatchObject({
+      status: "resolved",
+      draft: { citedSources: ["subscription-cancellation-policy"] },
+      policyMatches: expect.arrayContaining([
+        expect.objectContaining({ source: "subscription-cancellation-policy" }),
+      ]),
+    });
+
+    const topicSwitch = await caseStore.appendFollowUp({
+      caseId: supportCase.id,
+      eventId: `topic-switch-${crypto.randomUUID()}`,
+      runId: `topic-switch-run-${crypto.randomUUID()}`,
+      message: {
+        id: `topic-switch-message-${crypto.randomUUID()}`,
+        author: "customer",
+        body: "Outro item chegou danificado. O que diz a regra?",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    const damagedExcerpt =
+      "If a customer reports an item arrived damaged or defective, offer either a **full refund** or a **free replacement** - let the customer choose if they haven't already stated a preference.";
+    triageAgent.__updateModel({
+      model: deterministicJsonModel({
+        intent: "damaged_item",
+        urgency: "low",
+        sentiment: "neutral",
+        requiresHumanReview: false,
+        confidence: 1,
+        rationale: "Informational damaged-item policy question.",
+      }),
+    });
+    responseAgent.__updateModel({
+      model: deterministicJsonModel({
+        draftResponse:
+          "The damaged-item policy explains the available options.",
+        citedSources: ["damaged-item-policy"],
+        selectedPolicyExcerpts: [
+          { source: "damaged-item-policy", excerpt: damagedExcerpt },
+        ],
+        recommendRefund: false,
+        requiresEscalation: false,
+      }),
+    });
+    expect(topicSwitch.appended).toBe(true);
+    expect(await recoverLocalWorkflows(runtime.mastra, 1, caseStore)).toBe(1);
+    expect(await caseStore.get(supportCase.id)).toMatchObject({
+      status: "resolved",
+      draft: { citedSources: ["damaged-item-policy"] },
+      policyMatches: expect.arrayContaining([
+        expect.objectContaining({ source: "damaged-item-policy" }),
+      ]),
+    });
   });
 
   it("runs a queued follow-up after escalation without retaining the prior output", async () => {

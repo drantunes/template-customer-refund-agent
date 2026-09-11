@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { money, refundFingerprint } from "../../lib/money";
+import {
+  money,
+  refundFingerprint,
+  subscriptionCreditFingerprint,
+} from "../../lib/money";
 import type {
   CommerceOrder,
   CommerceRefund,
@@ -12,6 +16,9 @@ import type {
   RefundQuote,
   SubscriptionCancellationCommand,
   SubscriptionCancellationEffect,
+  SubscriptionCreditCommand,
+  SubscriptionCreditEffect,
+  SubscriptionCreditQuote,
 } from "../contracts";
 import { STRIPE_API_VERSION, type StripeSandboxConfig } from "./config";
 
@@ -37,6 +44,11 @@ export class StripeHttpError extends Error {
   constructor(
     readonly status: number,
     readonly ambiguous = false,
+    readonly diagnostic?: {
+      code?: string;
+      type?: string;
+      requestId?: string;
+    },
   ) {
     super(`Stripe request failed with HTTP ${status}.`);
   }
@@ -132,10 +144,60 @@ export class StripeClient {
       }
       if (!response.ok) {
         // No provider body is propagated: it may contain customer/payment data.
+        let body: Record<string, unknown> | undefined;
+        try {
+          const parsed = await response.clone().json();
+          body =
+            parsed && typeof parsed === "object"
+              ? (parsed as Record<string, unknown>)
+              : undefined;
+        } catch {}
+        const error = body?.error;
+        const providerError =
+          error && typeof error === "object"
+            ? (error as Record<string, unknown>)
+            : undefined;
+        // These are deliberately allow-lists, not generic "safe string"
+        // checks. Error bodies can contain arbitrary provider echoes.
+        const code = (value: unknown) =>
+          typeof value === "string" &&
+          new Set([
+            "amount_too_large",
+            "charge_already_refunded",
+            "charge_disputed",
+            "charge_expired_for_capture",
+            "charge_not_refundable",
+            "idempotency_key_in_use",
+            "parameter_invalid_empty",
+            "parameter_invalid_integer",
+            "parameter_invalid_string_blank",
+            "resource_missing",
+          ]).has(value)
+            ? value
+            : undefined;
+        const type = (value: unknown) =>
+          typeof value === "string" &&
+          new Set([
+            "api_error",
+            "card_error",
+            "idempotency_error",
+            "invalid_request_error",
+          ]).has(value)
+            ? value
+            : undefined;
+        const requestId = (value: unknown) =>
+          typeof value === "string" && /^req_[A-Za-z0-9]{1,64}$/.test(value)
+            ? value
+            : undefined;
         throw new StripeHttpError(
           response.status,
           method === "POST" &&
             (response.status === 408 || response.status >= 500),
+          {
+            code: code(providerError?.code),
+            type: type(providerError?.type),
+            requestId: requestId(response.headers.get("request-id")),
+          },
         );
       }
       let body: unknown;
@@ -233,10 +295,13 @@ export class StripeClient {
         "Stripe customer lookup is ambiguous; an explicit Checkout or PaymentIntent id is required.",
       );
     const session = candidates[0];
-    if (!session)
-      return orderId
-        ? this.findInvoiceOrder(binding, email, customerId, orderId)
+    if (!session) {
+      if (orderId)
+        return this.findInvoiceOrder(binding, email, customerId, orderId);
+      return customerId
+        ? this.findStandaloneInvoiceOrder(binding, email, customerId)
         : undefined;
+    }
     if (session.status !== "complete" || session.payment_status !== "paid")
       throw new Error("Stripe Checkout Session is not complete and paid.");
     const customer = asObject(
@@ -288,6 +353,40 @@ export class StripeClient {
         ref("payment_intent", paymentIntent),
       ],
     };
+  }
+
+  /** Paid standalone invoices support API-created purchases. This path is
+   * narrower than a checkout lookup: subscription invoices are never selected
+   * from an email alone. */
+  private async findStandaloneInvoiceOrder(
+    binding: ProviderBinding,
+    email: string,
+    customerId: string,
+  ): Promise<CommerceOrder | undefined> {
+    const invoices = await this.list(
+      "/v1/invoices",
+      new URLSearchParams({ customer: customerId }),
+    );
+    const candidates = invoices.filter(
+      (invoice) =>
+        invoice.livemode === false &&
+        asId(invoice.customer, "Invoice customer") === customerId &&
+        (invoice.status === "paid" || invoice.paid === true) &&
+        invoice.billing_reason === "manual" &&
+        !invoice.subscription &&
+        !asObject(invoice.parent ?? {}, "Invoice parent").subscription_details,
+    );
+    if (candidates.length === 0) return undefined;
+    if (candidates.length > 1)
+      throw new Error(
+        "Stripe standalone invoice lookup is ambiguous; an explicit Invoice id is required.",
+      );
+    return this.findInvoiceOrder(
+      binding,
+      email,
+      customerId,
+      asId(candidates[0], "Invoice"),
+    );
   }
 
   /** An InvoicePayment is the authoritative bridge from a subscription invoice
@@ -362,7 +461,7 @@ export class StripeClient {
     return {
       orderId: asId(invoice, "Invoice"),
       customerEmail,
-      product: String(invoice.description ?? "Stripe subscription invoice"),
+      product: String(invoice.description ?? "Stripe invoice"),
       amount: supportedMoney(
         paymentIntent.currency,
         paymentIntent.amount_received ?? paymentIntent.amount,
@@ -474,11 +573,24 @@ export class StripeClient {
       throw new Error("Stripe subscription price mapping is ambiguous.");
     const item = asObject(items[0], "subscription item");
     const price = asObject(item.price, "subscription price");
+    const recurring = asObject(price.recurring, "subscription price recurring");
+    if (
+      (recurring.interval !== "month" && recurring.interval !== "year") ||
+      !Number.isSafeInteger(recurring.interval_count ?? 1) ||
+      Number(recurring.interval_count ?? 1) <= 0 ||
+      !Number.isSafeInteger(item.quantity ?? 1) ||
+      Number(item.quantity ?? 1) <= 0
+    )
+      throw new Error("Stripe subscription billing terms are malformed.");
     const cancelAtPeriodEnd = subscription.cancel_at_period_end === true;
     return {
       subscriptionId: asId(subscription, "Subscription"),
+      customerId: asId(customer[0], "Customer"),
       customerEmail: String(customer[0].email).toLowerCase(),
       plan: String(price.nickname ?? price.id ?? "Stripe subscription"),
+      recurringInterval: recurring.interval,
+      recurringIntervalCount: Number(recurring.interval_count ?? 1),
+      quantity: Number(item.quantity ?? 1),
       amount: supportedMoney(price.currency, price.unit_amount),
       status:
         status(subscription.status) === "active"
@@ -545,6 +657,282 @@ export class StripeClient {
     await this.assertConfiguredAccount();
     const target = await this.resolveRefundTarget(command, email);
     return this.quoteRefundForTarget(command, target);
+  }
+
+  /** Verify the exact single monthly subscription before a credit is ever
+   * proposed. A billing credit is owned by the customer, never the paid
+   * invoice that happened to establish the subscription. */
+  private async subscriptionCreditTarget(
+    command: SubscriptionCreditCommand,
+    email: string,
+  ) {
+    this.assertBinding(command.binding);
+    await this.assertConfiguredAccount();
+    const subscription = await this.request(
+      `/v1/subscriptions/${encodeURIComponent(command.subscriptionId)}`,
+    );
+    if (
+      subscription.livemode !== false ||
+      subscription.status !== "active" ||
+      subscription.cancel_at_period_end === true
+    )
+      throw new Error(
+        "Subscription credit requires an active Stripe test subscription.",
+      );
+    const customerId = asId(subscription.customer, "Subscription customer");
+    if (customerId !== command.customerId)
+      throw new Error(
+        "Subscription credit customer does not match its immutable command.",
+      );
+    const customer = await this.subscriptionCreditCustomer(command, email);
+    const items = asObject(subscription.items, "subscription items").data;
+    if (!Array.isArray(items) || items.length !== 1)
+      throw new Error(
+        "Subscription credit requires exactly one subscription item.",
+      );
+    const item = asObject(items[0], "subscription item");
+    const price = asObject(item.price, "subscription price");
+    const recurring = asObject(price.recurring, "subscription price recurring");
+    if (
+      recurring.interval !== "month" ||
+      (recurring.interval_count ?? 1) !== 1 ||
+      (item.quantity ?? 1) !== 1 ||
+      price.currency !== command.amount.currency.toLowerCase() ||
+      price.unit_amount !== command.amount.minor
+    )
+      throw new Error(
+        "Subscription credit must equal one monthly subscription charge.",
+      );
+    return { customerId, subscription, customer };
+  }
+
+  /** Recovery validates the durable customer and immutable balance receipt,
+   * not a subscription's current lifecycle.  The subscription may be
+   * cancelled or otherwise changed after a successful remote POST. */
+  private async subscriptionCreditCustomer(
+    command: SubscriptionCreditCommand,
+    email: string,
+  ) {
+    this.assertBinding(command.binding);
+    await this.assertConfiguredAccount();
+    const customer = await this.request(
+      `/v1/customers/${encodeURIComponent(command.customerId)}`,
+    );
+    if (
+      customer.livemode !== false ||
+      asId(customer, "Customer") !== command.customerId ||
+      String(customer.email ?? "").toLowerCase() !== email.toLowerCase()
+    )
+      throw new Error(
+        "Stripe subscription credit does not belong to the verified customer.",
+      );
+    return customer;
+  }
+
+  private async assertNoPriorSubscriptionCredit(
+    customerId: string,
+    command: SubscriptionCreditCommand,
+  ) {
+    const transactions = await this.list(
+      `/v1/customers/${encodeURIComponent(customerId)}/balance_transactions`,
+      new URLSearchParams(),
+    );
+    const prior = transactions.some((value) => {
+      const metadata = value.metadata;
+      return (
+        value.livemode === false &&
+        metadata !== null &&
+        typeof metadata === "object" &&
+        !Array.isArray(metadata) &&
+        (metadata as Record<string, unknown>).subscription_id ===
+          command.subscriptionId &&
+        (metadata as Record<string, unknown>).command_fingerprint !==
+          command.fingerprint
+      );
+    });
+    if (prior)
+      throw new Error(
+        "A prior Stripe subscription credit exists for this customer and subscription and requires specialist review.",
+      );
+  }
+
+  async quoteSubscriptionCredit(
+    command: SubscriptionCreditCommand,
+    email: string,
+  ): Promise<SubscriptionCreditQuote> {
+    if (subscriptionCreditFingerprint(command) !== command.fingerprint)
+      throw new Error(
+        "Subscription credit command fingerprint was tampered with.",
+      );
+    const target = await this.subscriptionCreditTarget(command, email);
+    await this.assertNoPriorSubscriptionCredit(target.customerId, command);
+    return {
+      approvedAmount: command.amount,
+      commandFingerprint: command.fingerprint,
+    };
+  }
+
+  async createSubscriptionCredit(
+    command: SubscriptionCreditCommand,
+    email: string,
+    beforeDispatch?: () => Promise<void>,
+    /** Marks the exact point where a Stripe POST can begin. It must remain
+     * synchronous and directly adjacent to request so callers can distinguish
+     * a proven preflight refusal from an ambiguous provider outcome. */
+    onPostBoundary?: () => void,
+  ): Promise<SubscriptionCreditEffect> {
+    if (subscriptionCreditFingerprint(command) !== command.fingerprint)
+      throw new Error(
+        "Subscription credit command fingerprint was tampered with.",
+      );
+    const target = await this.subscriptionCreditTarget(command, email);
+    // A separate case can be approved after its quote. Re-read the durable
+    // ledger immediately before the provider mutation so it cannot issue a
+    // second compensation for the same customer and subscription.
+    await this.assertNoPriorSubscriptionCredit(target.customerId, command);
+    // This is deliberately after every awaited preflight and immediately
+    // before the POST. The durable authorization must still be current at the
+    // financial boundary, not merely before a slow ledger lookup.
+    await beforeDispatch?.();
+    onPostBoundary?.();
+    const response = await this.request(
+      `/v1/customers/${encodeURIComponent(target.customerId)}/balance_transactions`,
+      {
+        method: "POST",
+        body: new URLSearchParams({
+          amount: String(-command.amount.minor),
+          currency: command.amount.currency.toLowerCase(),
+          description: command.reason,
+          "metadata[support_case_id]": command.approvalCaseId,
+          "metadata[command_fingerprint]": command.fingerprint,
+          "metadata[subscription_id]": command.subscriptionId,
+        }),
+        headers: { "Idempotency-Key": command.idempotencyKey },
+      },
+    );
+    if (
+      response.livemode !== false ||
+      asId(response, "Customer balance transaction") === "" ||
+      asId(response.customer, "Customer balance transaction customer") !==
+        target.customerId ||
+      response.amount !== -command.amount.minor ||
+      String(response.currency).toUpperCase() !== command.amount.currency
+    )
+      throw new Error(
+        "Stripe customer balance transaction does not match the immutable credit command.",
+      );
+    const metadata = asObject(
+      response.metadata ?? {},
+      "customer balance transaction metadata",
+    );
+    if (
+      metadata.support_case_id !== command.approvalCaseId ||
+      metadata.command_fingerprint !== command.fingerprint ||
+      metadata.subscription_id !== command.subscriptionId
+    )
+      throw new Error(
+        "Stripe customer balance transaction metadata is not bound to the immutable command.",
+      );
+    return {
+      creditId: asId(response, "Customer balance transaction"),
+      customerId: target.customerId,
+      subscriptionId: command.subscriptionId,
+      amount: command.amount,
+      idempotencyKey: command.idempotencyKey,
+      executedAt: timestamp(response.created),
+      replayed: false,
+      status: "succeeded",
+      providerStatus: "created",
+      providerRefs: [
+        ref("customer_balance_transaction", response),
+        ref("customer", target.customer),
+        ref("subscription", target.subscription),
+      ],
+    };
+  }
+
+  async retrieveSubscriptionCredit(
+    command: SubscriptionCreditCommand,
+    email: string,
+    creditId: string,
+  ): Promise<SubscriptionCreditEffect> {
+    await this.subscriptionCreditCustomer(command, email);
+    const response = await this.request(
+      `/v1/customers/${encodeURIComponent(command.customerId)}/balance_transactions/${encodeURIComponent(creditId)}`,
+    );
+    const metadata = asObject(
+      response.metadata ?? {},
+      "customer balance transaction metadata",
+    );
+    if (
+      response.livemode !== false ||
+      asId(response, "Customer balance transaction") !== creditId ||
+      asId(response.customer, "Customer balance transaction customer") !==
+        command.customerId ||
+      response.amount !== -command.amount.minor ||
+      String(response.currency).toUpperCase() !== command.amount.currency ||
+      metadata.support_case_id !== command.approvalCaseId ||
+      metadata.command_fingerprint !== command.fingerprint ||
+      metadata.subscription_id !== command.subscriptionId
+    )
+      throw new Error(
+        "Stripe customer balance transaction does not match the immutable credit command.",
+      );
+    return {
+      creditId,
+      customerId: command.customerId,
+      subscriptionId: command.subscriptionId,
+      amount: command.amount,
+      idempotencyKey: command.idempotencyKey,
+      executedAt: timestamp(response.created),
+      replayed: true,
+      status: "succeeded",
+      providerStatus: "created",
+      providerRefs: [ref("customer_balance_transaction", response)],
+    };
+  }
+
+  /** Recovery deliberately searches Stripe's durable customer-balance ledger
+   * by all immutable metadata. It never retries a POST: a missing receipt is
+   * an unresolved financial state, not evidence that no remote effect exists. */
+  async findSubscriptionCreditReceipt(
+    command: SubscriptionCreditCommand,
+    email: string,
+  ): Promise<SubscriptionCreditEffect | undefined> {
+    await this.subscriptionCreditCustomer(command, email);
+    const transactions = await this.list(
+      `/v1/customers/${encodeURIComponent(command.customerId)}/balance_transactions`,
+      new URLSearchParams(),
+    );
+    const matches = transactions.filter((value) => {
+      const metadata = value.metadata;
+      return (
+        value.livemode === false &&
+        asId(value.customer, "Customer balance transaction customer") ===
+          command.customerId &&
+        value.amount === -command.amount.minor &&
+        String(value.currency).toUpperCase() === command.amount.currency &&
+        metadata !== null &&
+        typeof metadata === "object" &&
+        !Array.isArray(metadata) &&
+        (metadata as Record<string, unknown>).support_case_id ===
+          command.approvalCaseId &&
+        (metadata as Record<string, unknown>).command_fingerprint ===
+          command.fingerprint &&
+        (metadata as Record<string, unknown>).subscription_id ===
+          command.subscriptionId
+      );
+    });
+    if (matches.length > 1)
+      throw new Error(
+        "Stripe balance transaction recovery is ambiguous for this immutable command.",
+      );
+    if (!matches[0]) return undefined;
+    return this.retrieveSubscriptionCredit(
+      command,
+      email,
+      asId(matches[0], "Customer balance transaction"),
+    );
   }
 
   /** Resolve one owned paid PaymentIntent and use it for every pre-POST

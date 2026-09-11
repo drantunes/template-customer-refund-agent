@@ -13,7 +13,15 @@ import {
 } from "../lib/dispatch-lease-scope";
 import { isRefundPolicyEvidenceError } from "../lib/refund-policy-evidence";
 import { resumeApprovedNativeTool } from "../providers/native-execution";
-import type { RefundEffect } from "../providers/contracts";
+import type {
+  RefundEffect,
+  SubscriptionCreditEffect,
+} from "../providers/contracts";
+import {
+  providerRegistry,
+  resolveConfiguredBinding,
+} from "../providers/registry";
+import { bindingsForPersistedCase } from "./provider-bindings";
 
 export type NativeRecoveryMastra = Mastra;
 
@@ -26,6 +34,15 @@ type PersistedRefundCommand = {
   fingerprint?: string;
   amount?: number;
   currency?: string;
+};
+type PersistedSubscriptionCreditCommand = {
+  customerId?: string;
+  subscriptionId?: string;
+  idempotencyKey?: string;
+  fingerprint?: string;
+  amount?: number;
+  currency?: string;
+  reason?: string;
 };
 
 /** Projects only an exact durable provider effect. A normal native-resume
@@ -99,6 +116,190 @@ export async function reconcileApprovedRefundEffect(input: {
   return true;
 }
 
+/** Credit recovery mirrors refund recovery but keeps its own command shape and
+ * customer-balance receipt.  A durable receipt is enough to project the
+ * result after restart; do not re-run the native POST. */
+export async function reconcileApprovedSubscriptionCreditEffect(input: {
+  store: CaseStore;
+  supportCase: SupportCase;
+  dispatch: DispatchRecord;
+  fingerprint: string;
+  command: PersistedSubscriptionCreditCommand | undefined;
+}) {
+  const { store, supportCase, dispatch, fingerprint, command } = input;
+  if (!command?.idempotencyKey) return false;
+  if (command.fingerprint !== fingerprint)
+    throw new Error(
+      "The persisted subscription credit command does not match the approved fingerprint.",
+    );
+  const existing = await store.idempotency(command.idempotencyKey);
+  if (!existing) return false;
+  if (existing.fingerprint !== fingerprint)
+    throw new Error(
+      "A durable subscription credit receipt does not match the immutable approved command.",
+    );
+  const effect = existing.effect as SubscriptionCreditEffect;
+  const expectedAmount =
+    typeof command.amount === "number" && typeof command.currency === "string"
+      ? legacyAmountToMoney(command.amount, command.currency)
+      : undefined;
+  if (
+    effect.idempotencyKey !== command.idempotencyKey ||
+    effect.customerId !== command.customerId ||
+    effect.subscriptionId !== command.subscriptionId ||
+    !effect.amount ||
+    !effect.creditId ||
+    !expectedAmount ||
+    effect.amount.currency !== expectedAmount.currency ||
+    effect.amount.minor !== expectedAmount.minor ||
+    !Number.isFinite(Date.parse(effect.executedAt))
+  )
+    throw new Error(
+      "A durable subscription credit receipt does not exactly match the approved command.",
+    );
+  const reconciled = {
+    creditId: effect.creditId,
+    customerId: effect.customerId,
+    subscriptionId: effect.subscriptionId,
+    amount: moneyToLegacyAmount(effect.amount),
+    currency: effect.amount.currency,
+    status: effect.replayed ? ("skipped" as const) : ("executed" as const),
+    idempotencyKey: effect.idempotencyKey,
+    executedAt: effect.executedAt,
+  };
+  const alreadyProjected =
+    supportCase.subscriptionCreditResult?.idempotencyKey ===
+      command.idempotencyKey &&
+    supportCase.subscriptionCreditResult.creditId === reconciled.creditId &&
+    supportCase.metadata.subscriptionCreditEffects?.[fingerprint]
+      ?.idempotencyKey === command.idempotencyKey;
+  if (alreadyProjected) return true;
+  await withDispatchLeaseScope(
+    {
+      dispatchId: dispatch.id,
+      caseId: dispatch.caseId,
+      turnId: dispatch.turnId,
+      leaseToken: dispatch.leaseToken!,
+    },
+    () =>
+      store.projectSubscriptionCreditToolExecution({
+        caseId: dispatch.caseId,
+        turnId: dispatch.turnId,
+        fingerprint,
+        idempotencyKey: command.idempotencyKey!,
+        result: reconciled,
+        effect,
+      }),
+  );
+  return true;
+}
+
+/** A response loss consumes the native tool snapshot but does not prove a
+ * provider failure. On a later recovery pass, inspect Stripe's durable ledger
+ * and project only the exact immutable receipt before resuming the enclosing
+ * workflow. */
+async function recoverAndProjectSubscriptionCreditReceipt(input: {
+  store: CaseStore;
+  supportCase: SupportCase;
+  dispatch: DispatchRecord;
+  fingerprint: string;
+  command: PersistedSubscriptionCreditCommand | undefined;
+}) {
+  const { store, supportCase, dispatch, fingerprint, command } = input;
+  if (
+    !command?.idempotencyKey ||
+    !command.customerId ||
+    !command.subscriptionId ||
+    !command.reason ||
+    typeof command.amount !== "number" ||
+    typeof command.currency !== "string" ||
+    command.fingerprint !== fingerprint
+  )
+    return false;
+  const binding = resolveConfiguredBinding(
+    bindingsForPersistedCase(supportCase).transactions,
+  );
+  const effect = await providerRegistry(binding)
+    .transactions(binding)
+    .retrieveSubscriptionCredit({
+      binding,
+      approvalCaseId: supportCase.id,
+      customerId: command.customerId,
+      subscriptionId: command.subscriptionId,
+      amount: legacyAmountToMoney(command.amount, command.currency),
+      reason: command.reason,
+      idempotencyKey: command.idempotencyKey,
+      fingerprint,
+    });
+  if (!effect) return false;
+  const result = {
+    creditId: effect.creditId,
+    customerId: effect.customerId,
+    subscriptionId: effect.subscriptionId,
+    amount: moneyToLegacyAmount(effect.amount),
+    currency: effect.amount.currency,
+    status: effect.replayed ? ("skipped" as const) : ("executed" as const),
+    idempotencyKey: effect.idempotencyKey,
+    executedAt: effect.executedAt,
+  };
+  await withDispatchLeaseScope(
+    {
+      dispatchId: dispatch.id,
+      caseId: dispatch.caseId,
+      turnId: dispatch.turnId,
+      leaseToken: dispatch.leaseToken!,
+    },
+    () =>
+      store.projectSubscriptionCreditToolExecution({
+        caseId: dispatch.caseId,
+        turnId: dispatch.turnId,
+        fingerprint,
+        idempotencyKey: command.idempotencyKey!,
+        result,
+        effect,
+      }),
+  );
+  return true;
+}
+
+async function hasUnknownStripeSubscriptionCreditAttempt(
+  store: CaseStore,
+  caseId: string,
+  fingerprint: string,
+  command: PersistedSubscriptionCreditCommand | undefined,
+) {
+  if (!command?.idempotencyKey) return false;
+  const attempt = await store.stripeSubscriptionCreditAttempt(
+    command.idempotencyKey,
+  );
+  return Boolean(
+    attempt &&
+    attempt.caseId === caseId &&
+    attempt.fingerprint === fingerprint &&
+    attempt.status === "unknown",
+  );
+}
+
+/** A definite Stripe refusal is terminal and already has its one durable
+ * staff-review outcome. Do not resume the consumed native snapshot again. */
+async function hasFailedStripeSubscriptionCreditAttempt(
+  store: CaseStore,
+  caseId: string,
+  fingerprint: string,
+  command: PersistedSubscriptionCreditCommand | undefined,
+) {
+  if (!command?.idempotencyKey) return false;
+  const attempt = await store.stripeSubscriptionCreditAttempt(
+    command.idempotencyKey,
+  );
+  return Boolean(
+    attempt &&
+    attempt.caseId === caseId &&
+    attempt.fingerprint === fingerprint &&
+    attempt.status === "failed",
+  );
+}
+
 /** A native tool can legitimately finish with a Stripe refund in `pending`.
  * The approval snapshot has then been consumed, but settlement is still owned
  * by the durable attempt/reconciliation worker. Treat it as a valid native
@@ -135,9 +336,18 @@ async function hasFailedStripeRefundAttempt(
     attempt &&
     attempt.caseId === caseId &&
     attempt.fingerprint === fingerprint &&
-    attempt.refundId &&
     attempt.status === "failed",
   );
+}
+
+async function cancelTerminalRefundWorkflow(
+  mastra: NativeRecoveryMastra,
+  workflowRunId: string,
+) {
+  const run = await mastra
+    .getWorkflow("resolveSupportCaseWorkflow")
+    .createRun({ runId: workflowRunId });
+  await run.cancel();
 }
 
 export async function recoverApprovedNativeDecisions(
@@ -155,21 +365,62 @@ export async function recoverApprovedNativeDecisions(
       item.turnId,
     );
     if (!dispatch || !item.workflowRunId) continue;
-    const command = item.supportCase.metadata.refundCommand;
+    const refundCommand = item.supportCase.metadata.refundCommand;
+    const creditCommand = item.supportCase.metadata.subscriptionCreditCommand;
+    const isCredit = Boolean(creditCommand && !refundCommand);
     const lease = renewDispatchLeaseWhileRunning(store, dispatch);
     try {
       await lease.renew();
       if (lease.lostOwnership) continue;
       lease.start();
-      const reconciledBefore = item.approved
-        ? await reconcileApprovedRefundEffect({
-            store,
-            supportCase: item.supportCase,
-            dispatch,
-            fingerprint: item.fingerprint,
-            command,
-          })
-        : false;
+      const reconciledBefore =
+        item.approved && (refundCommand || creditCommand)
+          ? isCredit
+            ? (await reconcileApprovedSubscriptionCreditEffect({
+                store,
+                supportCase: item.supportCase,
+                dispatch,
+                fingerprint: item.fingerprint,
+                command: creditCommand,
+              })) ||
+              (await recoverAndProjectSubscriptionCreditReceipt({
+                store,
+                supportCase: item.supportCase,
+                dispatch,
+                fingerprint: item.fingerprint,
+                command: creditCommand,
+              }))
+            : await reconcileApprovedRefundEffect({
+                store,
+                supportCase: item.supportCase,
+                dispatch,
+                fingerprint: item.fingerprint,
+                command: refundCommand,
+              })
+          : false;
+      // A confirmed no-effect failure consumes the native approval snapshot.
+      // On restart, detect it before any resume attempt and close the enclosing
+      // run after the durable case/outbox projection already exists.
+      if (
+        item.approved &&
+        refundCommand &&
+        (await hasFailedStripeRefundAttempt(
+          store,
+          item.caseId,
+          item.fingerprint,
+          refundCommand,
+        ))
+      ) {
+        await cancelTerminalRefundWorkflow(mastra, item.workflowRunId);
+        await store.completeDispatch(
+          dispatch.id,
+          "completed",
+          undefined,
+          dispatch.leaseToken,
+        );
+        recovered += 1;
+        continue;
+      }
       await withDispatchLeaseScope(
         {
           dispatchId: dispatch.id,
@@ -207,11 +458,31 @@ export async function recoverApprovedNativeDecisions(
       // can never legitimately emit an issued reply.
       if (
         item.approved &&
+        refundCommand &&
         (await hasFailedStripeRefundAttempt(
           store,
           item.caseId,
           item.fingerprint,
-          command,
+          refundCommand,
+        ))
+      ) {
+        await cancelTerminalRefundWorkflow(mastra, item.workflowRunId);
+        await store.completeDispatch(
+          dispatch.id,
+          "completed",
+          undefined,
+          dispatch.leaseToken,
+        );
+        recovered += 1;
+        continue;
+      }
+      if (
+        isCredit &&
+        (await hasFailedStripeSubscriptionCreditAttempt(
+          store,
+          item.caseId,
+          item.fingerprint,
+          creditCommand,
         ))
       ) {
         await store.completeDispatch(
@@ -223,29 +494,56 @@ export async function recoverApprovedNativeDecisions(
         recovered += 1;
         continue;
       }
-      const finalized = item.approved
-        ? await reconcileApprovedRefundEffect({
-            store,
-            supportCase: (await store.get(item.caseId)) ?? item.supportCase,
-            dispatch,
-            fingerprint: item.fingerprint,
-            command,
-          })
-        : false;
+      if (
+        isCredit &&
+        (await hasUnknownStripeSubscriptionCreditAttempt(
+          store,
+          item.caseId,
+          item.fingerprint,
+          creditCommand,
+        ))
+      ) {
+        await store.completeDispatch(
+          dispatch.id,
+          "suspended",
+          "Subscription credit receipt is awaiting durable provider recovery.",
+          dispatch.leaseToken,
+        );
+        continue;
+      }
+      const finalized =
+        item.approved && (refundCommand || creditCommand)
+          ? isCredit
+            ? await reconcileApprovedSubscriptionCreditEffect({
+                store,
+                supportCase: (await store.get(item.caseId)) ?? item.supportCase,
+                dispatch,
+                fingerprint: item.fingerprint,
+                command: creditCommand,
+              })
+            : await reconcileApprovedRefundEffect({
+                store,
+                supportCase: (await store.get(item.caseId)) ?? item.supportCase,
+                dispatch,
+                fingerprint: item.fingerprint,
+                command: refundCommand,
+              })
+          : false;
       if (
         item.approved &&
+        (refundCommand || creditCommand) &&
         !finalized &&
         !(await hasPendingStripeRefundAttempt(
           store,
           item.caseId,
           item.fingerprint,
-          command,
+          refundCommand,
         )) &&
         !(await hasFailedStripeRefundAttempt(
           store,
           item.caseId,
           item.fingerprint,
-          command,
+          refundCommand,
         ))
       ) {
         // The official native transition returned normally and the exact
@@ -255,7 +553,9 @@ export async function recoverApprovedNativeDecisions(
         await store.failDispatchAndCase(
           dispatch.id,
           item.caseId,
-          "Native approval completed without a durable refund effect.",
+          isCredit
+            ? "Native approval completed without a durable subscription credit receipt."
+            : "Native approval completed without a durable refund effect.",
           dispatch.leaseToken,
           "escalated",
         );

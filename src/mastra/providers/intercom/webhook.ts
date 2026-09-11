@@ -150,3 +150,11 @@ export function isCustomerConversationEvent(
     event.topic === "conversation.user.replied"
   );
 }
+
+/** Only this explicit topic may converge an existing case from the provider.
+ * Replies and notes stay ignored so app-originated activity cannot loop. */
+export function isAdminClosedConversationEvent(
+  event: VerifiedIntercomConversationWebhook,
+) {
+  return event.topic === "conversation.admin.closed";
+}

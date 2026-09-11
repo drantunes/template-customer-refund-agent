@@ -4,6 +4,7 @@ import {
   authenticateSeededCredentials,
   canAccessCase,
   issueLocalSession,
+  principalFromHeaders,
   verifyLocalSession,
 } from "../../src/mastra/server/auth";
 import { CaseStore } from "../../src/mastra/lib/case-store";
@@ -71,6 +72,43 @@ describe("local support auth", () => {
         metadata: {
           providerBinding: { tenantId: "local-demo" },
           ownerId: "customer-jordan",
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts a demo bridge only when its signature binds the exact Intercom contact", () => {
+    process.env.DEMO_AUTH_BRIDGE_SIGNING_KEY = key;
+    const payload = Buffer.from(
+      JSON.stringify({
+        id: "demo-customer",
+        email: "customer@example.test",
+        tenantId: "local-demo",
+        roles: ["customer"],
+        intercomContactId: "contact-stable",
+        stripeCustomerId: "cus-stable",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ).toString("base64url");
+    const token = `${payload}.${createHmac("sha256", key).update(payload).digest("base64url")}`;
+    const principal = principalFromHeaders(
+      new Headers({ authorization: `Bearer ${token}` }),
+    )!;
+    expect(
+      canAccessCase(principal, {
+        customer: { email: "different@example.test" },
+        metadata: {
+          providerBinding: { tenantId: "local-demo" },
+          ownerId: "intercom:local-demo:contact:contact-stable",
+        },
+      }),
+    ).toBe(true);
+    expect(
+      canAccessCase(principal, {
+        customer: { email: "customer@example.test" },
+        metadata: {
+          providerBinding: { tenantId: "local-demo" },
+          ownerId: "intercom:local-demo:contact:another-customer",
         },
       }),
     ).toBe(false);

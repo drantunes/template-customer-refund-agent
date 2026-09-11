@@ -13,11 +13,92 @@ import type { CaseFeedback } from "../domain/support-case";
 import { canAccessCase, hasRole } from "./auth";
 import {
   caseListResponseSchema,
+  customerFinancialRequestsResponseSchema,
   errorResponseSchema,
   feedbackRequestSchema,
   followUpRequestSchema,
+  manualResolutionContextSchema,
+  manualResolutionRequestSchema,
 } from "./contracts";
 import { caseScope, requirePrincipal, scopedCaseDto } from "./route-context";
+
+function canResolveManually(roles: readonly string[]) {
+  return roles.some((role) =>
+    ["support-agent", "approver", "admin"].includes(role),
+  );
+}
+
+export const supportCaseManualResolutionContextRoute = registerApiRoute(
+  "/support/cases/:caseId/manual-resolution",
+  {
+    method: "GET",
+    handler: async (c) => {
+      const supportCase = await caseStore.get(c.req.param("caseId"));
+      if (!supportCase) return c.json({ error: "Case not found." }, 404);
+      const current = caseScope(c, supportCase);
+      if (current instanceof Response) return current;
+      if (!canResolveManually(current.roles))
+        return c.json(
+          errorResponseSchema.parse({ error: "Insufficient authority." }),
+          403,
+        );
+      const context = await caseStore.manualResolutionContext(supportCase.id);
+      if (!context) return c.json({ error: "Case not found." }, 404);
+      return c.json(manualResolutionContextSchema.parse(context));
+    },
+  },
+);
+
+export const supportCaseManualResolutionRoute = registerApiRoute(
+  "/support/cases/:caseId/manual-resolution",
+  {
+    method: "POST",
+    handler: async (c) => {
+      const supportCase = await caseStore.get(c.req.param("caseId"));
+      if (!supportCase) return c.json({ error: "Case not found." }, 404);
+      const current = caseScope(c, supportCase);
+      if (current instanceof Response) return current;
+      if (!canResolveManually(current.roles))
+        return c.json(
+          errorResponseSchema.parse({ error: "Insufficient authority." }),
+          403,
+        );
+      let body: unknown;
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json(
+          errorResponseSchema.parse({
+            error: "Invalid manual-resolution payload.",
+          }),
+          400,
+        );
+      }
+      const parsed = manualResolutionRequestSchema.safeParse(body);
+      if (!parsed.success)
+        return c.json(
+          errorResponseSchema.parse({
+            error: "Invalid manual-resolution payload.",
+          }),
+          400,
+        );
+      const result = await caseStore.resolveManually({
+        caseId: supportCase.id,
+        tenantId: current.tenantId,
+        actorId: current.id,
+        ...parsed.data,
+      });
+      if (result.state === "conflict")
+        return c.json(errorResponseSchema.parse({ error: result.reason }), 409);
+      const updated = await caseStore.get(supportCase.id);
+      return c.json({
+        case: scopedCaseDto(updated!, current),
+        context: manualResolutionContextSchema.parse(result.context),
+        replayed: result.state === "replayed",
+      });
+    },
+  },
+);
 
 /** Follow-up execution is an operational entrypoint, not merely an HTTP
  * response. Classify its failure and leave a bounded durable retry or a human
@@ -235,6 +316,35 @@ export const supportCasesListRoute = registerApiRoute("/support/cases", {
     );
   },
 });
+
+/** Customer-facing financial history is a purpose-built read model. It does
+ * not reuse the staff case DTO because a command, approval note, or provider
+ * reference is never customer-visible. */
+export const supportCustomerFinancialRequestsRoute = registerApiRoute(
+  "/support/customer/financial-requests",
+  {
+    method: "GET",
+    handler: async (c) => {
+      const current = requirePrincipal(c);
+      if (current instanceof Response) return current;
+      if (!hasRole(current, "customer"))
+        return c.json(
+          errorResponseSchema.parse({ error: "Insufficient authority." }),
+          403,
+        );
+      const cases = (await caseStore.list()).filter((supportCase) =>
+        canAccessCase(current, supportCase),
+      );
+      return c.json(
+        customerFinancialRequestsResponseSchema.parse({
+          requests: await caseStore.customerFinancialRequests(
+            cases.map((supportCase) => supportCase.id),
+          ),
+        }),
+      );
+    },
+  },
+);
 
 export const supportCaseDetailRoute = registerApiRoute(
   "/support/cases/:caseId",

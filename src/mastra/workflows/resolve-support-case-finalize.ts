@@ -1,15 +1,20 @@
 import { createStep } from "@mastra/core/workflows";
 import { z } from "zod";
-import { type SupportCase } from "../domain/support-case";
+import {
+  subscriptionCreditResultSchema,
+  type SupportCase,
+} from "../domain/support-case";
 import {
   renderGroundedSupportResponse,
   safeEscalationResponse,
 } from "../domain/customer-response";
 import { persistedRefundCommandSchema } from "../domain/refund-command";
+import { persistedSubscriptionCreditCommandSchema } from "../domain/subscription-credit-command";
 import { STANDARD_REFUND_REVIEW_LIMIT } from "../domain/refund-review-limit";
 import { triageEscalationReason } from "../domain/resolution-decision";
 import { caseStore } from "../lib/case-store";
 import { legacyAmountToMoney, refundFingerprint } from "../lib/money";
+import { subscriptionCreditFingerprint } from "../lib/money";
 import {
   resolveConfiguredBinding,
   providerRegistry,
@@ -46,6 +51,20 @@ const durableRefundEffectSchema = z.object({
   idempotencyKey: z.string(),
   executedAt: z.string().refine((value) => Number.isFinite(Date.parse(value))),
   replayed: z.boolean().optional(),
+});
+
+const durableSubscriptionCreditEffectSchema = z.object({
+  creditId: z.string(),
+  customerId: z.string(),
+  subscriptionId: z.string(),
+  amount: z.object({
+    currency: z.string(),
+    minor: z.number().int().positive(),
+  }),
+  idempotencyKey: z.string(),
+  executedAt: z.string().refine((value) => Number.isFinite(Date.parse(value))),
+  replayed: z.boolean().optional(),
+  status: z.string().optional(),
 });
 
 /** A completed refund message is permitted only when every customer-visible
@@ -141,6 +160,137 @@ async function completedRefundResponse(
   return `Your refund of ${result.amount} ${result.currency} has been issued.`;
 }
 
+async function completedSubscriptionCreditResponse(
+  supportCase: SupportCase,
+  turnId: string,
+) {
+  const command = persistedSubscriptionCreditCommandSchema.safeParse(
+    supportCase.metadata.subscriptionCreditCommand,
+  );
+  const result = supportCase.subscriptionCreditResult;
+  const turn = await caseStore.turn(supportCase.id, turnId);
+  if (
+    !command.success ||
+    !result ||
+    !turn ||
+    !["executed", "skipped"].includes(result.status) ||
+    !supportCase.approval?.approved ||
+    turn.commandFingerprint !== command.data.fingerprint ||
+    supportCase.metadata.activeTurnId !== turnId
+  )
+    return undefined;
+  const binding = resolveConfiguredBinding(
+    bindingsForPersistedCase(supportCase).transactions,
+  );
+  const amount = legacyAmountToMoney(
+    command.data.amount,
+    command.data.currency,
+  );
+  const fingerprint = subscriptionCreditFingerprint({
+    binding,
+    approvalCaseId: supportCase.id,
+    customerId: command.data.customerId,
+    subscriptionId: command.data.subscriptionId,
+    amount,
+    reason: command.data.reason,
+    idempotencyKey: command.data.idempotencyKey,
+  });
+  const immutable = await caseStore.getAction(
+    supportCase.id,
+    "subscription-credit-command",
+    command.data.fingerprint,
+  );
+  const effect = await caseStore.idempotency(command.data.idempotencyKey);
+  const decision = await caseStore.approvalDecision(supportCase.id, turnId);
+  if (
+    fingerprint !== command.data.fingerprint ||
+    !decision?.approved ||
+    decision.commandFingerprint !== command.data.fingerprint ||
+    !immutable ||
+    !effect ||
+    effect.fingerprint !== command.data.fingerprint ||
+    JSON.stringify(
+      supportCase.metadata.subscriptionCreditEffects?.[fingerprint],
+    ) !== JSON.stringify(result) ||
+    result.customerId !== command.data.customerId ||
+    result.subscriptionId !== command.data.subscriptionId ||
+    result.amount !== command.data.amount ||
+    result.currency !== command.data.currency
+  )
+    return undefined;
+  return `A credit of ${result.amount} ${result.currency} has been added to your billing balance for a future invoice. Your subscription remains active.`;
+}
+
+/** An informational follow-up can mention an earlier credit only after every
+ * part of that earlier approval is still present in the immutable ledger. A
+ * fresh subscription lookup supplies the current active-state statement; the
+ * model draft never supplies a customer-visible financial claim. */
+export async function priorSubscriptionCreditStatusResponse(
+  supportCase: SupportCase,
+) {
+  const subscription = supportCase.subscriptionLookup?.subscription;
+  if (!subscription || subscription.status !== "active") return undefined;
+  const turns = await caseStore.turns(supportCase.id);
+  for (const turn of [...turns].reverse()) {
+    const result = subscriptionCreditResultSchema.safeParse(
+      turn.outcome?.subscriptionCreditResult,
+    );
+    const fingerprint = turn.commandFingerprint;
+    if (
+      !result.success ||
+      !fingerprint ||
+      !["executed", "skipped"].includes(result.data.status) ||
+      result.data.subscriptionId !== subscription.subscriptionId
+    )
+      continue;
+    const command = persistedSubscriptionCreditCommandSchema.safeParse(
+      await caseStore.getAction(
+        supportCase.id,
+        "subscription-credit-command",
+        fingerprint,
+      ),
+    );
+    const decision = await caseStore.approvalDecision(supportCase.id, turn.id);
+    const receipt = await caseStore.idempotency(result.data.idempotencyKey);
+    const effect = durableSubscriptionCreditEffectSchema.safeParse(
+      receipt?.effect,
+    );
+    let expectedAmount;
+    try {
+      expectedAmount = legacyAmountToMoney(
+        command.success ? command.data.amount : 0,
+        command.success ? command.data.currency : "USD",
+      );
+    } catch {
+      continue;
+    }
+    if (
+      !command.success ||
+      command.data.approvalCaseId !== supportCase.id ||
+      command.data.fingerprint !== fingerprint ||
+      command.data.customerId !== result.data.customerId ||
+      command.data.subscriptionId !== result.data.subscriptionId ||
+      command.data.amount !== result.data.amount ||
+      command.data.currency !== result.data.currency ||
+      command.data.idempotencyKey !== result.data.idempotencyKey ||
+      !decision?.approved ||
+      decision.commandFingerprint !== fingerprint ||
+      receipt?.fingerprint !== fingerprint ||
+      !effect.success ||
+      effect.data.creditId !== result.data.creditId ||
+      effect.data.customerId !== result.data.customerId ||
+      effect.data.subscriptionId !== result.data.subscriptionId ||
+      effect.data.amount.currency !== expectedAmount.currency ||
+      effect.data.amount.minor !== expectedAmount.minor ||
+      effect.data.idempotencyKey !== result.data.idempotencyKey ||
+      effect.data.executedAt !== result.data.executedAt
+    )
+      continue;
+    return `Your subscription is active. A ${result.data.amount} ${result.data.currency} billing credit was created for a future invoice. This confirms the credit was issued; it does not establish whether an invoice has already used it.`;
+  }
+  return undefined;
+}
+
 const approvalOutputSchema = z.object({
   caseId: z.string(),
   turnId: z.string(),
@@ -180,6 +330,27 @@ export const resolveCaseStep = createStep({
     if (triageReason) status = "escalated";
     const mustEscalate = Boolean(triageReason || draft.requiresEscalation);
 
+    const informationalCreditStatus =
+      !mustEscalate &&
+      supportCase.triage?.intent === "account_issue" &&
+      supportCase.triage.accountIssueSubtype ===
+        "informational_credit_status" &&
+      !draft.recommendRefund &&
+      draft.resolutionAction === "none";
+    if (informationalCreditStatus) {
+      const priorCredit =
+        await priorSubscriptionCreditStatusResponse(supportCase);
+      if (priorCredit) {
+        status = "resolved";
+        finalResponse = priorCredit;
+      } else {
+        status = "escalated";
+        escalationReason =
+          "The earlier subscription credit could not be verified from durable approval and receipt evidence.";
+        finalResponse = safeEscalationResponse;
+      }
+    }
+
     const cancellation = supportCase.metadata.cancellationEffect;
     if (
       !mustEscalate &&
@@ -200,7 +371,27 @@ export const resolveCaseStep = createStep({
         "Subscription cancellation was not durably scheduled.";
     }
 
-    if (draft.recommendRefund && !mustEscalate) {
+    if (draft.resolutionAction === "subscription_credit" && !mustEscalate) {
+      if (!inputData.approved) {
+        status = "escalated";
+        escalationReason = `Subscription credit declined by ${inputData.approverId ?? "reviewer"}${inputData.note ? `: ${inputData.note}` : "."}`;
+        finalResponse = safeEscalationResponse;
+      } else {
+        const completed = await completedSubscriptionCreditResponse(
+          supportCase,
+          inputData.turnId,
+        );
+        if (completed) {
+          status = "resolved";
+          finalResponse = completed;
+        } else {
+          status = "escalated";
+          escalationReason =
+            "The approved subscription credit has no durable billing-credit receipt.";
+          finalResponse = safeEscalationResponse;
+        }
+      }
+    } else if (draft.recommendRefund && !mustEscalate) {
       if (!inputData.approved) {
         status = "escalated";
         escalationReason = `Refund declined by ${inputData.approverId ?? "reviewer"}${inputData.note ? `: ${inputData.note}` : "."}`;

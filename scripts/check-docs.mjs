@@ -6,7 +6,8 @@ const documentation = [
   "README.md",
   "CONTRIBUTING.md",
   ".env.example",
-  "web/README.md",
+  "support-demo-ui/README.md",
+  "client-demo-ui/README.md",
   ...walk(resolve(root, "docs")).map((path) => relative(root, path)),
 ];
 const errors = [];
@@ -15,8 +16,19 @@ const packageScripts = {
     JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")).scripts,
   ),
   web: Object.keys(
-    JSON.parse(readFileSync(resolve(root, "web/package.json"), "utf8")).scripts,
+    JSON.parse(
+      readFileSync(resolve(root, "support-demo-ui/package.json"), "utf8"),
+    ).scripts,
   ),
+  demo: Object.keys(
+    JSON.parse(
+      readFileSync(resolve(root, "client-demo-ui/package.json"), "utf8"),
+    ).scripts,
+  ),
+};
+const workspaceScripts = {
+  "support-demo-ui": packageScripts.web,
+  "client-demo-ui": packageScripts.demo,
 };
 
 for (const file of documentation) {
@@ -52,7 +64,13 @@ for (const file of documentation) {
     /npm\s+run(?:\s+--workspace\s+([^\s]+))?\s+([A-Za-z0-9:_-]+)/g,
   )) {
     const [, workspace, script] = match;
-    const available = workspace ? packageScripts.web : packageScripts.root;
+    const available = workspace
+      ? workspaceScripts[workspace]
+      : packageScripts.root;
+    if (!available) {
+      errors.push(`${file} references unknown npm workspace ${workspace}.`);
+      continue;
+    }
     if (!available.includes(script))
       errors.push(`${file} references missing npm script ${script}.`);
   }
@@ -68,10 +86,7 @@ if (
   )
 )
   errors.push("docs/examples.md must identify every example as synthetic.");
-for (const asset of [
-  "docs/assets/local-demo-portal.png",
-  "docs/assets/local-demo-admin.png",
-])
+for (const asset of ["docs/assets/local-demo-admin.png"])
   if (!existsSync(resolve(root, asset)))
     errors.push(`Missing documented asset ${asset}.`);
 

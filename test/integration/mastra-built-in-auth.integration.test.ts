@@ -96,11 +96,18 @@ function nativeStudioReadModel(): LanguageModelV2 {
   };
 }
 
-async function configuredServer() {
+async function configuredServer(options: { localStudioDev?: boolean } = {}) {
   const path = temporaryDatabasePath("phase003-built-in-auth");
   databases.push(path, `${path}-shm`, `${path}-wal`);
   process.env.TURSO_DATABASE_URL = `file:${path}`;
   process.env.SUPPORT_SOURCE = "mock";
+  if (options.localStudioDev) {
+    process.env.MASTRA_DEV = "true";
+    process.env.MASTRA_TELEMETRY_COMMAND = "dev";
+  } else {
+    delete process.env.MASTRA_DEV;
+    delete process.env.MASTRA_TELEMETRY_COMMAND;
+  }
   vi.resetModules();
   vi.doMock("@mastra/core/llm", async (importOriginal) => {
     const actual = await importOriginal<typeof import("@mastra/core/llm")>();
@@ -130,12 +137,600 @@ afterEach(async () => {
   vi.restoreAllMocks();
   vi.doUnmock("../../src/mastra/evals");
   vi.doUnmock("@mastra/core/llm");
+  delete process.env.MASTRA_DEV;
+  delete process.env.MASTRA_TELEMETRY_COMMAND;
   await Promise.all(
     databases.splice(0).map((path) => rm(path, { force: true })),
   );
 });
 
 describe("configured Mastra built-in API authorization", () => {
+  it("admits only the loopback Studio surface without a login in the exact dev child", async () => {
+    const { mastra, server } = await configuredServer({ localStudioDev: true });
+    const loopback = "http://localhost";
+    expect(mastra.getServer()?.auth).toBeUndefined();
+    expect(mastra.getServer()?.host).toBe("127.0.0.1");
+    expect(mastra.getServer()?.studioHost).toBe("localhost");
+
+    const capabilities = await server.request(
+      `${loopback}/api/auth/capabilities`,
+    );
+    expect(capabilities.status).toBe(200);
+    expect(await capabilities.json()).toMatchObject({
+      enabled: false,
+      login: null,
+    });
+    expect((await server.request(`${loopback}/api/workflows`)).status).toBe(
+      200,
+    );
+    expect(
+      (
+        await server.request(
+          `${loopback}/api/workflows/resolveSupportCaseWorkflow/runs`,
+          { headers: { cookie: "mastra-token=stale-session" } },
+        )
+      ).status,
+    ).toBe(200);
+
+    expect(
+      (await server.request("http://public.example/api/workflows")).status,
+    ).toBe(403);
+    for (const headers of [
+      { host: "public.example" },
+      { forwarded: "for=203.0.113.1;proto=https" },
+      { via: "1.1 proxy.example" },
+      { "x-forwarded-for": "203.0.113.1" },
+      { "x-forwarded-host": "public.example" },
+      { "x-forwarded-proto": "https" },
+    ])
+      expect(
+        (await server.request(`${loopback}/api/workflows`, { headers })).status,
+      ).toBe(403);
+
+    for (const [headers, status] of [
+      [{ authorization: "Bearer invalid-token" }, 401],
+      [
+        {
+          authorization: `Bearer ${issueLocalSession({ id: "customer-alex" })}`,
+        },
+        403,
+      ],
+      [
+        {
+          authorization: `Bearer ${issueLocalSession({ id: "approver-demo" })}`,
+        },
+        403,
+      ],
+      [
+        {
+          authorization: `Bearer ${issueLocalSession({ id: "other-tenant-agent" })}`,
+        },
+        403,
+      ],
+    ] as const) {
+      expect(
+        (
+          await server.request(`${loopback}/api/workflows`, {
+            headers,
+          })
+        ).status,
+      ).toBe(status);
+    }
+
+    for (const url of [
+      `${loopback}/api/tools/issue_refund/execute`,
+      `${loopback}/api/workflows/resolveSupportCaseWorkflow/start`,
+      `${loopback}/api/agents/refund-execution-agent/stream`,
+    ])
+      expect(
+        (
+          await server.request(url, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          })
+        ).status,
+      ).toBe(403);
+
+    expect(
+      (await server.request("http://support.test/support/openapi.json")).status,
+    ).toBe(401);
+    expect(
+      (
+        await server.request("http://support.test/support/openapi.json", {
+          headers: {
+            authorization: `Bearer ${issueLocalSession({ id: "admin-demo" })}`,
+          },
+        })
+      ).status,
+    ).toBe(200);
+  });
+
+  it("filters legacy NULL-resource workflow history before tenant totals, pagination, and detail", async () => {
+    const { mastra, server } = await configuredServer();
+    const { caseStore } = await import("../../src/mastra/lib/case-store");
+    const createdAt = new Date("2026-09-10T00:00:00.000Z");
+    const localCase = {
+      id: "studio-history-local",
+      externalId: "studio-history-local-event",
+      source: "mock-email" as const,
+      customer: { email: "alex@example.com" },
+      subject: "synthetic history",
+      messages: [],
+      status: "resolved" as const,
+      createdAt: createdAt.toISOString(),
+      updatedAt: createdAt.toISOString(),
+      metadata: {
+        ownerId: "customer-alex",
+        providerBinding: {
+          tenantId: "local-demo",
+          providerKind: "local" as const,
+          providerAccountId: "history-account",
+          externalConversationId: "history-local",
+        },
+      },
+    };
+    await caseStore.create(localCase);
+    await caseStore.create({
+      ...localCase,
+      id: "studio-history-foreign",
+      externalId: "studio-history-foreign-event",
+      metadata: {
+        ...localCase.metadata,
+        ownerId: "other-tenant-agent",
+        providerBinding: {
+          ...localCase.metadata.providerBinding,
+          tenantId: "other-tenant",
+          externalConversationId: "history-foreign",
+        },
+      },
+    });
+    await caseStore.getClient().execute({
+      sql: "INSERT INTO support_dispatch(id, case_id, turn_id, run_id, state, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, 'completed', 1, ?, ?)",
+      args: [
+        "studio-history-dispatch",
+        localCase.id,
+        "studio-history-turn",
+        "studio-history-authorized",
+        createdAt.toISOString(),
+        createdAt.toISOString(),
+      ],
+    });
+    await caseStore.getClient().execute({
+      sql: "INSERT INTO support_dispatch(id, case_id, turn_id, run_id, state, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, 'completed', 1, ?, ?)",
+      args: [
+        "studio-history-dispatch-third",
+        localCase.id,
+        "studio-history-turn-third",
+        "studio-history-authorized-third",
+        createdAt.toISOString(),
+        createdAt.toISOString(),
+      ],
+    });
+    await caseStore.getClient().execute({
+      sql: "INSERT INTO support_dispatch(id, case_id, turn_id, run_id, state, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, 'completed', 1, ?, ?)",
+      args: [
+        "studio-history-dispatch-second",
+        localCase.id,
+        "studio-history-turn-second",
+        "studio-history-authorized-second",
+        createdAt.toISOString(),
+        createdAt.toISOString(),
+      ],
+    });
+    const runs = [
+      {
+        workflowName: "resolveSupportCaseWorkflow",
+        runId: "studio-history-authorized",
+        snapshot: { status: "suspended" },
+        createdAt,
+        updatedAt: createdAt,
+      },
+      {
+        workflowName: "resolveSupportCaseWorkflow",
+        runId: "studio-history-foreign",
+        snapshot: { status: "suspended" },
+        createdAt: new Date(createdAt.getTime() + 1),
+        updatedAt: createdAt,
+      },
+      {
+        workflowName: "resolveSupportCaseWorkflow",
+        runId: "studio-history-authorized-second",
+        snapshot: { status: "canceled" },
+        createdAt: new Date(createdAt.getTime() + 2),
+        updatedAt: createdAt,
+      },
+      {
+        workflowName: "resolveSupportCaseWorkflow",
+        runId: "studio-history-authorized-third",
+        snapshot: { status: "failed" },
+        createdAt: new Date(createdAt.getTime() + 3),
+        updatedAt: createdAt,
+      },
+    ];
+    const originalWorkflow = mastra.getWorkflow.bind(mastra);
+    vi.spyOn(mastra, "getWorkflow").mockImplementation((id) => {
+      if (id !== "resolveSupportCaseWorkflow") return originalWorkflow(id);
+      return {
+        listWorkflowRuns: async () => ({ runs, total: runs.length }),
+        getWorkflowRunById: async (runId: string) =>
+          runs.find((run) => run.runId === runId)
+            ? { runId, workflowName: id, status: "suspended" }
+            : null,
+      } as never;
+    });
+    const headers = {
+      authorization: `Bearer ${issueLocalSession({ id: "support-agent-demo" })}`,
+    };
+    const list = await server.request(
+      "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?perPage=1&page=0&resourceId=attacker&status=suspended",
+      { headers },
+    );
+    expect(list.status).toBe(200);
+    expect(await list.json()).toMatchObject({
+      total: 1,
+      runs: [{ runId: "studio-history-authorized" }],
+    });
+    const legacyPage = await server.request(
+      "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?limit=1&offset=2",
+      { headers },
+    );
+    expect(legacyPage.status).toBe(200);
+    expect(await legacyPage.json()).toMatchObject({
+      total: 3,
+      runs: [{ runId: "studio-history-authorized" }],
+    });
+    const omittedPage = await server.request(
+      "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?perPage=1",
+      { headers },
+    );
+    expect(omittedPage.status).toBe(200);
+    expect(await omittedPage.json()).toMatchObject({
+      total: 3,
+      runs: [
+        { runId: "studio-history-authorized-third" },
+        { runId: "studio-history-authorized-second" },
+        { runId: "studio-history-authorized" },
+      ],
+    });
+    expect(
+      await (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?status=canceled",
+          { headers },
+        )
+      ).json(),
+    ).toMatchObject({
+      total: 1,
+      runs: [{ runId: "studio-history-authorized-second" }],
+    });
+    expect(
+      await (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?status=failed",
+          { headers },
+        )
+      ).json(),
+    ).toMatchObject({
+      total: 1,
+      runs: [{ runId: "studio-history-authorized-third" }],
+    });
+    expect(
+      (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?status=not-a-status",
+          { headers },
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?status=",
+          { headers },
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      await (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?fromDate=2026-09-11T00:00:00.000Z",
+          { headers },
+        )
+      ).json(),
+    ).toMatchObject({ total: 0, runs: [] });
+    expect(
+      (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?toDate=not-a-date",
+          { headers },
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs/studio-history-authorized",
+          { headers },
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs/studio-history-foreign",
+          { headers },
+        )
+      ).status,
+    ).toBe(404);
+  });
+
+  it("deletes only terminal, case-scoped Studio snapshots on direct local dev loopback", async () => {
+    const { mastra, server } = await configuredServer({ localStudioDev: true });
+    const { caseStore } = await import("../../src/mastra/lib/case-store");
+    const createdAt = new Date("2026-09-10T00:00:00.000Z");
+    const localCase = {
+      id: "studio-delete-local",
+      externalId: "studio-delete-local-event",
+      source: "mock-email" as const,
+      customer: { email: "alex@example.com" },
+      subject: "synthetic deletion",
+      messages: [],
+      status: "resolved" as const,
+      createdAt: createdAt.toISOString(),
+      updatedAt: createdAt.toISOString(),
+      metadata: {
+        ownerId: "customer-alex",
+        providerBinding: {
+          tenantId: "local-demo",
+          providerKind: "local" as const,
+          providerAccountId: "delete-account",
+          externalConversationId: "delete-local",
+        },
+      },
+    };
+    await caseStore.create(localCase);
+    await caseStore.create({
+      ...localCase,
+      id: "studio-delete-foreign",
+      externalId: "studio-delete-foreign-event",
+      metadata: {
+        ...localCase.metadata,
+        ownerId: "other-tenant-agent",
+        providerBinding: {
+          ...localCase.metadata.providerBinding,
+          tenantId: "other-tenant",
+          externalConversationId: "delete-foreign",
+        },
+      },
+    });
+    const client = caseStore.getClient();
+    for (const [id, caseId, turnId, runId, state] of [
+      [
+        "studio-delete-dispatch",
+        localCase.id,
+        "studio-delete-turn",
+        "studio-delete-terminal",
+        "completed",
+      ],
+      [
+        "studio-delete-suspended",
+        localCase.id,
+        "studio-delete-turn-suspended",
+        "studio-delete-suspended-terminal",
+        "failed",
+      ],
+      [
+        "studio-delete-active",
+        localCase.id,
+        "studio-delete-turn-active",
+        "studio-delete-active",
+        "pending",
+      ],
+      [
+        "studio-delete-foreign",
+        "studio-delete-foreign",
+        "studio-delete-turn-foreign",
+        "studio-delete-foreign",
+        "completed",
+      ],
+      [
+        "studio-delete-unknown",
+        localCase.id,
+        "studio-delete-turn-unknown",
+        "studio-delete-unknown",
+        "completed",
+      ],
+    ])
+      await client.execute({
+        sql: "INSERT INTO support_dispatch(id, case_id, turn_id, run_id, state, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+        args: [
+          id,
+          caseId,
+          turnId,
+          runId,
+          state,
+          createdAt.toISOString(),
+          createdAt.toISOString(),
+        ],
+      });
+    await client.execute({
+      sql: "INSERT INTO support_turns(id, case_id, event_id, sequence, state, created_at, updated_at) VALUES (?, ?, ?, 1, 'pending', ?, ?)",
+      args: [
+        "studio-delete-turn-active",
+        localCase.id,
+        "studio-delete-event-active",
+        createdAt.toISOString(),
+        createdAt.toISOString(),
+      ],
+    });
+    await client.execute({
+      sql: "INSERT INTO support_decisions(id, case_id, turn_id, command_fingerprint, native_run_id, native_tool_call_id, principal_id, approved, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+      args: [
+        "studio-delete-pending-decision",
+        localCase.id,
+        "studio-delete-turn-active",
+        "studio-delete-fingerprint",
+        "studio-delete-active",
+        "studio-delete-tool-call",
+        "approver-demo",
+        "synthetic pending approval",
+        createdAt.toISOString(),
+      ],
+    });
+    await client.execute({
+      sql: "INSERT INTO support_stripe_refund_attempts(id, case_id, tenant_id, provider_account_id, command_fingerprint, idempotency_key, dispatch_id, lease_token, turn_id, command_data, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)",
+      args: [
+        "studio-delete-financial-attempt",
+        localCase.id,
+        "local-demo",
+        "synthetic-account",
+        "studio-delete-financial-fingerprint",
+        "studio-delete-financial-key",
+        "studio-delete-active",
+        "synthetic-lease-token",
+        "studio-delete-turn-active",
+        "{}",
+        createdAt.toISOString(),
+        createdAt.toISOString(),
+      ],
+    });
+    const workflowStore = (await mastra
+      .getStorage()!
+      .getStore("workflows")) as {
+      persistWorkflowSnapshot(input: {
+        workflowName: string;
+        runId: string;
+        snapshot: never;
+        createdAt: Date;
+        updatedAt: Date;
+      }): Promise<void>;
+    };
+    for (const [runId, status] of [
+      ["studio-delete-terminal", "failed"],
+      ["studio-delete-suspended-terminal", "suspended"],
+      ["studio-delete-active", "success"],
+      ["studio-delete-unknown", "unknown"],
+      ["studio-delete-foreign", "failed"],
+    ])
+      await workflowStore.persistWorkflowSnapshot({
+        workflowName: "resolve-support-case",
+        runId,
+        snapshot: { status } as never,
+        createdAt,
+        updatedAt: createdAt,
+      });
+    const runUrl = (runId: string) =>
+      `http://localhost/api/workflows/resolveSupportCaseWorkflow/runs/${runId}`;
+    const counts = async () =>
+      Promise.all(
+        [
+          "support_cases",
+          "support_turns",
+          "support_decisions",
+          "support_stripe_refund_attempts",
+          "support_dispatch",
+        ].map(async (table) =>
+          Number(
+            (await client.execute(`SELECT COUNT(*) AS count FROM ${table}`))
+              .rows[0].count,
+          ),
+        ),
+      );
+    const before = await counts();
+    const deleted = await server.request(runUrl("studio-delete-terminal"), {
+      method: "DELETE",
+      headers: { origin: "http://localhost" },
+    });
+    expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toEqual({ message: "Workflow run deleted" });
+    expect(
+      (
+        await server.request(runUrl("studio-delete-terminal"), {
+          headers: { origin: "http://localhost" },
+        })
+      ).status,
+    ).toBe(404);
+    expect(await counts()).toEqual(before);
+    expect(
+      (
+        await server.request(runUrl("studio-delete-suspended-terminal"), {
+          method: "DELETE",
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await server.request(runUrl("studio-delete-active"), {
+          method: "DELETE",
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await server.request(runUrl("studio-delete-unknown"), {
+          method: "DELETE",
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await server.request(runUrl("studio-delete-foreign"), {
+          method: "DELETE",
+        })
+      ).status,
+    ).toBe(404);
+    for (const id of ["customer-alex", "approver-demo", "other-tenant-agent"])
+      expect(
+        (
+          await server.request(runUrl("studio-delete-active"), {
+            method: "DELETE",
+            headers: {
+              authorization: `Bearer ${issueLocalSession({ id: id as "customer-alex" })}`,
+            },
+          })
+        ).status,
+      ).toBe(403);
+    expect(
+      (
+        await server.request(runUrl("studio-delete-active"), {
+          method: "DELETE",
+          headers: { authorization: "Bearer invalid" },
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await server.request(runUrl("studio-delete-active"), {
+          method: "DELETE",
+          headers: {
+            authorization: `Bearer ${issueLocalSession({ id: "support-agent-demo" })}`,
+            forwarded: "for=203.0.113.1",
+          },
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await server.request(runUrl("studio-delete-active"), {
+          method: "DELETE",
+          headers: { origin: "https://foreign.example" },
+        })
+      ).status,
+    ).toBe(403);
+    const production = await configuredServer();
+    expect(
+      (
+        await production.server.request(runUrl("studio-delete-active"), {
+          method: "DELETE",
+          headers: {
+            authorization: `Bearer ${issueLocalSession({ id: "support-agent-demo" })}`,
+          },
+        })
+      ).status,
+    ).toBe(403);
+  });
+
   it("requires bearer authentication for the OpenAPI contract it returns", async () => {
     const { server } = await configuredServer();
 
@@ -309,13 +904,34 @@ describe("configured Mastra built-in API authorization", () => {
         })
       ).status,
     ).toBe(200);
-    expect(
-      (
-        await server.request("http://support.test/api/workflows", {
-          headers: staffHeaders,
-        })
-      ).status,
-    ).toBe(200);
+    const listedWorkflowsResponse = await server.request(
+      "http://support.test/api/workflows",
+      { headers: staffHeaders },
+    );
+    expect(listedWorkflowsResponse.status).toBe(200);
+    const listedWorkflows = (await listedWorkflowsResponse.json()) as Record<
+      string,
+      { stepGraph: unknown[] }
+    >;
+    expect(Object.keys(listedWorkflows)).toEqual([
+      "ingestSupportCaseWorkflow",
+      "resolveSupportCaseWorkflow",
+      "indexSupportKnowledgeWorkflow",
+    ]);
+    for (const [workflowId, listedWorkflow] of Object.entries(
+      listedWorkflows,
+    )) {
+      const workflowDetailResponse = await server.request(
+        `http://support.test/api/workflows/${workflowId}`,
+        { headers: staffHeaders },
+      );
+      expect(workflowDetailResponse.status).toBe(200);
+      const workflowDetail = (await workflowDetailResponse.json()) as {
+        stepGraph: unknown[];
+      };
+      expect(workflowDetail.stepGraph).toEqual(listedWorkflow.stepGraph);
+      expect(workflowDetail.stepGraph.length).toBeGreaterThan(0);
+    }
     expect(
       (
         await server.request("http://support.test/api/tools", {
@@ -361,11 +977,36 @@ describe("configured Mastra built-in API authorization", () => {
       },
     );
     expect(otherTenant.status).toBe(403);
+    const staffHistory = await server.request(
+      "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs?resourceId=attacker&perPage=1&page=0",
+      { headers: staffHeaders },
+    );
+    expect(staffHistory.status).toBe(200);
+    expect(await staffHistory.json()).toMatchObject({
+      runs: expect.any(Array),
+      total: expect.any(Number),
+    });
     expect(
       (
         await server.request(
           "http://support.test/api/workflows/resolveSupportCaseWorkflow/runs",
-          { headers: staffHeaders },
+          {
+            headers: {
+              authorization: `Bearer ${issueLocalSession({ id: "customer-alex" })}`,
+            },
+          },
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await server.request(
+          "http://support.test/api/workflows/resolveSupportCaseWorkflow/start-async",
+          {
+            method: "POST",
+            headers: { ...staffHeaders, "content-type": "application/json" },
+            body: JSON.stringify({}),
+          },
         )
       ).status,
     ).toBe(403);
@@ -693,15 +1334,20 @@ describe("configured Mastra built-in API authorization", () => {
       await import("../../src/mastra/lib/monitoring");
     const { defaultLocalBinding, deliverOutbox, localRuntime } =
       await import("../../src/mastra/runtime/local-runtime");
-    const binding = defaultLocalBinding("operational-span-conversation");
-    await localRuntime.seed(binding);
+    const slowBinding = defaultLocalBinding("operational-span-slow");
+    const failingBinding = defaultLocalBinding("operational-span-failure");
+    await localRuntime.seed(slowBinding);
+    await localRuntime.seed(failingBinding);
     const observability = mastra.observability.getSelectedInstance({})!;
     const root = observability.startSpan({
       name: "phase004-operational-test",
       type: SpanType.WORKFLOW_RUN,
     });
     const createdAt = new Date().toISOString();
-    const makeCase = (id: string) => ({
+    const makeCase = (
+      id: string,
+      binding: ReturnType<typeof defaultLocalBinding>,
+    ) => ({
       id,
       externalId: id,
       source: "mock-email" as const,
@@ -714,14 +1360,14 @@ describe("configured Mastra built-in API authorization", () => {
       traceId: root.traceId,
       metadata: { ownerId: "customer-alex", providerBinding: binding },
     });
-    const slowCase = makeCase("operational-span-slow");
-    const failingCase = makeCase("operational-span-failure");
+    const slowCase = makeCase("operational-span-slow", slowBinding);
+    const failingCase = makeCase("operational-span-failure", failingBinding);
     await caseStore.create(slowCase);
     await caseStore.create(failingCase);
     await caseStore.enqueueDelivery({
       id: "operational-span-slow-outbox",
       caseId: slowCase.id,
-      binding,
+      binding: slowBinding,
       body: "slow synthetic delivery",
       status: "resolved",
       originatingTurnId: "operational-span-slow-turn",
@@ -732,7 +1378,7 @@ describe("configured Mastra built-in API authorization", () => {
     await caseStore.enqueueDelivery({
       id: "operational-span-failure-outbox",
       caseId: failingCase.id,
-      binding,
+      binding: failingBinding,
       body: "failing synthetic delivery",
       status: "resolved",
       originatingTurnId: "operational-span-failure-turn",
@@ -740,7 +1386,7 @@ describe("configured Mastra built-in API authorization", () => {
       originatingTraceId: root.traceId,
       correlationState: "known",
     });
-    const support = localRuntime.support(binding);
+    const support = localRuntime.support(slowBinding);
     const registry = {
       support: () => ({
         kind: "local" as const,
@@ -786,7 +1432,10 @@ describe("configured Mastra built-in API authorization", () => {
     root.end();
     await mastra.observability.flush();
 
-    const summary = await computeMonitoringSummary(mastra, binding.tenantId);
+    const summary = await computeMonitoringSummary(
+      mastra,
+      slowBinding.tenantId,
+    );
     expect(summary.telemetry.providerCalls).toContainEqual({
       operation: "support.deliver",
       calls: 2,
@@ -940,7 +1589,7 @@ describe("configured Mastra built-in API authorization", () => {
     expect(summaryA.telemetry.providerCalls).toContainEqual(
       expect.objectContaining({
         operation: "knowledge.fetch_document",
-        calls: 6,
+        calls: 8,
       }),
     );
     expect(
@@ -1006,7 +1655,7 @@ describe("configured Mastra built-in API authorization", () => {
       await import("../../src/mastra/lib/monitoring");
     const { defaultLocalBinding } =
       await import("../../src/mastra/runtime/local-runtime");
-    const binding = defaultLocalBinding("fulfilled-null-trace");
+    const tenantId = defaultLocalBinding("retained-trace-case").tenantId;
     const root = mastra.observability.getSelectedInstance({})!.startSpan({
       name: "retained-tenant-trace",
       type: SpanType.WORKFLOW_RUN,
@@ -1017,7 +1666,8 @@ describe("configured Mastra built-in API authorization", () => {
     for (const [id, traceId] of [
       ["retained-trace-case", root.traceId],
       ["missing-trace-case", "retained-and-purged-trace"],
-    ])
+    ]) {
+      const binding = defaultLocalBinding(id);
       await caseStore.create({
         id,
         externalId: id,
@@ -1031,6 +1681,7 @@ describe("configured Mastra built-in API authorization", () => {
         traceId,
         metadata: { ownerId: "customer-alex", providerBinding: binding },
       });
+    }
     const storage = (await mastra.getStorage()!.getStore("observability")) as {
       getTrace(args: { traceId: string }): Promise<unknown>;
     };
@@ -1040,7 +1691,7 @@ describe("configured Mastra built-in API authorization", () => {
         ? Promise.resolve(null)
         : getTrace({ traceId }),
     );
-    const summary = await computeMonitoringSummary(mastra, binding.tenantId);
+    const summary = await computeMonitoringSummary(mastra, tenantId);
     expect(summary.telemetry.observedTraces).toBe(1);
     expect(summary.telemetry.unavailable).toContain("partial-trace-read");
   });

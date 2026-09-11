@@ -181,6 +181,20 @@ describe("PHASE-007 environment validation", () => {
 });
 
 describe("PHASE-007 documentation validation", () => {
+  it("documents the restricted Customers: Write capability required for approved credits", async () => {
+    const [environment, adapters] = await Promise.all([
+      readFile(resolve(root, ".env.example"), "utf8"),
+      readFile(resolve(root, "docs/external-adapters.md"), "utf8"),
+    ]);
+    for (const document of [environment, adapters]) {
+      expect(document).toContain("Customers: Write");
+      expect(document).toContain("customer balance transaction");
+      expect(document).not.toContain(
+        "credits, and invoice changes are not performed",
+      );
+    }
+  });
+
   it("accepts a complete synthetic fixture and rejects each release-documentation failure", async () => {
     const repository = await documentationFixture();
     expect(run(join(repository, "scripts/check-docs.mjs"), [], {}).status).toBe(
@@ -234,7 +248,8 @@ async function documentationFixture() {
   const repository = await temporaryDirectory();
   await Promise.all([
     mkdir(join(repository, "scripts"), { recursive: true }),
-    mkdir(join(repository, "web"), { recursive: true }),
+    mkdir(join(repository, "support-demo-ui"), { recursive: true }),
+    mkdir(join(repository, "client-demo-ui"), { recursive: true }),
     mkdir(join(repository, "docs/assets"), { recursive: true }),
   ]);
   await cp(checkDocs, join(repository, "scripts/check-docs.mjs"));
@@ -244,7 +259,7 @@ async function documentationFixture() {
       JSON.stringify({ scripts: { check: "node check.mjs" } }),
     ),
     writeFile(
-      join(repository, "web/package.json"),
+      join(repository, "support-demo-ui/package.json"),
       JSON.stringify({ scripts: { dev: "vite" } }),
     ),
     writeFile(
@@ -254,16 +269,17 @@ async function documentationFixture() {
     writeFile(join(repository, "CONTRIBUTING.md"), "# Contributing\n"),
     writeFile(join(repository, ".env.example"), "LOCAL_AUTH_SIGNING_KEY=\n"),
     writeFile(
-      join(repository, "web/README.md"),
-      "# Web\nnpm run --workspace support-refund-agent-web dev\n",
+      join(repository, "support-demo-ui/README.md"),
+      "# Web\nnpm run --workspace support-demo-ui dev\n",
+    ),
+    writeFile(join(repository, "client-demo-ui/README.md"), "# Demo\n"),
+    writeFile(
+      join(repository, "client-demo-ui/package.json"),
+      JSON.stringify({ scripts: { dev: "tsx src/server.tsx" } }),
     ),
     writeFile(
       join(repository, "docs/examples.md"),
       "# Example\nEvery identity, message, order, and result below is synthetic.\n",
-    ),
-    writeFile(
-      join(repository, "docs/assets/local-demo-portal.png"),
-      "synthetic",
     ),
     writeFile(
       join(repository, "docs/assets/local-demo-admin.png"),

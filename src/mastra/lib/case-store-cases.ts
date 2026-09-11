@@ -1,5 +1,6 @@
 import type { Client } from "@libsql/client";
 import type { CaseMessage, SupportCase } from "../domain/support-case";
+import type { ProviderBinding } from "../providers/contracts";
 import { activeDispatchLeaseScope } from "./dispatch-lease-scope";
 import {
   now,
@@ -12,6 +13,29 @@ import {
   assertBindingsUnchanged,
   StaleCaseWriteError,
 } from "./case-store-shared";
+
+/** The conversation owner is accepted once from authenticated ingress and is
+ * retained separately from mutable case presentation data. Financial paths
+ * must resolve this binding, rather than reconstructing identity from email. */
+export async function canonicalConversationOwner(
+  client: Pick<Client, "execute">,
+  input: { caseId: string; binding: ProviderBinding },
+) {
+  const result = await client.execute({
+    sql: "SELECT owner_id FROM support_conversations WHERE tenant_id = ? AND provider_kind = ? AND provider_account_id = ? AND external_conversation_id = ? AND case_id = ?",
+    args: [
+      input.binding.tenantId,
+      input.binding.providerKind,
+      input.binding.providerAccountId,
+      input.binding.externalConversationId,
+      input.caseId,
+    ],
+  });
+  const ownerId = result.rows[0]?.owner_id;
+  return typeof ownerId === "string" && ownerId.length > 0
+    ? ownerId
+    : undefined;
+}
 
 export class CaseStoreCases {
   constructor(private readonly client: Client) {}
@@ -42,14 +66,40 @@ export class CaseStoreCases {
   async findConversation(
     tenantId: string,
     externalConversationId: string,
+    providerKind = "local",
+    providerAccountId = "local-demo",
   ): Promise<SupportCase | undefined> {
     const result = await this.client.execute({
-      sql: "SELECT c.data FROM support_conversations x JOIN support_cases c ON c.id = x.case_id WHERE x.tenant_id = ? AND x.provider_kind = 'local' AND x.provider_account_id = 'local-demo' AND x.external_conversation_id = ?",
-      args: [tenantId, externalConversationId],
+      sql: "SELECT c.data FROM support_conversations x JOIN support_cases c ON c.id = x.case_id WHERE x.tenant_id = ? AND x.provider_kind = ? AND x.provider_account_id = ? AND x.external_conversation_id = ?",
+      args: [tenantId, providerKind, providerAccountId, externalConversationId],
     });
     return result.rows[0]
       ? parse(result.rows[0] as Record<string, unknown>)
       : undefined;
+  }
+  async conversationSnapshot(
+    tenantId: string,
+    externalConversationId: string,
+    providerKind: string,
+    providerAccountId: string,
+  ): Promise<{ supportCase: SupportCase; version: number } | undefined> {
+    const result = await this.client.execute({
+      sql: "SELECT c.data, c.version FROM support_conversations x JOIN support_cases c ON c.id = x.case_id WHERE x.tenant_id = ? AND x.provider_kind = ? AND x.provider_account_id = ? AND x.external_conversation_id = ?",
+      args: [tenantId, providerKind, providerAccountId, externalConversationId],
+    });
+    const row = result.rows[0];
+    return row
+      ? {
+          supportCase: parse(row as Record<string, unknown>),
+          version: Number(row.version),
+        }
+      : undefined;
+  }
+  async canonicalConversationOwner(input: {
+    caseId: string;
+    binding: ProviderBinding;
+  }) {
+    return canonicalConversationOwner(this.client, input);
   }
   async create(case_: SupportCase) {
     const persisted = withBindings(case_);
@@ -71,6 +121,19 @@ export class CaseStoreCases {
           persisted.createdAt,
         ],
       });
+      const ownerId = persisted.metadata.ownerId;
+      if (typeof ownerId === "string" && ownerId.length > 0)
+        await tx.execute({
+          sql: "INSERT INTO support_conversations(tenant_id, provider_kind, provider_account_id, external_conversation_id, case_id, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
+          args: [
+            binding.tenantId,
+            binding.providerKind,
+            binding.providerAccountId,
+            binding.externalConversationId,
+            persisted.id,
+            ownerId,
+          ],
+        });
       for (const message of persisted.messages)
         await tx.execute({
           sql: "INSERT INTO support_messages(id, case_id, data, created_at) VALUES (?, ?, ?, ?)",
@@ -270,6 +333,27 @@ export class CaseStoreCases {
         await tx.rollback();
         return { appended: false, supportCase: current };
       }
+      const activeTurnId = current.metadata.activeTurnId;
+      if (typeof activeTurnId === "string") {
+        // This is the other half of the manual provider-effect fence. Rows
+        // still waiting for a POST are safely superseded. A row that has
+        // already crossed its durable start marker may have reached Intercom,
+        // so retain explicit uncertainty for the outbox worker to reconcile.
+        await tx.execute({
+          sql: "UPDATE support_outbox SET state = CASE WHEN state = 'started' THEN 'uncertain' ELSE 'superseded' END, receipt = CASE WHEN state = 'started' THEN NULL ELSE ? END, last_error = ?, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE case_id = ? AND id LIKE 'manual_%' AND originating_turn_id = ? AND state IN ('pending', 'claimed', 'started')",
+          args: [
+            JSON.stringify({
+              superseded: true,
+              reason:
+                "A newer customer turn superseded this manual resolution.",
+            }),
+            "A newer customer turn superseded this manual resolution.",
+            now(),
+            input.caseId,
+            activeTurnId,
+          ],
+        });
+      }
       const next = await tx.execute({
         sql: "SELECT COALESCE(MAX(sequence), 0) + 1 AS value FROM support_turns WHERE case_id = ?",
         args: [input.caseId],
@@ -279,7 +363,6 @@ export class CaseStoreCases {
       const invalidatesApproval = current.status === "waiting_approval";
       const terminal =
         current.status === "resolved" || current.status === "escalated";
-      const activeTurnId = current.metadata.activeTurnId;
       if (
         (invalidatesApproval || terminal) &&
         typeof activeTurnId === "string"
@@ -300,6 +383,7 @@ export class CaseStoreCases {
               draft: current.draft,
               approval: current.approval,
               refundResult: current.refundResult,
+              subscriptionCreditResult: current.subscriptionCreditResult,
               finalResponse: current.finalResponse,
               escalationReason: current.escalationReason,
               workflowRunId: current.workflowRunId,
@@ -331,6 +415,9 @@ export class CaseStoreCases {
         draft: resetProjection ? undefined : current.draft,
         approval: resetProjection ? undefined : current.approval,
         refundResult: resetProjection ? undefined : current.refundResult,
+        subscriptionCreditResult: resetProjection
+          ? undefined
+          : current.subscriptionCreditResult,
         finalResponse: resetProjection ? undefined : current.finalResponse,
         escalationReason: resetProjection
           ? undefined
@@ -349,8 +436,10 @@ export class CaseStoreCases {
             ? {
                 activeTurnId: undefined,
                 refundCommand: undefined,
+                subscriptionCreditCommand: undefined,
                 nativeApproval: undefined,
                 refundEffects: undefined,
+                subscriptionCreditEffects: undefined,
               }
             : {}),
         },

@@ -5,8 +5,9 @@ import { requireLocalDatabaseUrl } from "../lib/database-url.ts";
 
 const localSchema = `
   CREATE TABLE IF NOT EXISTS local_orders (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, order_id TEXT NOT NULL, customer_email TEXT NOT NULL, product TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, charge_count INTEGER NOT NULL, placed_at TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, order_id));
-  CREATE TABLE IF NOT EXISTS local_subscriptions (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, subscription_id TEXT NOT NULL, customer_email TEXT NOT NULL, plan TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, renews_at TEXT NOT NULL, cancel_at_period_end INTEGER NOT NULL DEFAULT 0, cancels_at TEXT, PRIMARY KEY(tenant_id, provider_account_id, subscription_id));
+  CREATE TABLE IF NOT EXISTS local_subscriptions (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, subscription_id TEXT NOT NULL, customer_email TEXT NOT NULL, plan TEXT NOT NULL, recurring_interval TEXT NOT NULL DEFAULT 'month', recurring_interval_count INTEGER NOT NULL DEFAULT 1, quantity INTEGER NOT NULL DEFAULT 1, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, renews_at TEXT NOT NULL, cancel_at_period_end INTEGER NOT NULL DEFAULT 0, cancels_at TEXT, PRIMARY KEY(tenant_id, provider_account_id, subscription_id));
   CREATE TABLE IF NOT EXISTS local_refunds (refund_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, order_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, reason TEXT NOT NULL, issued_at TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS local_subscription_credits (credit_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, customer_id TEXT NOT NULL, subscription_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, reason TEXT NOT NULL, issued_at TEXT NOT NULL, UNIQUE(tenant_id, provider_account_id, subscription_id, credit_id));
   CREATE TABLE IF NOT EXISTS local_knowledge (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, version TEXT NOT NULL, effective_at TEXT, expires_at TEXT, PRIMARY KEY(tenant_id, provider_account_id, source));
   CREATE TABLE IF NOT EXISTS local_deliveries (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, payload_fingerprint TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, idempotency_key));
 `;
@@ -58,6 +59,9 @@ export const localFixtureSubscriptions = [
     subscriptionId: "SUB-1001",
     customerEmail: "alex@example.com",
     plan: "Pro Plan - Monthly",
+    recurringInterval: "month",
+    recurringIntervalCount: 1,
+    quantity: 1,
     amountMinor: 4900,
     currency: "USD",
     status: "active",
@@ -67,6 +71,9 @@ export const localFixtureSubscriptions = [
     subscriptionId: "SUB-1004",
     customerEmail: "riley@example.com",
     plan: "Team Plan - Annual",
+    recurringInterval: "year",
+    recurringIntervalCount: 1,
+    quantity: 1,
     amountMinor: 58800,
     currency: "USD",
     status: "active",
@@ -94,6 +101,9 @@ export async function initializeLocalFixtures(client: Client) {
     "ALTER TABLE local_knowledge ADD COLUMN expires_at TEXT",
     "ALTER TABLE local_subscriptions ADD COLUMN cancel_at_period_end INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE local_subscriptions ADD COLUMN cancels_at TEXT",
+    "ALTER TABLE local_subscriptions ADD COLUMN recurring_interval TEXT NOT NULL DEFAULT 'month'",
+    "ALTER TABLE local_subscriptions ADD COLUMN recurring_interval_count INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE local_subscriptions ADD COLUMN quantity INTEGER NOT NULL DEFAULT 1",
   ])
     try {
       await client.execute(sql);
@@ -133,12 +143,19 @@ export async function seedLocalFixtures(
         ],
       })),
       ...localFixtureSubscriptions.map((row) => ({
-        sql: "INSERT OR IGNORE INTO local_subscriptions(tenant_id, provider_account_id, subscription_id, customer_email, plan, amount_minor, currency, status, renews_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        // Older fixture databases already contain these two stable IDs.  Their
+        // newly-added billing columns received SQLite defaults during migration,
+        // so write the fixture's canonical typed terms on conflict rather than
+        // silently turning SUB-1004's annual plan into monthly eligibility.
+        sql: "INSERT INTO local_subscriptions(tenant_id, provider_account_id, subscription_id, customer_email, plan, recurring_interval, recurring_interval_count, quantity, amount_minor, currency, status, renews_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(tenant_id, provider_account_id, subscription_id) DO UPDATE SET recurring_interval = excluded.recurring_interval, recurring_interval_count = excluded.recurring_interval_count, quantity = excluded.quantity WHERE local_subscriptions.customer_email = excluded.customer_email AND local_subscriptions.plan = excluded.plan AND local_subscriptions.amount_minor = excluded.amount_minor AND local_subscriptions.currency = excluded.currency",
         args: [
           ...args,
           row.subscriptionId,
           row.customerEmail,
           row.plan,
+          row.recurringInterval,
+          row.recurringIntervalCount,
+          row.quantity,
           row.amountMinor,
           row.currency,
           row.status,
@@ -164,8 +181,8 @@ export async function resetLocalFixtures(
   const tx = await client.transaction("write");
   try {
     const effects = await tx.execute({
-      sql: "SELECT (SELECT COUNT(*) FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?) + (SELECT COUNT(*) FROM local_deliveries WHERE tenant_id = ? AND provider_account_id = ?) + (SELECT COUNT(*) FROM local_subscriptions WHERE tenant_id = ? AND provider_account_id = ? AND (status != 'active' OR cancel_at_period_end = 1)) AS total",
-      args: [...args, ...args, ...args],
+      sql: "SELECT (SELECT COUNT(*) FROM local_refunds WHERE tenant_id = ? AND provider_account_id = ?) + (SELECT COUNT(*) FROM local_subscription_credits WHERE tenant_id = ? AND provider_account_id = ?) + (SELECT COUNT(*) FROM local_deliveries WHERE tenant_id = ? AND provider_account_id = ?) + (SELECT COUNT(*) FROM local_subscriptions WHERE tenant_id = ? AND provider_account_id = ? AND (status != 'active' OR cancel_at_period_end = 1)) AS total",
+      args: [...args, ...args, ...args, ...args],
     });
     if (Number(effects.rows[0]?.total ?? 0) > 0)
       throw new Error(
@@ -198,6 +215,7 @@ export async function resetLocalFixtures(
         "local_subscriptions",
         "local_knowledge",
         "local_refunds",
+        "local_subscription_credits",
         "local_deliveries",
       ].map((table) => ({
         sql: `DELETE FROM ${table} WHERE tenant_id = ? AND provider_account_id = ?`,

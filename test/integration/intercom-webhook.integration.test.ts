@@ -213,4 +213,28 @@ describe("Intercom webhook registered HTTP boundary", () => {
     });
     expect(start).not.toHaveBeenCalled();
   });
+
+  it("records only one signed configured admin-close intent and never starts ingestion", async () => {
+    configure();
+    const start = vi.fn();
+    const body = event("conversation.admin.closed", "admin-close-deduped");
+    const first = await app(start).request(
+      "http://support.test/support/webhooks/intercom",
+      { method: "POST", headers: signedHeaders(body), body },
+    );
+    expect(first.status).toBe(200);
+    await expect(first.json()).resolves.toEqual({
+      accepted: true,
+      duplicate: false,
+    });
+    const duplicate = await app(start).request(
+      "http://support.test/support/webhooks/intercom",
+      { method: "POST", headers: signedHeaders(body), body },
+    );
+    await expect(duplicate.json()).resolves.toEqual({
+      accepted: true,
+      duplicate: true,
+    });
+    expect(start).not.toHaveBeenCalled();
+  });
 });

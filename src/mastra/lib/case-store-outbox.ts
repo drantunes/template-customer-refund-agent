@@ -91,7 +91,7 @@ export class CaseStoreOutbox {
           AND candidate.attempts < 3
           AND (candidate.next_attempt_at IS NULL OR candidate.next_attempt_at <= ?)
           AND NOT EXISTS (SELECT 1 FROM support_outbox_account_limits l WHERE l.tenant_id = json_extract(candidate.binding, '$.tenantId') AND l.provider_kind = json_extract(candidate.binding, '$.providerKind') AND l.provider_account_id = json_extract(candidate.binding, '$.providerAccountId') AND l.blocked_until > ?)
-          AND NOT EXISTS (SELECT 1 FROM support_outbox earlier WHERE earlier.case_id = candidate.case_id AND (earlier.created_at < candidate.created_at OR (earlier.created_at = candidate.created_at AND earlier.id < candidate.id)) AND earlier.state <> 'delivered')
+          AND NOT EXISTS (SELECT 1 FROM support_outbox earlier WHERE earlier.case_id = candidate.case_id AND (earlier.created_at < candidate.created_at OR (earlier.created_at = candidate.created_at AND earlier.id < candidate.id)) AND earlier.state NOT IN ('delivered', 'superseded'))
           ${excluded} ORDER BY candidate.created_at, candidate.id LIMIT ?`,
       args: [claimedAt, claimedAt, claimedAt, ...excludeIds, limit],
     });
@@ -101,7 +101,7 @@ export class CaseStoreOutbox {
       const changed = await this.client.execute({
         sql: `UPDATE support_outbox SET state = 'claimed', attempts = attempts + 1, lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ? AND (state = 'pending' OR (state = 'claimed' AND lease_until < ?)) AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
           AND NOT EXISTS (SELECT 1 FROM support_outbox_account_limits l WHERE l.tenant_id = json_extract(support_outbox.binding, '$.tenantId') AND l.provider_kind = json_extract(support_outbox.binding, '$.providerKind') AND l.provider_account_id = json_extract(support_outbox.binding, '$.providerAccountId') AND l.blocked_until > ?)
-          AND NOT EXISTS (SELECT 1 FROM support_outbox earlier WHERE earlier.case_id = support_outbox.case_id AND (earlier.created_at < support_outbox.created_at OR (earlier.created_at = support_outbox.created_at AND earlier.id < support_outbox.id)) AND earlier.state <> 'delivered')`,
+          AND NOT EXISTS (SELECT 1 FROM support_outbox earlier WHERE earlier.case_id = support_outbox.case_id AND (earlier.created_at < support_outbox.created_at OR (earlier.created_at = support_outbox.created_at AND earlier.id < support_outbox.id)) AND earlier.state NOT IN ('delivered', 'superseded'))`,
         args: [
           leaseUntil,
           leaseToken,
@@ -134,19 +134,134 @@ export class CaseStoreOutbox {
     return Number(updated.rowsAffected) === 1;
   }
   async completeOutbox(id: string, receipt: unknown, leaseToken?: string) {
-    await this.client.execute({
-      sql: `UPDATE support_outbox SET state = 'delivered', receipt = ?, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE id = ?${leaseToken ? " AND lease_token = ?" : ""}`,
+    const changed = await this.client.execute({
+      sql: `UPDATE support_outbox SET state = 'delivered', receipt = ?, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE id = ? AND state IN ('claimed', 'started')${leaseToken ? " AND lease_token = ?" : ""}`,
       args: leaseToken
         ? [JSON.stringify(receipt), now(), id, leaseToken]
         : [JSON.stringify(receipt), now(), id],
     });
+    return Number(changed.rowsAffected) === 1;
+  }
+  async supersedeOutbox(id: string, leaseToken: string, reason: string) {
+    const changed = await this.client.execute({
+      sql: "UPDATE support_outbox SET state = 'superseded', receipt = ?, last_error = ?, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE id = ? AND state = 'claimed' AND lease_token = ?",
+      args: [
+        JSON.stringify({ superseded: true, reason }),
+        reason,
+        now(),
+        id,
+        leaseToken,
+      ],
+    });
+    return Number(changed.rowsAffected) === 1;
   }
   /** Durable pre-effect boundary for providers without a documented idempotency
    * key.  It is intentionally not used by the local provider's recovery path. */
   async markOutboxStarted(id: string, leaseToken: string) {
+    const tx = await this.client.transaction("write");
+    try {
+      const row = await tx.execute({
+        sql: "SELECT case_id, originating_turn_id FROM support_outbox WHERE id = ? AND state = 'claimed' AND lease_token = ? AND lease_until > ?",
+        args: [id, leaseToken, now()],
+      });
+      const current = row.rows[0] as Record<string, unknown> | undefined;
+      if (!current) {
+        await tx.rollback();
+        return false;
+      }
+      // Manual operations are tied to one immutable turn. This transaction is
+      // the first half of the provider-effect fence: appendFollowUp either
+      // supersedes this claim first, or sees the started marker and records
+      // that reconciliation is required before it commits the new turn.
+      if (id.startsWith("manual_")) {
+        const caseRow = await tx.execute({
+          sql: "SELECT data FROM support_cases WHERE id = ?",
+          args: [String(current.case_id)],
+        });
+        const supportCase = caseRow.rows[0]
+          ? parse(caseRow.rows[0] as Record<string, unknown>)
+          : undefined;
+        if (
+          !supportCase ||
+          supportCase.metadata.activeTurnId !== current.originating_turn_id
+        ) {
+          await tx.rollback();
+          return false;
+        }
+      }
+      const changed = await tx.execute({
+        sql: "UPDATE support_outbox SET state = 'started', updated_at = ? WHERE id = ? AND state = 'claimed' AND lease_token = ? AND lease_until > ?",
+        args: [now(), id, leaseToken, now()],
+      });
+      if (Number(changed.rowsAffected) !== 1) {
+        await tx.rollback();
+        return false;
+      }
+      await tx.commit();
+      return true;
+    } catch (error) {
+      try {
+        await tx.rollback();
+      } catch {}
+      throw error;
+    }
+  }
+  /** Called by the adapter after its GET and directly before the POST. */
+  async manualOutboxEffectIsCurrent(id: string, leaseToken: string) {
+    const row = await this.client.execute({
+      sql: "SELECT o.originating_turn_id, c.data FROM support_outbox o JOIN support_cases c ON c.id = o.case_id WHERE o.id = ? AND o.state = 'started' AND o.lease_token = ? AND o.lease_until > ?",
+      args: [id, leaseToken, now()],
+    });
+    const current = row.rows[0] as Record<string, unknown> | undefined;
+    return Boolean(
+      current &&
+      parse(current).metadata.activeTurnId === current.originating_turn_id,
+    );
+  }
+  /** A follow-up won before the adapter POST. Preserve the row as audit
+   * history but let later, already-superseded rows stop blocking the queue. */
+  async supersedeManualOutboxAfterFence(
+    id: string,
+    receipt: unknown,
+    reason: string,
+  ) {
     const changed = await this.client.execute({
-      sql: "UPDATE support_outbox SET state = 'started', updated_at = ? WHERE id = ? AND state = 'claimed' AND lease_token = ? AND lease_until > ?",
-      args: [now(), id, leaseToken, now()],
+      sql: "UPDATE support_outbox SET state = 'superseded', receipt = ?, last_error = ?, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE id = ? AND state = 'uncertain'",
+      args: [JSON.stringify(receipt), reason, now(), id],
+    });
+    return Number(changed.rowsAffected) === 1;
+  }
+  async manualOutboxNeedsReopen(id: string) {
+    const row = await this.client.execute({
+      sql: "SELECT o.originating_turn_id, c.data FROM support_outbox o JOIN support_cases c ON c.id = o.case_id WHERE o.id = ? AND o.state = 'uncertain'",
+      args: [id],
+    });
+    const current = row.rows[0] as Record<string, unknown> | undefined;
+    if (!current) return false;
+    const supportCase = parse(current);
+    return (
+      supportCase.metadata.activeTurnId !== current.originating_turn_id &&
+      supportCase.status !== "resolved"
+    );
+  }
+  async manualOutboxIsUncertain(id: string) {
+    const row = await this.client.execute({
+      sql: "SELECT id FROM support_outbox WHERE id = ? AND state = 'uncertain'",
+      args: [id],
+    });
+    return Boolean(row.rows[0]);
+  }
+  /** The reopen POST has its own durable intent. A crash afterwards remains
+   * uncertain and is never automatically replayed. */
+  async markManualOutboxReconciliationStarted(id: string) {
+    const changed = await this.client.execute({
+      sql: "UPDATE support_outbox SET receipt = ?, last_error = ?, updated_at = ? WHERE id = ? AND state = 'uncertain'",
+      args: [
+        JSON.stringify({ reconciliation: "started" }),
+        "A stale manual close may have reached Intercom; reopening is being reconciled.",
+        now(),
+        id,
+      ],
     });
     return Number(changed.rowsAffected) === 1;
   }

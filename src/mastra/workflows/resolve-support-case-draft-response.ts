@@ -3,6 +3,7 @@ import {
   draftResolutionSchema,
   resourceIdForOwner,
   threadIdForCase,
+  subscriptionCreditResultSchema,
 } from "../domain/support-case";
 import { escalationReasonForDraft } from "../domain/resolution-decision";
 import { safeEscalationResponse } from "../domain/customer-response";
@@ -33,6 +34,25 @@ export const draftResponseStep = createStep({
         "The resolve workflow must run through a registered Mastra instance.",
       );
 
+    const priorCreditReceiptCandidates = (
+      await caseStore.turns(supportCase.id)
+    ).flatMap((entry) => {
+      const result = subscriptionCreditResultSchema.safeParse(
+        entry.outcome?.subscriptionCreditResult,
+      );
+      return result.success &&
+        (result.data.status === "executed" || result.data.status === "skipped")
+        ? [
+            {
+              subscriptionId: result.data.subscriptionId,
+              status: result.data.status,
+              amount: result.data.amount,
+              currency: result.data.currency,
+              executedAt: result.data.executedAt,
+            },
+          ]
+        : [];
+    });
     const context = {
       subject: supportCase.subject,
       customerMessage: latestMessage.body,
@@ -42,6 +62,10 @@ export const draftResponseStep = createStep({
       orderLookup: supportCase.orderLookup,
       subscriptionLookup: supportCase.subscriptionLookup,
       refundHistory: supportCase.refundHistory,
+      // This is a receipt candidate, never an authority to tell the customer
+      // that a credit remains unused. Finalization re-validates the immutable
+      // command, approval, and provider receipt before sending any claim.
+      priorCreditReceiptCandidates,
     };
 
     const bindings = bindingsForPersistedCase(supportCase);
@@ -175,6 +199,40 @@ export const draftResponseStep = createStep({
             !authoritativeTexts.get(match.source)?.includes(selection.excerpt)
           );
         }));
+    const activeSubscription = supportCase.subscriptionLookup?.subscription;
+    const priorCreditForSubscription = priorCreditReceiptCandidates.some(
+      (result) => result.subscriptionId === activeSubscription?.subscriptionId,
+    );
+    const asksForNewFinancialAction =
+      /\b(refund|new credit|another credit|additional credit|more credit|issue (?:a )?credit)\b/i.test(
+        latestMessage.body,
+      );
+    const hasCreditPolicyCitation = parsedDraft.citedSources.some((citation) =>
+      policyMatches.some(
+        (match) =>
+          (match.source === citation || match.title === citation) &&
+          /credit/i.test(`${match.title} ${match.text}`) &&
+          Boolean(authoritativeTexts.get(match.source)),
+      ),
+    );
+    const qualifyingInformationalCredit =
+      supportCase.triage?.intent === "account_issue" &&
+      supportCase.triage.accountIssueSubtype ===
+        "informational_credit_status" &&
+      !supportCase.triage.requiresHumanReview &&
+      supportCase.triage.confidence >= 0.8 &&
+      activeSubscription?.status === "active" &&
+      priorCreditForSubscription &&
+      !asksForNewFinancialAction &&
+      !parsedDraft.requiresEscalation &&
+      !parsedDraft.recommendRefund &&
+      parsedDraft.resolutionAction === "none" &&
+      parsedDraft.subscriptionCreditAmount === undefined &&
+      !missingEvidence &&
+      !invalidCitation &&
+      !invalidPolicySelection &&
+      !staleOrUnauthoritativeEvidence &&
+      hasCreditPolicyCitation;
     // A model cannot turn absent, stale, or conflicting evidence into an
     // executable promise. Preserve its text as internal evidence, but force the
     // durable case down the escalation path and suppress a refund proposal.
@@ -193,7 +251,8 @@ export const draftResponseStep = createStep({
         writerRequiresEscalation,
         writerReason: parsedDraft.escalationReason,
       }) ??
-      (supportCase.triage?.intent === "account_issue"
+      (supportCase.triage?.intent === "account_issue" &&
+      !qualifyingInformationalCredit
         ? "Account requests require a support specialist with verified account-service access."
         : undefined);
     const mustUseSafeEscalation = escalationReason !== undefined;
@@ -214,15 +273,31 @@ export const draftResponseStep = createStep({
     // field before the later cancellation and native-approval steps run, so a
     // conflicting model response cannot persist a refund command or suspend
     // the agent lifecycle.
-    const safeDraft = hasNoRefundCancellationAuthority
+    const safeDraft = qualifyingInformationalCredit
       ? {
           ...evidenceSafeDraft,
+          draftResponse:
+            "An earlier credit receipt is present. Finalization will verify durable evidence before it sends the customer response.",
           recommendRefund: false,
           refundAmount: undefined,
           refundCurrency: undefined,
           refundReason: undefined,
+          resolutionAction: "none" as const,
+          subscriptionCreditAmount: undefined,
+          subscriptionCreditCurrency: undefined,
+          subscriptionCreditReason: undefined,
+          requiresEscalation: false,
+          escalationReason: undefined,
         }
-      : evidenceSafeDraft;
+      : hasNoRefundCancellationAuthority
+        ? {
+            ...evidenceSafeDraft,
+            recommendRefund: false,
+            refundAmount: undefined,
+            refundCurrency: undefined,
+            refundReason: undefined,
+          }
+        : evidenceSafeDraft;
     await caseStore.update(supportCase.id, {
       draft: safeDraft,
       metadata: mustUseSafeEscalation
