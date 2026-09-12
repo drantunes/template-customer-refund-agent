@@ -36,6 +36,42 @@ const backend = () =>
       : process.env.SUPPORT_BACKEND_URL) ?? "http://127.0.0.1:4111"
   ).replace(/\/$/, "");
 const safeNext = () => "/conta";
+const canonicalLoopbackHosts = new Set([
+  "localhost",
+  "127.0.0.1",
+  "::1",
+  "[::1]",
+]);
+
+/** A local listener can still receive a DNS-rebound request. The request URL
+ * and Host must both be canonical loopback values, and proxy metadata is a
+ * denial signal because it cannot establish local authority. */
+function isDirectCanonicalLoopbackRequest(request: Request) {
+  const hostname = new URL(request.url).hostname.toLowerCase();
+  if (!canonicalLoopbackHosts.has(hostname)) return false;
+  const host = request.headers.get("host");
+  if (host) {
+    try {
+      if (
+        !canonicalLoopbackHosts.has(
+          new URL(`http://${host}`).hostname.toLowerCase(),
+        )
+      )
+        return false;
+    } catch {
+      return false;
+    }
+  }
+  return ![...request.headers.keys()].some(
+    (name) =>
+      name === "forwarded" ||
+      name === "via" ||
+      name === "x-real-ip" ||
+      name === "x-client-ip" ||
+      name.startsWith("x-forwarded-") ||
+      name.startsWith("x-proxy-"),
+  );
+}
 function expiredPage() {
   return `try{localStorage.removeItem(${JSON.stringify(identityKey)})}catch(_){ }window.Intercom&&window.Intercom('shutdown');window.location.assign('/entrar');`;
 }
@@ -65,6 +101,11 @@ function noStore(c: Context) {
   c.header("Cache-Control", "no-store");
   c.header("Pragma", "no-cache");
 }
+app.use("*", async (c, next) => {
+  if (isLocalMode() && !isDirectCanonicalLoopbackRequest(c.req.raw))
+    return c.text("Local demo requests require direct loopback.", 403);
+  await next();
+});
 function scriptValue(value: unknown) {
   return JSON.stringify(value)
     .replace(/</g, "\\u003c")

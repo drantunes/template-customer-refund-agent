@@ -8,6 +8,7 @@ process.env.DEMO_AUTH_BRIDGE_SIGNING_KEY =
 
 const server = await import("../../src/server.js");
 const db = await import("../../src/db.js");
+const localOrigin = "http://127.0.0.1";
 
 beforeAll(async () => {
   await db.initializeDatabase(server.client);
@@ -30,10 +31,10 @@ beforeAll(async () => {
 afterEach(() => vi.unstubAllGlobals());
 
 async function login() {
-  return server.app.request("http://demo.test/entrar", {
+  return server.app.request(`${localOrigin}/entrar`, {
     method: "POST",
     headers: {
-      origin: "http://demo.test",
+      origin: localOrigin,
       "content-type": "application/x-www-form-urlencoded",
     },
     body: "email=alex%40example.com&password=test-password",
@@ -41,21 +42,92 @@ async function login() {
 }
 
 describe("local authenticated chat routes", () => {
+  it("rejects rebinding and forwarded requests before every local route", async () => {
+    const attacker = "http://attacker.example";
+    for (const [path, init] of [
+      [
+        "/entrar",
+        {
+          method: "POST",
+          headers: {
+            origin: attacker,
+            "content-type": "application/x-www-form-urlencoded",
+          },
+          body: "email=alex%40example.com&password=test-password",
+        },
+      ],
+      ["/sessao", {}],
+      ["/chat/history", {}],
+      [
+        "/chat/messages",
+        {
+          method: "POST",
+          headers: { origin: attacker, "content-type": "application/json" },
+          body: JSON.stringify({
+            body: "hello",
+            eventId: "event-123456789012",
+          }),
+        },
+      ],
+    ] as const)
+      expect(
+        await server.app.request(`${attacker}${path}`, init),
+      ).toMatchObject({
+        status: 403,
+      });
+
+    expect(
+      await server.app.request(`${localOrigin}/entrar`, {
+        method: "POST",
+        headers: {
+          origin: localOrigin,
+          "content-type": "application/x-www-form-urlencoded",
+          "x-forwarded-host": "attacker.example",
+        },
+        body: "email=alex%40example.com&password=test-password",
+      }),
+    ).toMatchObject({ status: 403 });
+    expect(
+      await server.app.request(`${localOrigin}/entrar`, {
+        method: "POST",
+        headers: {
+          host: "attacker.example",
+          origin: localOrigin,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: "email=alex%40example.com&password=test-password",
+      }),
+    ).toMatchObject({ status: 403 });
+    expect(
+      await server.app.request("http://localhost/entrar", {
+        method: "POST",
+        headers: {
+          origin: "http://localhost",
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: "email=alex%40example.com&password=test-password",
+      }),
+    ).toMatchObject({ status: 303 });
+    expect(
+      await server.app.fetch(new Request(`${localOrigin}/sessao`)),
+    ).toMatchObject({ status: 401 });
+  });
+
   it("uses a separate local session cookie without clearing the external session", async () => {
     const signedIn = await login();
     const cookie = signedIn.headers.get("set-cookie")!;
     expect(cookie).toContain("northstar_local_session=");
     expect(cookie).not.toContain("northstar_session=");
 
-    const account = await server.app.request("http://demo.test/conta", {
+    const account = await server.app.request(`${localOrigin}/conta`, {
       headers: { cookie: `northstar_session=external-session; ${cookie}` },
     });
     const csrf = /name="csrf" value="([^"]+)"/.exec(await account.text())![1]!;
-    const signedOut = await server.app.request("http://demo.test/sair", {
+    const signedOut = await server.app.request(`${localOrigin}/sair`, {
       method: "POST",
       headers: {
         cookie: `northstar_session=external-session; ${cookie}`,
-        origin: "http://demo.test",
+        origin: localOrigin,
         "content-type": "application/x-www-form-urlencoded",
       },
       body: `csrf=${encodeURIComponent(csrf)}`,
@@ -73,11 +145,11 @@ describe("local authenticated chat routes", () => {
   it("uses a CSRF-protected stable event identity and the existing inbound endpoint", async () => {
     const signedIn = await login();
     const cookie = signedIn.headers.get("set-cookie")!;
-    const account = await server.app.request("http://demo.test/conta", {
+    const account = await server.app.request(`${localOrigin}/conta`, {
       headers: { cookie },
     });
     const csrf = /name="csrf" value="([^"]+)"/.exec(await account.text())![1]!;
-    const missing = await server.app.request("http://demo.test/chat/messages", {
+    const missing = await server.app.request(`${localOrigin}/chat/messages`, {
       method: "POST",
       headers: { cookie, "content-type": "application/json" },
       body: JSON.stringify({
@@ -96,7 +168,7 @@ describe("local authenticated chat routes", () => {
     });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const response = await server.app.request(
-        "http://demo.test/chat/messages",
+        `${localOrigin}/chat/messages`,
         {
           method: "POST",
           headers: {
@@ -169,7 +241,7 @@ describe("local authenticated chat routes", () => {
           { status: 200 },
         ),
     );
-    const response = await server.app.request("http://demo.test/chat/history", {
+    const response = await server.app.request(`${localOrigin}/chat/history`, {
       headers: { cookie: signedIn.headers.get("set-cookie")! },
     });
     expect(response.status).toBe(200);
