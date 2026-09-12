@@ -1,5 +1,6 @@
 import type { Child } from "hono/jsx";
 import type { DemoCustomer } from "./types.js";
+import { isLocalMode } from "../../config/app-mode.mjs";
 
 export function Layout(props: {
   title: string;
@@ -158,18 +159,22 @@ export function Account(props: {
   widget?: string;
   chatUnavailable: boolean;
 }) {
+  const localTerms =
+    isLocalMode() && props.customer.email === "alex@example.com";
   const purchases = [
     props.customer.purchasePaid
       ? {
           title: "Northstar Toolkit",
-          detail: "One-time purchase · $5.00",
+          detail: localTerms
+            ? "Pro Plan · $49.00"
+            : "One-time purchase · $5.00",
           state: "Payment confirmed",
         }
       : undefined,
     props.customer.subscriptionId
       ? {
           title: "Northstar Workspace",
-          detail: "$5.00 per month",
+          detail: localTerms ? "$49.00 per month" : "$5.00 per month",
           state: "Active subscription",
         }
       : undefined,

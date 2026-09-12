@@ -32,6 +32,7 @@ async function loadCharacterizationRuntime(
     `${databasePath}-wal`,
   );
   process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
+  process.env.LOCAL_DEMO_DATABASE_URL = `file:${databasePath}`;
   process.env.SUPPORT_SOURCE = "mock";
   process.env.DISABLE_RUNTIME_SCORERS = "1";
   vi.resetModules();

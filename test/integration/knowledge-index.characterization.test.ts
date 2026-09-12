@@ -25,6 +25,7 @@ describe("support knowledge index", () => {
       `${databasePath}-wal`,
     );
     process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
+    process.env.LOCAL_DEMO_DATABASE_URL = `file:${databasePath}`;
     process.env.SUPPORT_KNOWLEDGE_RETRIEVAL = "vector";
     vi.resetModules();
     vi.doMock("@mastra/core/llm", async (importOriginal) => {

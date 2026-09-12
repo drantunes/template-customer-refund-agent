@@ -4,12 +4,20 @@ import {
   type Transaction,
   type TransactionMode,
 } from "@libsql/client";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { resolveDatabaseUrl } from "./database-url";
 
 const writeChains = new WeakMap<object, Promise<void>>();
 const serializedClients = new WeakMap<Client, Client>();
 let sharedLocalClient: Client | undefined;
 let mastraSharedLocalClient: Client | undefined;
+
+function ensureFileDatabaseParent(url: string) {
+  if (!url.startsWith("file:") || url.includes(":memory:")) return;
+  mkdirSync(dirname(fileURLToPath(url)), { recursive: true });
+}
 
 function isLockError(error: unknown) {
   const value = error as { code?: string; message?: string };
@@ -172,9 +180,11 @@ export function serializeSqliteClient(client: Client): Client {
  * cooperative queue, including the lifetime of interactive transactions.
  */
 export function getSharedLocalSqliteClient() {
+  const url = resolveDatabaseUrl();
+  ensureFileDatabaseParent(url);
   sharedLocalClient ??= serializeSqliteClient(
     createClient({
-      url: resolveDatabaseUrl(),
+      url,
       authToken: process.env.TURSO_AUTH_TOKEN || undefined,
       timeout: 0,
     }),

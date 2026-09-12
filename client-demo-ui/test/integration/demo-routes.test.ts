@@ -1,6 +1,9 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 process.env.VITEST = "true";
+// Preserve the Messenger regression suite under an explicit external mode.
+process.env.APP_MODE = "staging";
+process.env.TURSO_DATABASE_URL = "file:/tmp/src033-external-route-fixture.db";
 process.env.DEMO_DATABASE_URL = "file::memory:?cache=shared";
 const server = await import("../../src/server.js");
 const db = await import("../../src/db.js");
@@ -55,6 +58,7 @@ describe("Northstar demo routes", () => {
       body: "email=customer%40example.test&password=test-password",
     });
     const cookie = login.headers.get("set-cookie")!;
+    expect(cookie).toContain("northstar_session=");
     expect(cookie).toContain("HttpOnly");
     const account = await server.app.request("http://demo.test/conta", {
       headers: { cookie },

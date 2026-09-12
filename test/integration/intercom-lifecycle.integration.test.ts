@@ -12,6 +12,7 @@ const secret = "phase005-lifecycle-secret";
 
 function configure(databasePath: string) {
   process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
+  process.env.LOCAL_DEMO_DATABASE_URL = `file:${databasePath}`;
   process.env.SUPPORT_SOURCE = "intercom";
   process.env.INTERCOM_DEVELOPMENT_ENABLED = "true";
   process.env.INTERCOM_TENANT_ID = "local-demo";

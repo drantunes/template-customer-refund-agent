@@ -9,6 +9,10 @@ import {
 import { deliverOutbox } from "./outbox";
 import { purgeExpiredWorkflowSnapshots } from "./workflow-snapshot-retention";
 import { recoverLocalWorkflows } from "./workflow-recovery";
+import {
+  hasExplicitExternalMode,
+  isLocalMode,
+} from "../../../config/app-mode.mjs";
 
 /**
  * Studio/start lifecycle hook. It seeds only the configured local fixture and
@@ -45,11 +49,20 @@ export function startLocalRuntimeWorkers(
     if (running) return;
     running = true;
     try {
-      requireLocalDatabaseUrl();
-      await localRuntime.seed(defaultLocalBinding());
-      await import("./studio-seed").then(({ ensureStudioSupervisorDemoCase }) =>
-        ensureStudioSupervisorDemoCase(),
-      );
+      // A legacy mixed-adapter installation (without APP_MODE) retains its
+      // existing local commerce fixtures. An explicit external profile owns
+      // its data and must never receive local fixture rows.
+      if (!hasExplicitExternalMode()) {
+        requireLocalDatabaseUrl();
+        await localRuntime.seed(defaultLocalBinding());
+      }
+      // The synthetic Studio investigation belongs exclusively to the local
+      // experience; legacy external support must not acquire a mock case.
+      if (isLocalMode())
+        await import("./studio-seed").then(
+          ({ ensureStudioSupervisorDemoCase }) =>
+            ensureStudioSupervisorDemoCase(),
+        );
       await recoverApprovedNativeDecisions(mastra).catch((error) =>
         logger?.warn("Native approval recovery failed.", { error }),
       );

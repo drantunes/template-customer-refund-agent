@@ -3,6 +3,7 @@ import type { CaseMetadata } from "../domain/support-case";
 import { MastraAuthProvider } from "@mastra/core/server";
 import { resourceIdForOwner } from "../domain/support-case";
 import { currentTrustedCaseReadScope } from "../lib/trusted-run-scope";
+import { appMode, isLocalMode } from "../../../config/app-mode.mjs";
 
 /** The local mode intentionally has only synthetic identities.  Passwords are
  * accepted only by the login route; every subsequent request uses a signed,
@@ -115,12 +116,15 @@ export function verifyDemoBridgeSession(
       expiresAt?: string;
       intercomContactId?: string;
       stripeCustomerId?: string;
+      appMode?: string;
     };
     const expires = Date.parse(value.expiresAt ?? "");
     if (
       !value.id ||
       !value.email ||
       !value.tenantId ||
+      (value.appMode !== undefined && value.appMode !== appMode()) ||
+      (value.appMode === undefined && appMode() === "local") ||
       !Number.isFinite(expires) ||
       expires <= Date.now()
     )
@@ -147,7 +151,12 @@ export function issueLocalSession(
 ) {
   // Claims are never capability-bearing: tenant and roles are looked up from
   // the local identity registry on every request.
-  const payload = encoded({ id: identity.id, expiresAt, nonce: randomUUID() });
+  const payload = encoded({
+    id: identity.id,
+    expiresAt,
+    appMode: appMode(),
+    nonce: randomUUID(),
+  });
   return `${payload}.${signature(payload)}`;
 }
 export function verifyLocalSession(
@@ -159,9 +168,15 @@ export function verifyLocalSession(
   try {
     const parsed = JSON.parse(
       Buffer.from(payload, "base64url").toString("utf8"),
-    ) as { id?: string; expiresAt?: string };
+    ) as { id?: string; expiresAt?: string; appMode?: string };
     const expires = Date.parse(parsed.expiresAt ?? "");
-    if (!parsed.id || !Number.isFinite(expires) || expires <= Date.now())
+    if (
+      !parsed.id ||
+      !Number.isFinite(expires) ||
+      expires <= Date.now() ||
+      (parsed.appMode !== undefined && parsed.appMode !== appMode()) ||
+      (parsed.appMode === undefined && appMode() === "local")
+    )
       return undefined;
     const identity = seeded.find((entry) => entry.id === parsed.id);
     if (!identity) return undefined;
@@ -312,6 +327,7 @@ export function hasRole(principal: SupportPrincipal, role: SupportRole) {
  */
 export function isLocalStudioDevMode() {
   return (
+    isLocalMode() &&
     process.env.MASTRA_DEV === "true" &&
     process.env.MASTRA_TELEMETRY_COMMAND === "dev"
   );

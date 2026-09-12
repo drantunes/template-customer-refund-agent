@@ -78,6 +78,7 @@ describe("native issue_refund approval", () => {
     const path = temporaryDatabasePath("phase003-native");
     files.push(path, `${path}-shm`, `${path}-wal`);
     process.env.TURSO_DATABASE_URL = `file:${path}`;
+    process.env.LOCAL_DEMO_DATABASE_URL = `file:${path}`;
     process.env.SUPPORT_SOURCE = "mock";
     const { mastra } = await import("../../src/mastra/index");
     const { caseStore } = await import("../../src/mastra/lib/case-store");
@@ -254,6 +255,7 @@ describe("native issue_refund approval", () => {
     const path = temporaryDatabasePath("phase003-native");
     files.push(path, `${path}-shm`, `${path}-wal`);
     process.env.TURSO_DATABASE_URL = `file:${path}`;
+    process.env.LOCAL_DEMO_DATABASE_URL = `file:${path}`;
     process.env.SUPPORT_SOURCE = "mock";
     const { mastra } = await import("../../src/mastra/index");
     const { caseStore } = await import("../../src/mastra/lib/case-store");

@@ -45,6 +45,15 @@ import { composeConfiguredProviders } from "./providers/composition";
 
 const retentionPolicy = retentionPolicyFromEnvironment();
 const localStudioDevMode = isLocalStudioDevMode();
+const configuredServerPort = Number(
+  process.env.LOCAL_DEMO_BACKEND_PORT ?? "4111",
+);
+if (
+  !Number.isInteger(configuredServerPort) ||
+  configuredServerPort < 1 ||
+  configuredServerPort > 65535
+)
+  throw new Error("LOCAL_DEMO_BACKEND_PORT must be a valid TCP port.");
 let localRuntimeWorkers: Promise<undefined | (() => Promise<void>)> =
   Promise.resolve(undefined);
 
@@ -100,6 +109,7 @@ export const mastra = new Mastra({
     },
   }),
   server: {
+    port: configuredServerPort,
     apiRoutes: supportRoutes,
     middleware: studioSupervisorMiddleware,
     // The generated `mastra dev` child is loopback-only and the middleware

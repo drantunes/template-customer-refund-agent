@@ -127,6 +127,7 @@ function bridgeHeaders(contactId: string) {
       roles: ["customer"],
       intercomContactId: contactId,
       stripeCustomerId: "cus_demo",
+      appMode: "local",
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     }),
   ).toString("base64url");

@@ -100,6 +100,7 @@ async function configuredServer(options: { localStudioDev?: boolean } = {}) {
   const path = temporaryDatabasePath("phase003-built-in-auth");
   databases.push(path, `${path}-shm`, `${path}-wal`);
   process.env.TURSO_DATABASE_URL = `file:${path}`;
+  process.env.LOCAL_DEMO_DATABASE_URL = `file:${path}`;
   process.env.SUPPORT_SOURCE = "mock";
   if (options.localStudioDev) {
     process.env.MASTRA_DEV = "true";

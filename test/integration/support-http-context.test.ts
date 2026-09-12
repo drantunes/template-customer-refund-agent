@@ -103,6 +103,7 @@ async function loadDeterministicRuntime() {
     `${databasePath}-wal`,
   );
   process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
+  process.env.LOCAL_DEMO_DATABASE_URL = `file:${databasePath}`;
   process.env.SUPPORT_SOURCE = "mock";
   vi.resetModules();
   // The HTTP boundary exercises registered agents and workflows, but not the

@@ -15,8 +15,11 @@ import {
   verifyCustomer,
 } from "./db.js";
 import { issueBackendBridge, issueMessengerJwt } from "./bridge.js";
+import { isLocalMode } from "../../config/app-mode.mjs";
+import { localChatWidget } from "./local-chat-widget.js";
 
-const cookieName = "northstar_session";
+const cookieName = () =>
+  isLocalMode() ? "northstar_local_session" : "northstar_session";
 const identityKey = "northstar:customer-id";
 const maxWebhookBytes = 256 * 1024;
 const app = new Hono();
@@ -27,27 +30,67 @@ await ensureDatabaseDirectory(configuredDatabaseUrl);
 const client = openDatabase(configuredDatabaseUrl);
 const styles = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 const backend = () =>
-  (process.env.SUPPORT_BACKEND_URL ?? "http://127.0.0.1:4111").replace(
-    /\/$/,
-    "",
-  );
+  (
+    (isLocalMode()
+      ? process.env.LOCAL_DEMO_BACKEND_URL
+      : process.env.SUPPORT_BACKEND_URL) ?? "http://127.0.0.1:4111"
+  ).replace(/\/$/, "");
 const safeNext = () => "/conta";
+const canonicalLoopbackHosts = new Set([
+  "localhost",
+  "127.0.0.1",
+  "::1",
+  "[::1]",
+]);
+
+/** A local listener can still receive a DNS-rebound request. The request URL
+ * and Host must both be canonical loopback values, and proxy metadata is a
+ * denial signal because it cannot establish local authority. */
+function isDirectCanonicalLoopbackRequest(request: Request) {
+  const hostname = new URL(request.url).hostname.toLowerCase();
+  if (!canonicalLoopbackHosts.has(hostname)) return false;
+  const host = request.headers.get("host");
+  if (host) {
+    try {
+      if (
+        !canonicalLoopbackHosts.has(
+          new URL(`http://${host}`).hostname.toLowerCase(),
+        )
+      )
+        return false;
+    } catch {
+      return false;
+    }
+  }
+  return ![...request.headers.keys()].some(
+    (name) =>
+      name === "forwarded" ||
+      name === "via" ||
+      name === "x-real-ip" ||
+      name === "x-client-ip" ||
+      name.startsWith("x-forwarded-") ||
+      name.startsWith("x-proxy-"),
+  );
+}
 function expiredPage() {
   return `try{localStorage.removeItem(${JSON.stringify(identityKey)})}catch(_){ }window.Intercom&&window.Intercom('shutdown');window.location.assign('/entrar');`;
 }
 async function current(c: { req: { raw: Request } }) {
-  return sessionById(client, getCookie(c as never, cookieName));
+  return sessionById(client, getCookie(c as never, cookieName()));
 }
 function originAllowed(request: Request) {
   const origin = request.headers.get("origin");
-  const configured = process.env.DEMO_PUBLIC_ORIGIN;
+  const configured = isLocalMode() ? undefined : process.env.DEMO_PUBLIC_ORIGIN;
   const expected = configured
     ? new URL(configured).origin
     : new URL(request.url).origin;
   return !origin || origin === expected;
 }
 function secureCookies(request: Request) {
-  return (process.env.DEMO_PUBLIC_ORIGIN ?? request.url).startsWith("https:");
+  return (
+    !isLocalMode() &&
+    (process.env.DEMO_PUBLIC_ORIGIN ?? request.url).startsWith("https:")
+  );
 }
 function sameToken(actual: string, expected: string) {
   const left = Buffer.from(actual);
@@ -58,6 +101,11 @@ function noStore(c: Context) {
   c.header("Cache-Control", "no-store");
   c.header("Pragma", "no-cache");
 }
+app.use("*", async (c, next) => {
+  if (isLocalMode() && !isDirectCanonicalLoopbackRequest(c.req.raw))
+    return c.text("Local demo requests require direct loopback.", 403);
+  await next();
+});
 function scriptValue(value: unknown) {
   return JSON.stringify(value)
     .replace(/</g, "\\u003c")
@@ -71,6 +119,7 @@ function widget(
   expiresAt: string,
   openChat: boolean,
 ) {
+  if (isLocalMode()) return localChatWidget(openChat, customer.id);
   const appId = process.env.INTERCOM_APP_ID;
   const jwt = issueMessengerJwt(customer, expiresAt);
   if (!appId || !jwt) return undefined;
@@ -156,7 +205,7 @@ app.post("/entrar", async (c) => {
     );
   const session = await createSession(client, customer);
   noStore(c);
-  setCookie(c, cookieName, session.id, {
+  setCookie(c, cookieName(), session.id, {
     httpOnly: true,
     sameSite: "Strict",
     secure: secureCookies(c.req.raw),
@@ -169,7 +218,7 @@ app.get("/sessao", async (c) => {
   noStore(c);
   const session = await current(c);
   return session
-    ? c.json({ expiresAt: session.expiresAt })
+    ? c.json({ expiresAt: session.expiresAt, customerId: session.customer.id })
     : c.text("Session expired.", 401);
 });
 app.get("/solicitacoes", async (c) => {
@@ -187,9 +236,113 @@ app.get("/solicitacoes", async (c) => {
     />,
   );
 });
+app.get("/chat/history", async (c) => {
+  if (!isLocalMode()) return c.notFound();
+  const session = await current(c);
+  noStore(c);
+  if (!session) return c.json({ error: "Session expired." }, 401);
+  const token = issueBackendBridge(session.customer, session.expiresAt);
+  if (!token) return c.json({ error: "Chat is unavailable." }, 503);
+  let data: {
+    cases?: Array<{
+      externalId?: string;
+      status?: string;
+      updatedAt?: string;
+      messages?: Array<{ author: string; body: string; createdAt: string }>;
+    }>;
+  };
+  try {
+    const response = await fetch(`${backend()}/support/cases`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (!response.ok)
+      return c.json({ error: "Chat history is unavailable." }, 502);
+    data = await response.json();
+  } catch {
+    return c.json({ error: "Chat history is temporarily unavailable." }, 503);
+  }
+  const conversation = `chat:${session.customer.id}`;
+  const matching = (data.cases ?? [])
+    .filter((item) => item.externalId?.startsWith(`${conversation}:`))
+    .sort((left, right) =>
+      String(left.updatedAt ?? "").localeCompare(String(right.updatedAt ?? "")),
+    );
+  const active = matching.at(-1);
+  return c.json({
+    customerId: session.customer.id,
+    status: active?.status,
+    messages: matching
+      .flatMap((item) => item.messages ?? [])
+      .filter(
+        (message) =>
+          message.author === "customer" || message.author === "agent",
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .slice(-100),
+  });
+});
+app.post("/chat/messages", async (c) => {
+  if (!isLocalMode()) return c.notFound();
+  if (!originAllowed(c.req.raw))
+    return c.json({ error: "Origin is not allowed." }, 403);
+  const session = await current(c);
+  const raw = await limitedBody(c.req.raw, 16 * 1024);
+  let body: { body?: unknown; eventId?: unknown } | undefined;
+  try {
+    body = raw ? JSON.parse(new TextDecoder().decode(raw)) : undefined;
+  } catch {}
+  if (
+    !session ||
+    !body ||
+    typeof body.body !== "string" ||
+    typeof body.eventId !== "string" ||
+    !sameToken(c.req.header("x-csrf-token") ?? "", session.csrfToken)
+  )
+    return c.json({ error: "Session or CSRF protection is invalid." }, 403);
+  if (
+    !body.body.trim() ||
+    body.body.length > 10_000 ||
+    !/^[A-Za-z0-9_-]{16,200}$/.test(body.eventId)
+  )
+    return c.json({ error: "Invalid chat message." }, 400);
+  const token = issueBackendBridge(session.customer, session.expiresAt);
+  if (!token) return c.json({ error: "Chat is unavailable." }, 503);
+  try {
+    const response = await fetch(`${backend()}/support/inbound`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        externalId: `chat:${session.customer.id}:${body.eventId}`,
+        conversationId: `chat:${session.customer.id}`,
+        from: session.customer.email,
+        fromName: session.customer.name,
+        subject: "Customer chat",
+        body: body.body.trim(),
+        receivedAt: new Date().toISOString(),
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const data = await response
+      .json()
+      .catch(() => ({ error: "Chat delivery failed." }));
+    return new Response(JSON.stringify(data), {
+      status: response.status,
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
+  } catch {
+    return c.json(
+      { error: "Support is temporarily unavailable. Retry this message." },
+      503,
+    );
+  }
+});
 app.post("/sair", async (c) => {
   if (!originAllowed(c.req.raw)) return c.text("Origin is not allowed.", 403);
-  const id = getCookie(c, cookieName);
+  const id = getCookie(c, cookieName());
   const session = await sessionById(client, id);
   const form = await c.req.parseBody();
   if (
@@ -200,7 +353,7 @@ app.post("/sair", async (c) => {
     return c.text("Session or CSRF protection is invalid.", 403);
   await deleteSession(client, id);
   noStore(c);
-  setCookie(c, cookieName, "", {
+  setCookie(c, cookieName(), "", {
     httpOnly: true,
     sameSite: "Strict",
     path: "/",

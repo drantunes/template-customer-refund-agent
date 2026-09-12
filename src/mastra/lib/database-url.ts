@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { databaseProfile } from "../../../config/app-mode.mjs";
 
 const defaultDatabaseFile = "mastra.db";
 
@@ -9,7 +10,7 @@ const defaultDatabaseFile = "mastra.db";
  * directories, so a relative file URL is not a stable database identity.
  */
 export function resolveDatabaseUrl(
-  value = process.env.TURSO_DATABASE_URL,
+  value = databaseProfile().backend,
   cwd = process.cwd(),
 ) {
   const url = value?.trim() || `file:${defaultDatabaseFile}`;
@@ -18,7 +19,7 @@ export function resolveDatabaseUrl(
 }
 
 export function requireLocalDatabaseUrl(
-  value = process.env.TURSO_DATABASE_URL,
+  value = databaseProfile().backend,
   cwd = process.cwd(),
 ) {
   const url = resolveDatabaseUrl(value, cwd);

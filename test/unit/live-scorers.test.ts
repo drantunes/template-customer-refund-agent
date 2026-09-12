@@ -47,6 +47,7 @@ describe("live native scorer contracts", () => {
     const path = temporaryDatabasePath("phase007-live-scorer");
     databases.push(path, `${path}-shm`, `${path}-wal`);
     process.env.TURSO_DATABASE_URL = `file:${path}`;
+    process.env.LOCAL_DEMO_DATABASE_URL = `file:${path}`;
     process.env.SUPPORT_SOURCE = "mock";
     delete process.env.DISABLE_RUNTIME_SCORERS;
     vi.resetModules();

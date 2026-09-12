@@ -19,6 +19,7 @@ describe("local subscription billing-term migration", () => {
     const path = temporaryDatabasePath("phase008-recurring-migration");
     files.push(path, `${path}-shm`, `${path}-wal`);
     process.env.TURSO_DATABASE_URL = `file:${path}`;
+    process.env.LOCAL_DEMO_DATABASE_URL = `file:${path}`;
     const client = createClient({ url: process.env.TURSO_DATABASE_URL });
     const binding = localFixtureBinding();
     await client.executeMultiple(`

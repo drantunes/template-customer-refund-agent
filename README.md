@@ -32,19 +32,17 @@ npm ci
 
 ```bash
 cp .env.example .env
-node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
 ```
 
-Set `OPENAI_API_KEY` in `.env`. Put the generated value in `LOCAL_AUTH_SIGNING_KEY` to sign local sessions. Keep `SUPPORT_SOURCE=mock` and `COMMERCE_SOURCE=mock` for the included data, then run `npm run check:env -- --profile=local`.
+Set `OPENAI_API_KEY` in `.env`. A new `.env.example` selects `APP_MODE=local`; `npm run demo:local` creates isolated local signing keys in the ignored `.data/` directory without replacing values you already configured.
 
 ### 3. Start the dev server
 
 ```bash
-npm run local:seed
-npm run dev
+npm run demo:local
 ```
 
-Open [Mastra Studio](http://localhost:4111) in local development, select **Support Supervisor**, and send: `Check ORD-1001 and summarize the evidence.` The supervisor reports recorded synthetic order evidence without issuing a refund. The local loopback Studio opens without a login; support APIs and financial approvals still require their normal Bearer authorization.
+Open [the customer demo](http://localhost:3000), sign in as `alex@example.com` with `local-customer-alex`, and send a support message from the floating chat. The message is processed by the real OpenAI-backed workflow and any refund or credit still waits for staff approval in [the support panel](http://localhost:5173), where `approver@local.test` / `local-approver` can approve it. The local loopback Studio opens without a login; support APIs and financial approvals still require their normal Bearer authorization.
 
 ## Making it yours
 
@@ -52,7 +50,7 @@ Open [Mastra Studio](http://localhost:4111) in local development, select **Suppo
 - Read [how policies differ from executable support actions](docs/policies-and-actions.md) before adding a new offer or account operation.
 - Connect the optional [Intercom development or Stripe sandbox adapter](docs/external-adapters.md) to try the same flow with a representative integration.
 
-The separate [Northstar demo](client-demo-ui/README.md) needs its own synthetic accounts and external Intercom credentials. It is not required for the Studio-first quick start.
+Set `APP_MODE=staging` or `APP_MODE=production` only when both existing Intercom and Stripe configurations are complete. Environments created before `APP_MODE` retain their explicit `SUPPORT_SOURCE=intercom` or `COMMERCE_SOURCE=stripe` choices.
 
 See [local troubleshooting](docs/troubleshooting.md) for setup help, [synthetic examples](docs/examples.md) for the local flow, and [CONTRIBUTING.md](CONTRIBUTING.md) for verification commands.
 

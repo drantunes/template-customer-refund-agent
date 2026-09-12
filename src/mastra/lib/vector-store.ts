@@ -1,4 +1,5 @@
 import { LibSQLVector } from "@mastra/libsql";
+import { resolveDatabaseUrl } from "./database-url";
 import { ModelRouterEmbeddingModel } from "@mastra/core/llm";
 import { MDocument } from "@mastra/rag";
 import type {
@@ -15,7 +16,7 @@ import {
 
 function resolveLibsqlConfig() {
   return {
-    url: process.env.TURSO_DATABASE_URL || "file:./mastra.db",
+    url: resolveDatabaseUrl(),
     authToken: process.env.TURSO_AUTH_TOKEN || undefined,
   };
 }
