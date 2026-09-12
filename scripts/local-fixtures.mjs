@@ -1,4 +1,7 @@
 import { createClient } from "@libsql/client";
+import { mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { requireLocalDatabaseUrl } from "../src/mastra/lib/database-url.ts";
 import {
   localFixtureBinding,
@@ -12,6 +15,7 @@ if (mode !== "seed" && mode !== "reset")
 
 const url = requireLocalDatabaseUrl();
 const binding = localFixtureBinding();
+await mkdir(dirname(fileURLToPath(url)), { recursive: true });
 const client = createClient({ url, timeout: 0 });
 try {
   if (mode === "seed") {

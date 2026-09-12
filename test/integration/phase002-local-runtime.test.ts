@@ -1,4 +1,4 @@
-import { rm } from "node:fs/promises";
+import { access, rm } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { once } from "node:events";
@@ -722,7 +722,10 @@ describe("Phase 002 persistent local runtime", () => {
     files.push(path, `${path}-shm`, `${path}-wal`);
     const environment = {
       ...process.env,
+      APP_MODE: "local",
       TURSO_DATABASE_URL: `file:${path}`,
+      LOCAL_DEMO_DATABASE_URL: `file:${path}`,
+      ORIGINAL_TURSO_DATABASE_URL: `file:${path}.external`,
       LOCAL_FIXTURE_TENANT: binding.tenantId,
       LOCAL_FIXTURE_ACCOUNT: binding.providerAccountId,
     };
@@ -766,6 +769,49 @@ describe("Phase 002 persistent local runtime", () => {
     expect(JSON.parse(verification.stdout)).toEqual({ orders: 1, receipts: 1 });
   });
 
+  it("creates nested database parents for direct seed and reset commands", async () => {
+    const directory = join(
+      tmpdir(),
+      `phase002-cli-parent-${crypto.randomUUID()}`,
+    );
+    const database = join(directory, "nested", "local.db");
+    files.push(database, `${database}-shm`, `${database}-wal`);
+    const environment = {
+      ...process.env,
+      APP_MODE: "local",
+      LOCAL_DEMO_DATABASE_URL: `file:${database}`,
+      LOCAL_DEMO_CLIENT_DATABASE_URL: `file:${directory}/client.db`,
+      LOCAL_FIXTURE_TENANT: binding.tenantId,
+      LOCAL_FIXTURE_ACCOUNT: binding.providerAccountId,
+    };
+
+    await execFileAsync(
+      process.execPath,
+      ["scripts/local-fixtures.mjs", "seed"],
+      {
+        cwd: process.cwd(),
+        env: environment,
+      },
+    );
+    await access(database);
+
+    const resetDatabase = join(directory, "reset", "local.db");
+    files.push(resetDatabase, `${resetDatabase}-shm`, `${resetDatabase}-wal`);
+    await execFileAsync(
+      process.execPath,
+      ["scripts/local-fixtures.mjs", "reset"],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...environment,
+          LOCAL_DEMO_DATABASE_URL: `file:${resetDatabase}`,
+        },
+      },
+    );
+    await access(resetDatabase);
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("uses one default relative database identity across the CLI and runtime cwd", async () => {
     const relative = `file:./phase002-cwd-${crypto.randomUUID()}.db`;
     const expected = resolveDatabaseUrl(relative, process.cwd());
@@ -781,13 +827,22 @@ describe("Phase 002 persistent local runtime", () => {
       cwd: process.cwd(),
       env: {
         ...process.env,
+        APP_MODE: "local",
         TURSO_DATABASE_URL: relative,
+        LOCAL_DEMO_DATABASE_URL: relative,
+        ORIGINAL_TURSO_DATABASE_URL: `file:${join(tmpdir(), `phase002-external-${crypto.randomUUID()}.db`)}`,
         LOCAL_FIXTURE_TENANT: binding.tenantId,
         LOCAL_FIXTURE_ACCOUNT: binding.providerAccountId,
       },
     });
     const previous = process.env.TURSO_DATABASE_URL;
+    const previousLocal = process.env.LOCAL_DEMO_DATABASE_URL;
+    const previousAppMode = process.env.APP_MODE;
+    const previousOriginal = process.env.ORIGINAL_TURSO_DATABASE_URL;
     process.env.TURSO_DATABASE_URL = relative;
+    process.env.LOCAL_DEMO_DATABASE_URL = relative;
+    process.env.ORIGINAL_TURSO_DATABASE_URL = `file:${join(tmpdir(), `phase002-external-${crypto.randomUUID()}.db`)}`;
+    process.env.APP_MODE = "local";
     try {
       const store = new CaseStore({ url: expected });
       const local = new LocalRuntime(store.getClient());
@@ -799,6 +854,14 @@ describe("Phase 002 persistent local runtime", () => {
     } finally {
       if (previous === undefined) delete process.env.TURSO_DATABASE_URL;
       else process.env.TURSO_DATABASE_URL = previous;
+      if (previousLocal === undefined)
+        delete process.env.LOCAL_DEMO_DATABASE_URL;
+      else process.env.LOCAL_DEMO_DATABASE_URL = previousLocal;
+      if (previousAppMode === undefined) delete process.env.APP_MODE;
+      else process.env.APP_MODE = previousAppMode;
+      if (previousOriginal === undefined)
+        delete process.env.ORIGINAL_TURSO_DATABASE_URL;
+      else process.env.ORIGINAL_TURSO_DATABASE_URL = previousOriginal;
     }
   });
 

@@ -1,3 +1,10 @@
+import {
+  assertDatabaseIsolation,
+  databaseProfile,
+  hasExplicitExternalMode,
+  isLocalMode,
+} from "../config/app-mode.mjs";
+
 const profile = process.argv
   .slice(2)
   .find((argument) => argument.startsWith("--profile="))
@@ -19,11 +26,26 @@ if (!["interactive", "deterministic"].includes(mode))
 
 const errors = [];
 const value = (name) => process.env[name]?.trim() || undefined;
-const source = value("SUPPORT_SOURCE")?.toLowerCase() || "mock";
-const commerce = value("COMMERCE_SOURCE")?.toLowerCase() || "mock";
+let selectedDatabase;
+try {
+  assertDatabaseIsolation(process.env);
+  selectedDatabase = databaseProfile(process.env);
+} catch (error) {
+  errors.push(error instanceof Error ? error.message : String(error));
+}
+const source = isLocalMode(process.env)
+  ? "mock"
+  : value("SUPPORT_SOURCE")?.toLowerCase() || "mock";
+const commerce = isLocalMode(process.env)
+  ? "mock"
+  : value("COMMERCE_SOURCE")?.toLowerCase() || "mock";
 const selected = {
-  intercom: source === "intercom" || profile === "intercom",
-  stripe: commerce === "stripe" || profile === "stripe",
+  intercom:
+    source === "intercom" ||
+    profile === "intercom" ||
+    hasExplicitExternalMode(),
+  stripe:
+    commerce === "stripe" || profile === "stripe" || hasExplicitExternalMode(),
 };
 
 const requireValue = (name, condition, message = `${name} is required.`) => {
@@ -59,9 +81,14 @@ if (
   value("LOCAL_AUTH_SIGNING_KEY").length < 32
 )
   errors.push("LOCAL_AUTH_SIGNING_KEY must be at least 32 characters.");
-const databaseUrl = value("TURSO_DATABASE_URL");
-if (databaseUrl && !databaseUrl.startsWith("file:"))
-  errors.push("TURSO_DATABASE_URL must use a file: URL for the local profile.");
+if (
+  isLocalMode(process.env) &&
+  selectedDatabase?.backend &&
+  !selectedDatabase.backend.startsWith("file:")
+)
+  errors.push(
+    "LOCAL_DEMO_DATABASE_URL must use a file: URL for the local profile.",
+  );
 
 requireValue(
   "OPENAI_API_KEY",

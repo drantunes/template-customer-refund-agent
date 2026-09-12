@@ -15,6 +15,13 @@ import { temporaryDatabasePath } from "../support/temp-path";
 const files: string[] = [];
 const runtimes: Array<{ shutdown(): Promise<void> }> = [];
 const execFileAsync = promisify(execFile);
+// The project setup gives ordinary local tests a deliberately different raw
+// external profile. Individual recovery runs can exercise a configured
+// external adapter, so retain that baseline for the next test after replacing
+// it with the run's own database.
+const baselineAppMode = process.env.APP_MODE;
+const baselineOriginalTursoDatabaseUrl =
+  process.env.ORIGINAL_TURSO_DATABASE_URL;
 
 function jsonModel(
   value: Record<string, unknown>,
@@ -215,8 +222,23 @@ async function setup(
   const path =
     options?.databasePath ?? temporaryDatabasePath("phase003-native-workflow");
   if (!files.includes(path)) files.push(path, `${path}-shm`, `${path}-wal`);
-  process.env.TURSO_DATABASE_URL = `file:${path}`;
   process.env.SUPPORT_SOURCE = options?.supportSource ?? "mock";
+  const hasExternalAdapter =
+    process.env.SUPPORT_SOURCE === "intercom" ||
+    process.env.COMMERCE_SOURCE === "stripe";
+  process.env.TURSO_DATABASE_URL = `file:${path}`;
+  if (hasExternalAdapter) {
+    // Legacy provider opt-in remains external when APP_MODE is omitted. The
+    // composition root reads ORIGINAL_* after the database preload, so make
+    // it point to this test's private database rather than the shared setup
+    // sentinel.
+    delete process.env.APP_MODE;
+    process.env.ORIGINAL_TURSO_DATABASE_URL = `file:${path}`;
+  } else {
+    process.env.APP_MODE = "local";
+    process.env.LOCAL_DEMO_DATABASE_URL = `file:${path}`;
+    process.env.ORIGINAL_TURSO_DATABASE_URL = `file:${path}.external`;
+  }
   vi.resetModules();
   // Evaluators are not the subject of this recovery test.  Remove their
   // registered scorer boundary before constructing the real agents so a
@@ -611,6 +633,12 @@ afterEach(async () => {
     delete process.env[name];
   delete process.env.SUPPORT_TEST_DISPATCH_LEASE_MS;
   delete process.env.SUPPORT_TEST_DISPATCH_HEARTBEAT_MS;
+  if (baselineAppMode === undefined) delete process.env.APP_MODE;
+  else process.env.APP_MODE = baselineAppMode;
+  if (baselineOriginalTursoDatabaseUrl === undefined)
+    delete process.env.ORIGINAL_TURSO_DATABASE_URL;
+  else
+    process.env.ORIGINAL_TURSO_DATABASE_URL = baselineOriginalTursoDatabaseUrl;
   await Promise.all(files.splice(0).map((file) => rm(file, { force: true })));
 });
 

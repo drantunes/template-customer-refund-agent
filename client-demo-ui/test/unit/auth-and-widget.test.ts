@@ -20,10 +20,10 @@ const customer = {
 };
 
 describe("demo identity tokens", () => {
-  it("uses the workspace-local database path by default", () => {
+  it("uses the isolated local client database by default", () => {
     const previous = process.env.DEMO_DATABASE_URL;
     delete process.env.DEMO_DATABASE_URL;
-    expect(databaseUrl()).toBe("file:.data/northstar-demo.db");
+    expect(databaseUrl()).toContain(".data/local-demo-client.db");
     if (previous === undefined) delete process.env.DEMO_DATABASE_URL;
     else process.env.DEMO_DATABASE_URL = previous;
   });

@@ -4,6 +4,14 @@ import { join } from "node:path";
 import { afterAll } from "vitest";
 
 const inheritedDatabaseUrl = process.env.TURSO_DATABASE_URL;
+for (const name of [
+  "APP_MODE",
+  "LOCAL_DEMO_DATABASE_URL",
+  "LOCAL_DEMO_CLIENT_DATABASE_URL",
+  "ORIGINAL_TURSO_DATABASE_URL",
+  "ORIGINAL_DEMO_DATABASE_URL",
+])
+  delete process.env[name];
 process.env.LOCAL_AUTH_SIGNING_KEY =
   "phase003-test-signing-key-must-be-at-least-32-chars";
 const inheritedAuthToken = process.env.TURSO_AUTH_TOKEN;
@@ -49,6 +57,8 @@ const databasePath = join(databaseDirectory, "support.db");
 
 process.env.PHASE001_TEST_DATABASE_DIRECTORY = databaseDirectory;
 process.env.PHASE001_TEST_DATABASE_URL = `file:${databasePath}`;
+process.env.LOCAL_DEMO_DATABASE_URL = process.env.PHASE001_TEST_DATABASE_URL;
+process.env.LOCAL_DEMO_CLIENT_DATABASE_URL = `file:${join(databaseDirectory, "client.db")}`;
 process.env.PHASE001_TEST_INHERITED_DATABASE_SENTINEL =
   inheritedDatabaseUrl?.startsWith(
     `file:${join(tmpdir(), "phase001-vitest-inherited-sentinel-")}`,
@@ -60,6 +70,10 @@ process.env.PHASE001_TEST_INHERITED_DATABASE_SENTINEL_PATH =
     ? inheritedDatabaseUrl!.replace("file:", "")
     : "";
 process.env.TURSO_DATABASE_URL = process.env.PHASE001_TEST_DATABASE_URL;
+// Legacy test helpers still pass TURSO_DATABASE_URL to direct libSQL clients.
+// App composition must treat that as the local test store, never an external
+// profile to compare against the same temporary file.
+process.env.ORIGINAL_TURSO_DATABASE_URL = `file:${join(databaseDirectory, "external-profile.db")}`;
 delete process.env.TURSO_AUTH_TOKEN;
 
 afterAll(() => {

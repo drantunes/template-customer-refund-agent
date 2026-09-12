@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   authenticateSeededCredentials,
   canAccessCase,
+  isLocalStudioDevMode,
   issueLocalSession,
   principalFromHeaders,
+  studioPrincipalForRequest,
   verifyLocalSession,
 } from "../../src/mastra/server/auth";
 import { CaseStore } from "../../src/mastra/lib/case-store";
@@ -12,14 +14,35 @@ import { rm } from "node:fs/promises";
 import { temporaryDatabasePath } from "../support/temp-path";
 
 const previous = process.env.LOCAL_AUTH_SIGNING_KEY;
+const previousAppMode = process.env.APP_MODE;
+const previousMastraDev = process.env.MASTRA_DEV;
+const previousMastraTelemetryCommand = process.env.MASTRA_TELEMETRY_COMMAND;
 const key = "phase003-test-signing-key-must-be-at-least-32-chars";
 
 afterEach(() => {
   if (previous === undefined) delete process.env.LOCAL_AUTH_SIGNING_KEY;
   else process.env.LOCAL_AUTH_SIGNING_KEY = previous;
+  if (previousAppMode === undefined) delete process.env.APP_MODE;
+  else process.env.APP_MODE = previousAppMode;
+  if (previousMastraDev === undefined) delete process.env.MASTRA_DEV;
+  else process.env.MASTRA_DEV = previousMastraDev;
+  if (previousMastraTelemetryCommand === undefined)
+    delete process.env.MASTRA_TELEMETRY_COMMAND;
+  else process.env.MASTRA_TELEMETRY_COMMAND = previousMastraTelemetryCommand;
 });
 
 describe("local support auth", () => {
+  it("denies anonymous Studio access under exact dev flags in explicit external mode", () => {
+    process.env.APP_MODE = "staging";
+    process.env.MASTRA_DEV = "true";
+    process.env.MASTRA_TELEMETRY_COMMAND = "dev";
+
+    expect(isLocalStudioDevMode()).toBe(false);
+    expect(
+      studioPrincipalForRequest(new Request("http://localhost/api/workflows")),
+    ).toBeUndefined();
+  });
+
   it("issues an opaque session and reloads roles from the seeded identity", () => {
     process.env.LOCAL_AUTH_SIGNING_KEY = key;
     const token = authenticateSeededCredentials(
@@ -41,6 +64,7 @@ describe("local support auth", () => {
     const payload = Buffer.from(
       JSON.stringify({
         id: "customer-alex",
+        appMode: "local",
         roles: ["admin"],
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       }),
@@ -82,6 +106,7 @@ describe("local support auth", () => {
     const payload = Buffer.from(
       JSON.stringify({
         id: "demo-customer",
+        appMode: "local",
         email: "customer@example.test",
         tenantId: "local-demo",
         roles: ["customer"],
@@ -183,4 +208,53 @@ describe("durable follow-up turns", () => {
       ]);
     }
   });
+});
+
+it("binds staff sessions to their app mode even when signing keys are reused", () => {
+  const previousMode = process.env.APP_MODE;
+  try {
+    process.env.LOCAL_AUTH_SIGNING_KEY = key;
+    process.env.APP_MODE = "local";
+    const local = issueLocalSession({ id: "approver-demo" });
+    process.env.APP_MODE = "production";
+    expect(verifyLocalSession(local)).toBeUndefined();
+    const external = issueLocalSession({ id: "approver-demo" });
+    expect(verifyLocalSession(external)).toBeDefined();
+    process.env.APP_MODE = "local";
+    expect(verifyLocalSession(external)).toBeUndefined();
+    expect(verifyLocalSession(local)).toBeDefined();
+  } finally {
+    if (previousMode === undefined) delete process.env.APP_MODE;
+    else process.env.APP_MODE = previousMode;
+  }
+});
+
+it("accepts legacy untagged bridge sessions only externally", async () => {
+  const { verifyDemoBridgeSession } =
+    await import("../../src/mastra/server/auth");
+  const previousMode = process.env.APP_MODE;
+  const previousBridge = process.env.DEMO_AUTH_BRIDGE_SIGNING_KEY;
+  try {
+    process.env.DEMO_AUTH_BRIDGE_SIGNING_KEY = key;
+    const payload = Buffer.from(
+      JSON.stringify({
+        id: "legacy",
+        email: "legacy@example.test",
+        tenantId: "local-demo",
+        roles: ["customer"],
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ).toString("base64url");
+    const token = `${payload}.${createHmac("sha256", key).update(payload).digest("base64url")}`;
+    delete process.env.APP_MODE;
+    expect(verifyDemoBridgeSession(token)).toBeUndefined();
+    process.env.APP_MODE = "staging";
+    expect(verifyDemoBridgeSession(token)).toMatchObject({ id: "legacy" });
+  } finally {
+    if (previousMode === undefined) delete process.env.APP_MODE;
+    else process.env.APP_MODE = previousMode;
+    if (previousBridge === undefined)
+      delete process.env.DEMO_AUTH_BRIDGE_SIGNING_KEY;
+    else process.env.DEMO_AUTH_BRIDGE_SIGNING_KEY = previousBridge;
+  }
 });

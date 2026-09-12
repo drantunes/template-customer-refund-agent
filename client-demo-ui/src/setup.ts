@@ -9,6 +9,11 @@ import {
 } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { seedCustomers, type Seed } from "./seed.js";
+import {
+  appMode,
+  assertDatabaseIsolation,
+  hasExplicitExternalMode,
+} from "../../config/app-mode.mjs";
 
 const STRIPE_VERSION = "2026-08-26.dahlia";
 const INTERCOM_VERSION = "2.16";
@@ -118,10 +123,18 @@ function form(fields: Record<string, string | number | boolean | undefined>) {
 }
 
 function setupConfig() {
+  if (appMode() === "local")
+    throw new Error("demo:setup is unavailable when APP_MODE=local.");
+  // Validate the selected external profile before creating a manifest,
+  // directory, database, or provider resource. APP_MODE is authoritative;
+  // legacy external opt-ins retain their existing source selection only when
+  // APP_MODE is absent.
+  assertDatabaseIsolation();
+  const explicitExternal = hasExplicitExternalMode();
   const stripeKey = required("STRIPE_RESTRICTED_API_KEY");
   if (
     process.env.STRIPE_SANDBOX_ENABLED !== "true" ||
-    process.env.COMMERCE_SOURCE !== "stripe" ||
+    (!explicitExternal && process.env.COMMERCE_SOURCE !== "stripe") ||
     !stripeKey.startsWith("rk_test_") ||
     required("STRIPE_TENANT_ID") !== "local-demo" ||
     (process.env.STRIPE_API_BASE_URL &&
@@ -130,7 +143,7 @@ function setupConfig() {
     throw new Error("demo:setup requires the configured Stripe test sandbox.");
   if (
     process.env.INTERCOM_DEVELOPMENT_ENABLED !== "true" ||
-    process.env.SUPPORT_SOURCE !== "intercom" ||
+    (!explicitExternal && process.env.SUPPORT_SOURCE !== "intercom") ||
     required("INTERCOM_TENANT_ID") !== "local-demo" ||
     (process.env.INTERCOM_API_BASE_URL &&
       process.env.INTERCOM_API_BASE_URL !== intercomOrigin)

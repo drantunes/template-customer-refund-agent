@@ -9,15 +9,17 @@ import { promisify } from "node:util";
 import { mkdir } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { DemoCustomer, DemoSession } from "./types.js";
+import { assertDatabaseIsolation } from "../../config/app-mode.mjs";
 
 const scrypt = promisify(scryptCallback);
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
 export function databaseUrl() {
-  // npm executes workspace scripts from client-demo-ui/, so this resolves consistently
-  // for `npm run dev:demo` and direct workspace commands.
-  return process.env.DEMO_DATABASE_URL ?? "file:.data/northstar-demo.db";
+  // Keep the legacy external workspace-relative URL stable. Local profile
+  // paths are root-resolved so backend children and workspace scripts agree.
+  return assertDatabaseIsolation().client;
 }
 export function openDatabase(url = databaseUrl()) {
   ensureDatabaseDirectorySync(url);
@@ -32,13 +34,17 @@ export async function initializeDatabase(client: Client) {
 }
 export async function ensureDatabaseDirectory(url: string) {
   if (!url.startsWith("file:") || url.includes(":memory:")) return;
-  const filename = url.slice("file:".length).split("?", 1)[0];
+  const filename = fileURLToPath(
+    new URL(url, pathToFileURL(`${process.cwd()}/`)),
+  );
   if (!filename) return;
   await mkdir(dirname(resolve(process.cwd(), filename)), { recursive: true });
 }
 function ensureDatabaseDirectorySync(url: string) {
   if (!url.startsWith("file:") || url.includes(":memory:")) return;
-  const filename = url.slice("file:".length).split("?", 1)[0];
+  const filename = fileURLToPath(
+    new URL(url, pathToFileURL(`${process.cwd()}/`)),
+  );
   if (filename)
     mkdirSync(dirname(resolve(process.cwd(), filename)), { recursive: true });
 }

@@ -6,6 +6,7 @@ src/mastra/public/
 .env.development
 .env
 .env.local
+.data/
 *.db
 *.db-*
 client-demo-ui/.data/

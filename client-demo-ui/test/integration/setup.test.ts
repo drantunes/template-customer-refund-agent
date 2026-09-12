@@ -39,6 +39,7 @@ async function configuredDirectory() {
     LOCAL_AUTH_SIGNING_KEY: "local",
     DEMO_PRIVATE_DIR: join(directory, "private"),
   });
+  delete process.env.APP_MODE;
   delete process.env.DEMO_DATABASE_URL;
   return directory;
 }
@@ -55,6 +56,86 @@ afterEach(async () => {
 });
 
 describe("demo setup transport", () => {
+  it("rejects local mode before manifest, database, or provider effects", async () => {
+    const directory = await configuredDirectory();
+    const localClient = join(directory, "local-client.db");
+    process.env.APP_MODE = "local";
+    process.env.LOCAL_DEMO_DATABASE_URL = `file:${join(directory, "local.db")}`;
+    process.env.LOCAL_DEMO_CLIENT_DATABASE_URL = `file:${localClient}`;
+    let calls = 0;
+
+    await expect(
+      runSetup({
+        fetchImpl: async () => {
+          calls += 1;
+          return Response.json({});
+        },
+      }),
+    ).rejects.toThrow("APP_MODE=local");
+
+    expect(calls).toBe(0);
+    await expect(access(process.env.DEMO_PRIVATE_DIR!)).rejects.toThrow();
+    await expect(access(localClient)).rejects.toThrow();
+  });
+
+  it.each(["staging", "production"])(
+    "uses both external providers for explicit %s mode despite legacy mock flags",
+    async (mode) => {
+      const directory = await configuredDirectory();
+      Object.assign(process.env, {
+        APP_MODE: mode,
+        COMMERCE_SOURCE: "mock",
+        SUPPORT_SOURCE: "mock",
+        TURSO_DATABASE_URL: `file:${join(directory, "external-backend.db")}`,
+        DEMO_DATABASE_URL: `file:${join(directory, "external-client.db")}`,
+        LOCAL_DEMO_DATABASE_URL: `file:${join(directory, "local.db")}`,
+        LOCAL_DEMO_CLIENT_DATABASE_URL: `file:${join(directory, "local-client.db")}`,
+      });
+      const calls: string[] = [];
+      await expect(
+        runSetup({
+          fetchImpl: async (input) => {
+            const path = new URL(String(input)).pathname;
+            calls.push(path);
+            if (path === "/v1/account")
+              return Response.json({ id: "acct_test_123" });
+            if (path === "/me")
+              return Response.json({ app: { id_code: "app_test_123" } });
+            throw new Error("stop after external provider selection");
+          },
+        }),
+      ).rejects.toThrow("stop after external provider selection");
+      expect(calls).toEqual(["/v1/account", "/me", "/v1/customers"]);
+    },
+  );
+
+  it("validates explicit external database isolation before provider effects", async () => {
+    const directory = await configuredDirectory();
+    const shared = `file:${join(directory, "shared.db")}`;
+    Object.assign(process.env, {
+      APP_MODE: "staging",
+      COMMERCE_SOURCE: "mock",
+      SUPPORT_SOURCE: "mock",
+      TURSO_DATABASE_URL: `file:${join(directory, "external-backend.db")}`,
+      DEMO_DATABASE_URL: shared,
+      LOCAL_DEMO_DATABASE_URL: `file:${join(directory, "local-backend.db")}`,
+      LOCAL_DEMO_CLIENT_DATABASE_URL: shared,
+    });
+    let calls = 0;
+
+    await expect(
+      runSetup({
+        fetchImpl: async () => {
+          calls += 1;
+          return Response.json({});
+        },
+      }),
+    ).rejects.toThrow("different files");
+
+    expect(calls).toBe(0);
+    await expect(access(process.env.DEMO_PRIVATE_DIR!)).rejects.toThrow();
+  });
+
   it("resumes one response-lost payment and replays a completed run without provider writes", async () => {
     const directory = await mkdtemp(join(tmpdir(), "client-demo-setup-"));
     temporaryDirectories.push(directory);
@@ -76,6 +157,7 @@ describe("demo setup transport", () => {
       LOCAL_AUTH_SIGNING_KEY: "local",
       DEMO_PRIVATE_DIR: join(directory, "private"),
     });
+    delete process.env.APP_MODE;
     delete process.env.DEMO_DATABASE_URL;
     const calls: Request[] = [];
     let paidInvoices = 0;

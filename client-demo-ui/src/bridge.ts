@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { DemoCustomer } from "./types.js";
+import { appMode } from "../../config/app-mode.mjs";
 
 const encode = (value: unknown) =>
   Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -13,6 +14,7 @@ export function issueBackendBridge(customer: DemoCustomer, expiresAt: string) {
     tenantId: customer.tenantId,
     roles: ["customer"],
     expiresAt,
+    appMode: appMode(),
     intercomContactId: customer.intercomContactId,
     stripeCustomerId: customer.stripeCustomerId,
   });

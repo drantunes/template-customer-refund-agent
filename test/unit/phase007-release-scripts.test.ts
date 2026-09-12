@@ -88,6 +88,26 @@ describe("PHASE-007 environment validation", () => {
     expect(existsSync(database)).toBe(false);
   });
 
+  it("checks the active local database while retaining an inactive remote TURSO URL", async () => {
+    const directory = await temporaryDirectory();
+    const result = run(
+      checkEnv,
+      ["--profile=local", "--mode=deterministic"],
+      localEnvironment({
+        APP_MODE: "local",
+        LOCAL_DEMO_DATABASE_URL: `file:${join(directory, "local.db")}`,
+        LOCAL_DEMO_CLIENT_DATABASE_URL: `file:${join(directory, "client.db")}`,
+        TURSO_DATABASE_URL: "libsql://preserved-external.example",
+        DEMO_DATABASE_URL: "libsql://preserved-client.example",
+      }),
+    );
+
+    expect(result).toMatchObject({ status: 0 });
+    expect(result.output).toContain(
+      "Environment profile local is valid in deterministic mode.",
+    );
+  });
+
   it("rejects missing and short local signing keys", () => {
     for (const environment of [
       { SUPPORT_SOURCE: "mock", COMMERCE_SOURCE: "mock" },

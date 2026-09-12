@@ -15,6 +15,7 @@
     "dev:client-demo": "npm run --workspace client-demo-ui dev --",
     "dev:support-demo": "npm run --workspace support-demo-ui dev --",
     "demo:setup": "npm run --workspace client-demo-ui setup --",
+    "demo:local": "node --env-file-if-exists=.env scripts/demo-local.mjs",
     "build:demo": "npm run --workspace client-demo-ui build",
     "lint:demo": "npm run --workspace client-demo-ui lint",
     "typecheck:demo": "npm run --workspace client-demo-ui typecheck",
