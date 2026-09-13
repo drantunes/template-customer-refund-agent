@@ -17,10 +17,10 @@ type Runtime = Awaited<ReturnType<typeof loadDeterministicRuntime>>;
 async function loadDeterministicRuntime() {
   const databasePath = temporaryDatabasePath("phase008-admin-e2e");
   process.env.APP_MODE = "local";
-  process.env.ORIGINAL_TURSO_DATABASE_URL = `file:${databasePath}.external`;
+  process.env.ORIGINAL_DATABASE_URL = `file:${databasePath}.external`;
   process.env.ORIGINAL_DEMO_DATABASE_URL = `file:${databasePath}.external-client`;
   process.env.LOCAL_DEMO_CLIENT_DATABASE_URL = `file:${databasePath}.client`;
-  process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
+  process.env.DATABASE_URL = `file:${databasePath}`;
   process.env.LOCAL_DEMO_DATABASE_URL = `file:${databasePath}`;
   process.env.SUPPORT_SOURCE = "mock";
   process.env.COMMERCE_SOURCE = "mock";

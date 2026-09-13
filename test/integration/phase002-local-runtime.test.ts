@@ -723,9 +723,9 @@ describe("Phase 002 persistent local runtime", () => {
     const environment = {
       ...process.env,
       APP_MODE: "local",
-      TURSO_DATABASE_URL: `file:${path}`,
+      DATABASE_URL: `file:${path}`,
       LOCAL_DEMO_DATABASE_URL: `file:${path}`,
-      ORIGINAL_TURSO_DATABASE_URL: `file:${path}.external`,
+      ORIGINAL_DATABASE_URL: `file:${path}.external`,
       LOCAL_FIXTURE_TENANT: binding.tenantId,
       LOCAL_FIXTURE_ACCOUNT: binding.providerAccountId,
     };
@@ -828,20 +828,20 @@ describe("Phase 002 persistent local runtime", () => {
       env: {
         ...process.env,
         APP_MODE: "local",
-        TURSO_DATABASE_URL: relative,
+        DATABASE_URL: relative,
         LOCAL_DEMO_DATABASE_URL: relative,
-        ORIGINAL_TURSO_DATABASE_URL: `file:${join(tmpdir(), `phase002-external-${crypto.randomUUID()}.db`)}`,
+        ORIGINAL_DATABASE_URL: `file:${join(tmpdir(), `phase002-external-${crypto.randomUUID()}.db`)}`,
         LOCAL_FIXTURE_TENANT: binding.tenantId,
         LOCAL_FIXTURE_ACCOUNT: binding.providerAccountId,
       },
     });
-    const previous = process.env.TURSO_DATABASE_URL;
+    const previous = process.env.DATABASE_URL;
     const previousLocal = process.env.LOCAL_DEMO_DATABASE_URL;
     const previousAppMode = process.env.APP_MODE;
-    const previousOriginal = process.env.ORIGINAL_TURSO_DATABASE_URL;
-    process.env.TURSO_DATABASE_URL = relative;
+    const previousOriginal = process.env.ORIGINAL_DATABASE_URL;
+    process.env.DATABASE_URL = relative;
     process.env.LOCAL_DEMO_DATABASE_URL = relative;
-    process.env.ORIGINAL_TURSO_DATABASE_URL = `file:${join(tmpdir(), `phase002-external-${crypto.randomUUID()}.db`)}`;
+    process.env.ORIGINAL_DATABASE_URL = `file:${join(tmpdir(), `phase002-external-${crypto.randomUUID()}.db`)}`;
     process.env.APP_MODE = "local";
     try {
       const store = new CaseStore({ url: expected });
@@ -852,16 +852,16 @@ describe("Phase 002 persistent local runtime", () => {
       ).toMatchObject({ orderId: "ORD-1001" });
       await store.close();
     } finally {
-      if (previous === undefined) delete process.env.TURSO_DATABASE_URL;
-      else process.env.TURSO_DATABASE_URL = previous;
+      if (previous === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previous;
       if (previousLocal === undefined)
         delete process.env.LOCAL_DEMO_DATABASE_URL;
       else process.env.LOCAL_DEMO_DATABASE_URL = previousLocal;
       if (previousAppMode === undefined) delete process.env.APP_MODE;
       else process.env.APP_MODE = previousAppMode;
       if (previousOriginal === undefined)
-        delete process.env.ORIGINAL_TURSO_DATABASE_URL;
-      else process.env.ORIGINAL_TURSO_DATABASE_URL = previousOriginal;
+        delete process.env.ORIGINAL_DATABASE_URL;
+      else process.env.ORIGINAL_DATABASE_URL = previousOriginal;
     }
   });
 

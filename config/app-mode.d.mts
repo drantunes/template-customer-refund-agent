@@ -10,6 +10,9 @@ export function isLocalMode(environment?: NodeJS.ProcessEnv): boolean;
 export function hasExplicitExternalMode(
   environment?: NodeJS.ProcessEnv,
 ): boolean;
+export function externalDatabaseUrl(
+  environment?: NodeJS.ProcessEnv,
+): string | undefined;
 export function databaseProfile(
   environment?: NodeJS.ProcessEnv,
 ): DatabaseProfile;

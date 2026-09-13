@@ -20,8 +20,7 @@ const execFileAsync = promisify(execFile);
 // external adapter, so retain that baseline for the next test after replacing
 // it with the run's own database.
 const baselineAppMode = process.env.APP_MODE;
-const baselineOriginalTursoDatabaseUrl =
-  process.env.ORIGINAL_TURSO_DATABASE_URL;
+const baselineOriginalDatabaseUrl = process.env.ORIGINAL_DATABASE_URL;
 
 function jsonModel(
   value: Record<string, unknown>,
@@ -226,18 +225,18 @@ async function setup(
   const hasExternalAdapter =
     process.env.SUPPORT_SOURCE === "intercom" ||
     process.env.COMMERCE_SOURCE === "stripe";
-  process.env.TURSO_DATABASE_URL = `file:${path}`;
+  process.env.DATABASE_URL = `file:${path}`;
   if (hasExternalAdapter) {
     // Legacy provider opt-in remains external when APP_MODE is omitted. The
     // composition root reads ORIGINAL_* after the database preload, so make
     // it point to this test's private database rather than the shared setup
     // sentinel.
     delete process.env.APP_MODE;
-    process.env.ORIGINAL_TURSO_DATABASE_URL = `file:${path}`;
+    process.env.ORIGINAL_DATABASE_URL = `file:${path}`;
   } else {
     process.env.APP_MODE = "local";
     process.env.LOCAL_DEMO_DATABASE_URL = `file:${path}`;
-    process.env.ORIGINAL_TURSO_DATABASE_URL = `file:${path}.external`;
+    process.env.ORIGINAL_DATABASE_URL = `file:${path}.external`;
   }
   vi.resetModules();
   // Evaluators are not the subject of this recovery test.  Remove their
@@ -635,10 +634,9 @@ afterEach(async () => {
   delete process.env.SUPPORT_TEST_DISPATCH_HEARTBEAT_MS;
   if (baselineAppMode === undefined) delete process.env.APP_MODE;
   else process.env.APP_MODE = baselineAppMode;
-  if (baselineOriginalTursoDatabaseUrl === undefined)
-    delete process.env.ORIGINAL_TURSO_DATABASE_URL;
-  else
-    process.env.ORIGINAL_TURSO_DATABASE_URL = baselineOriginalTursoDatabaseUrl;
+  if (baselineOriginalDatabaseUrl === undefined)
+    delete process.env.ORIGINAL_DATABASE_URL;
+  else process.env.ORIGINAL_DATABASE_URL = baselineOriginalDatabaseUrl;
   await Promise.all(files.splice(0).map((file) => rm(file, { force: true })));
 });
 

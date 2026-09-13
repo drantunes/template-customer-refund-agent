@@ -1312,9 +1312,9 @@ describe("DEC-015 retention", () => {
         env: {
           ...process.env,
           APP_MODE: "local",
-          TURSO_DATABASE_URL: `file:${path}`,
+          DATABASE_URL: `file:${path}`,
           LOCAL_DEMO_DATABASE_URL: `file:${path}`,
-          ORIGINAL_TURSO_DATABASE_URL: `file:${path}.external`,
+          ORIGINAL_DATABASE_URL: `file:${path}.external`,
           NODE_ENV: "test",
           SUPPORT_TEST_RETENTION_NOW: "2026-09-05T00:00:00.000Z",
         },
@@ -1348,9 +1348,9 @@ describe("DEC-015 retention", () => {
         env: {
           ...process.env,
           APP_MODE: "local",
-          TURSO_DATABASE_URL: `file:${path}`,
+          DATABASE_URL: `file:${path}`,
           LOCAL_DEMO_DATABASE_URL: `file:${path}`,
-          ORIGINAL_TURSO_DATABASE_URL: `file:${path}.external`,
+          ORIGINAL_DATABASE_URL: `file:${path}.external`,
           NODE_ENV: "test",
           SUPPORT_TEST_RETENTION_NOW: "2027-09-05T00:00:00.000Z",
         },

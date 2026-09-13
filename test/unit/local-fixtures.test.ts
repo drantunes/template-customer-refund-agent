@@ -10,7 +10,7 @@ import { temporaryDatabasePath } from "../support/temp-path";
 const files: string[] = [];
 
 afterEach(async () => {
-  delete process.env.TURSO_DATABASE_URL;
+  delete process.env.DATABASE_URL;
   await Promise.all(files.splice(0).map((file) => rm(file, { force: true })));
 });
 
@@ -18,9 +18,9 @@ describe("local subscription billing-term migration", () => {
   it("backfills the known annual fixture instead of retaining SQLite's new monthly default", async () => {
     const path = temporaryDatabasePath("phase008-recurring-migration");
     files.push(path, `${path}-shm`, `${path}-wal`);
-    process.env.TURSO_DATABASE_URL = `file:${path}`;
+    process.env.DATABASE_URL = `file:${path}`;
     process.env.LOCAL_DEMO_DATABASE_URL = `file:${path}`;
-    const client = createClient({ url: process.env.TURSO_DATABASE_URL });
+    const client = createClient({ url: process.env.DATABASE_URL });
     const binding = localFixtureBinding();
     await client.executeMultiple(`
       CREATE TABLE local_subscriptions (

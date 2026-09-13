@@ -1,4 +1,5 @@
 import type { ProviderBinding, ProviderRegistry } from "./contracts";
+import { databaseProfile } from "../../../config/app-mode.mjs";
 
 const registryKey = (binding: ProviderBinding) =>
   `${binding.tenantId}\u0000${binding.providerKind}\u0000${binding.providerAccountId}`;
@@ -61,10 +62,10 @@ export async function ensureProviderFixtures(binding: ProviderBinding) {
   // External adapters own their source data.  Never seed or reset local
   // fixtures merely because an Intercom knowledge publication is requested.
   if (binding.providerKind !== "local") return;
-  const url = process.env.TURSO_DATABASE_URL || "file:./mastra.db";
+  const url = databaseProfile().backend;
   if (!url.startsWith("file:"))
     throw new Error(
-      "Refusing local fixture seed: TURSO_DATABASE_URL must use a file: URL.",
+      "Refusing local fixture seed: DATABASE_URL must use a file: URL.",
     );
   const registry = providerRegistry(binding) as ProviderRegistry & {
     seed?: (binding: ProviderBinding) => Promise<void>;

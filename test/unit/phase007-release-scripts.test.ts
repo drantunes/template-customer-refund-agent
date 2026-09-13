@@ -78,7 +78,7 @@ describe("PHASE-007 environment validation", () => {
     const result = run(
       checkEnv,
       ["--profile=local", "--mode=deterministic"],
-      localEnvironment({ TURSO_DATABASE_URL: `file:${database}` }),
+      localEnvironment({ DATABASE_URL: `file:${database}` }),
     );
 
     expect(result).toMatchObject({ status: 0 });
@@ -97,7 +97,7 @@ describe("PHASE-007 environment validation", () => {
         APP_MODE: "local",
         LOCAL_DEMO_DATABASE_URL: `file:${join(directory, "local.db")}`,
         LOCAL_DEMO_CLIENT_DATABASE_URL: `file:${join(directory, "client.db")}`,
-        TURSO_DATABASE_URL: "libsql://preserved-external.example",
+        DATABASE_URL: "libsql://preserved-external.example",
         DEMO_DATABASE_URL: "libsql://preserved-client.example",
       }),
     );

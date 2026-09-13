@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   appMode,
   assertDatabaseIsolation,
+  databaseProfile,
+  externalDatabaseUrl,
   isLocalMode,
 } from "../../config/app-mode.mjs";
 
@@ -15,7 +17,7 @@ describe("APP_MODE profile selection", () => {
   it("lets explicit local override external credentials and requires distinct persistent stores", () => {
     const env = {
       APP_MODE: "local",
-      TURSO_DATABASE_URL: "file:.data/external.db",
+      DATABASE_URL: "file:.data/external.db",
       DEMO_DATABASE_URL: "file:.data/external-client.db",
       LOCAL_DEMO_DATABASE_URL: "file:.data/local.db",
       LOCAL_DEMO_CLIENT_DATABASE_URL: "file:.data/local-client.db",
@@ -36,8 +38,46 @@ describe("APP_MODE profile selection", () => {
   });
   it("requires full configured database selection for explicit external modes", () => {
     expect(() => assertDatabaseIsolation({ APP_MODE: "staging" })).toThrow(
-      "requires TURSO_DATABASE_URL",
+      "requires DATABASE_URL",
     );
+  });
+  it("uses nonblank DATABASE_URL before the legacy fallback", () => {
+    expect(
+      externalDatabaseUrl({
+        DATABASE_URL: "file:canonical.db",
+        TURSO_DATABASE_URL: "file:legacy.db",
+      }),
+    ).toBe("file:canonical.db");
+    expect(
+      externalDatabaseUrl({
+        DATABASE_URL: "   ",
+        TURSO_DATABASE_URL: "file:legacy.db",
+      }),
+    ).toBe("file:legacy.db");
+    expect(
+      databaseProfile({
+        APP_MODE: "staging",
+        TURSO_DATABASE_URL: "file:legacy-only.db",
+        DEMO_DATABASE_URL: "file:client.db",
+      }).backend,
+    ).toBe(new URL("legacy-only.db", `file://${process.cwd()}/`).href);
+  });
+  it("uses raw snapshots before mutable process values", () => {
+    expect(
+      externalDatabaseUrl({
+        DATABASE_URL: "file:mutated.db",
+        ORIGINAL_DATABASE_URL: "",
+        TURSO_DATABASE_URL: "file:mutated-legacy.db",
+        ORIGINAL_TURSO_DATABASE_URL: "file:legacy-snapshot.db",
+      }),
+    ).toBe("file:legacy-snapshot.db");
+    expect(
+      externalDatabaseUrl({
+        DATABASE_URL: "file:mutated.db",
+        ORIGINAL_DATABASE_URL: "file:canonical-snapshot.db",
+        TURSO_DATABASE_URL: "file:legacy.db",
+      }),
+    ).toBe("file:canonical-snapshot.db");
   });
 });
 
@@ -57,7 +97,7 @@ describe("profile path and preload regression", () => {
         "./scripts/database-env.mjs",
         "--input-type=module",
         "-e",
-        `import {applyModeToEnvironment} from './config/app-mode.mjs'; await import('./scripts/database-env.mjs?second'); const p=applyModeToEnvironment(); console.log(JSON.stringify({backend:p.backend,root:process.env.TEMPLATE_ROOT,original:process.env.ORIGINAL_TURSO_DATABASE_URL}));`,
+        `import {applyModeToEnvironment} from './config/app-mode.mjs'; await import('./scripts/database-env.mjs?second'); const p=applyModeToEnvironment(); console.log(JSON.stringify({backend:p.backend,root:process.env.TEMPLATE_ROOT,original:process.env.ORIGINAL_DATABASE_URL,legacyOriginal:process.env.ORIGINAL_TURSO_DATABASE_URL,legacy:process.env.TURSO_DATABASE_URL ?? null}));`,
       ],
       { cwd: templateRoot, env: environment, encoding: "utf8" },
     );
@@ -65,6 +105,38 @@ describe("profile path and preload regression", () => {
       backend: new URL(".data/local-demo.db", `file://${templateRoot}/`).href,
       root: templateRoot,
       original: "",
+      legacyOriginal: "",
+      legacy: null,
+    });
+  });
+  it("captures both raw names once and changes only DATABASE_URL", async () => {
+    const { execFileSync } = await import("node:child_process");
+    const { templateRoot } = await import("../../config/app-mode.mjs");
+    const result = execFileSync(
+      process.execPath,
+      [
+        "--import",
+        "./scripts/database-env.mjs",
+        "--input-type=module",
+        "-e",
+        `await import('./scripts/database-env.mjs?second'); console.log(JSON.stringify({canonical:process.env.DATABASE_URL,legacy:process.env.TURSO_DATABASE_URL,original:process.env.ORIGINAL_DATABASE_URL,legacyOriginal:process.env.ORIGINAL_TURSO_DATABASE_URL}));`,
+      ],
+      {
+        cwd: templateRoot,
+        env: {
+          PATH: process.env.PATH,
+          APP_MODE: "local",
+          DATABASE_URL: "file:canonical-external.db",
+          TURSO_DATABASE_URL: "file:legacy-external.db",
+        },
+        encoding: "utf8",
+      },
+    );
+    expect(JSON.parse(result)).toEqual({
+      canonical: new URL(".data/local-demo.db", `file://${templateRoot}/`).href,
+      legacy: "file:legacy-external.db",
+      original: "file:canonical-external.db",
+      legacyOriginal: "file:legacy-external.db",
     });
   });
   it("rejects symlink ancestors before creation and existing hardlinks", async () => {
@@ -90,7 +162,7 @@ describe("profile path and preload regression", () => {
         assertDatabaseIsolation({
           ...base,
           LOCAL_DEMO_DATABASE_URL: `file:${root}/alias/future.db`,
-          TURSO_DATABASE_URL: `file:${root}/real/future.db`,
+          DATABASE_URL: `file:${root}/real/future.db`,
         }),
       ).toThrow("different files");
       writeFileSync(join(root, "real/existing.db"), "sentinel");
@@ -99,7 +171,7 @@ describe("profile path and preload regression", () => {
         assertDatabaseIsolation({
           ...base,
           LOCAL_DEMO_DATABASE_URL: `file:${root}/other.db`,
-          TURSO_DATABASE_URL: `file:${root}/real/existing.db`,
+          DATABASE_URL: `file:${root}/real/existing.db`,
         }),
       ).toThrow("different files");
     } finally {
@@ -110,7 +182,7 @@ describe("profile path and preload regression", () => {
     const { databaseProfile } = await import("../../config/app-mode.mjs");
     const environment = {
       APP_MODE: "staging",
-      TURSO_DATABASE_URL: "file:external-backend.db",
+      DATABASE_URL: "file:external-backend.db",
       DEMO_DATABASE_URL: "file:.data/external-client.db",
     };
     expect(databaseProfile(environment).client).toBe(
@@ -130,7 +202,7 @@ describe("profile path and preload regression", () => {
       APP_MODE: "production",
       SUPPORT_SOURCE: "mock",
       COMMERCE_SOURCE: "mock",
-      TURSO_DATABASE_URL: "file:external-backend.db",
+      DATABASE_URL: "file:external-backend.db",
       DEMO_DATABASE_URL: "file:.data/external-client.db",
     };
     const external = applyModeToEnvironment(environment);
@@ -143,7 +215,7 @@ describe("profile path and preload regression", () => {
     expect(environment).toMatchObject({
       SUPPORT_SOURCE: "mock",
       COMMERCE_SOURCE: "mock",
-      TURSO_DATABASE_URL: "file:external-backend.db",
+      DATABASE_URL: "file:external-backend.db",
     });
     expect(local.backend).not.toBe(external.backend);
     expect(local.client).not.toBe(external.client);

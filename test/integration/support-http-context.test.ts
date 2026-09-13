@@ -102,7 +102,7 @@ async function loadDeterministicRuntime() {
     `${databasePath}-shm`,
     `${databasePath}-wal`,
   );
-  process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
+  process.env.DATABASE_URL = `file:${databasePath}`;
   process.env.LOCAL_DEMO_DATABASE_URL = `file:${databasePath}`;
   process.env.SUPPORT_SOURCE = "mock";
   vi.resetModules();
@@ -1704,7 +1704,7 @@ describe("support workflow HTTP context propagation", () => {
       ]),
     );
     const { CaseStore } = await import("../../src/mastra/lib/case-store");
-    const reopened = new CaseStore({ url: process.env.TURSO_DATABASE_URL! });
+    const reopened = new CaseStore({ url: process.env.DATABASE_URL! });
     expect(await reopened.feedback([caseId])).toHaveLength(2);
     await reopened.close();
   });
@@ -1885,7 +1885,7 @@ describe("support workflow HTTP context propagation", () => {
       expect.arrayContaining([firstTurn.id, secondTurn.id]),
     );
     const { CaseStore } = await import("../../src/mastra/lib/case-store");
-    const reopened = new CaseStore({ url: process.env.TURSO_DATABASE_URL! });
+    const reopened = new CaseStore({ url: process.env.DATABASE_URL! });
     expect(await reopened.feedback([caseId])).toHaveLength(2);
     await reopened.close();
   }, 20_000);
