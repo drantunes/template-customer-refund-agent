@@ -24,6 +24,6 @@ export function requireLocalDatabaseUrl(
 ) {
   const url = resolveDatabaseUrl(value, cwd);
   if (!url.startsWith("file:"))
-    throw new Error("TURSO_DATABASE_URL must use a file: URL for local data.");
+    throw new Error("DATABASE_URL must use a file: URL for local data.");
   return url;
 }

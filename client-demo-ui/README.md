@@ -26,4 +26,6 @@ npm run dev:support-demo
 
 The demo serves at `http://127.0.0.1:3000`. It forwards only Intercom and Stripe webhooks to the loopback backend, preserving signed bytes and headers within the 256 KiB limit; it does not provide a generic proxy.
 
+`npm run demo:local` starts from a fresh selected local backend and client SQLite pair: it clears those two files and their SQLite sidecars before running both seed commands. Direct `npm run local:seed` and `npm run --workspace client-demo-ui local:seed` remain replay-safe and preserve their existing dates and amounts. The backend captures the current seed instant once; the client reads those persisted facts. If an existing client snapshot reports a different local identity, subscription, or display facts, create a fresh client database instead of replacing its history.
+
 For a public client-demo session, tunnel the client port with `ngrok http 3000`. The public `/entrar` page belongs to port 3000; Studio on port 4111 remains local.

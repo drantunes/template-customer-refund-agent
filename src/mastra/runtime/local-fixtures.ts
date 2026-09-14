@@ -2,14 +2,20 @@ import type { Client } from "@libsql/client";
 import { POLICY_DOCUMENTS } from "../knowledge/policy-docs.ts";
 import type { ProviderBinding } from "../providers/contracts";
 import { requireLocalDatabaseUrl } from "../lib/database-url.ts";
+import { isLocalMode } from "../../../config/app-mode.mjs";
+import {
+  interactiveLocalCommerce,
+  localDemoSeedInstant,
+} from "../../../config/demo-commerce.mjs";
 
 const localSchema = `
   CREATE TABLE IF NOT EXISTS local_orders (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, order_id TEXT NOT NULL, customer_email TEXT NOT NULL, product TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, charge_count INTEGER NOT NULL, placed_at TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, order_id));
-  CREATE TABLE IF NOT EXISTS local_subscriptions (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, subscription_id TEXT NOT NULL, customer_email TEXT NOT NULL, plan TEXT NOT NULL, recurring_interval TEXT NOT NULL DEFAULT 'month', recurring_interval_count INTEGER NOT NULL DEFAULT 1, quantity INTEGER NOT NULL DEFAULT 1, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, renews_at TEXT NOT NULL, cancel_at_period_end INTEGER NOT NULL DEFAULT 0, cancels_at TEXT, PRIMARY KEY(tenant_id, provider_account_id, subscription_id));
+  CREATE TABLE IF NOT EXISTS local_subscriptions (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, subscription_id TEXT NOT NULL, customer_email TEXT NOT NULL, plan TEXT NOT NULL, recurring_interval TEXT NOT NULL DEFAULT 'month', recurring_interval_count INTEGER NOT NULL DEFAULT 1, quantity INTEGER NOT NULL DEFAULT 1, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT, renews_at TEXT NOT NULL, cancel_at_period_end INTEGER NOT NULL DEFAULT 0, cancels_at TEXT, PRIMARY KEY(tenant_id, provider_account_id, subscription_id));
   CREATE TABLE IF NOT EXISTS local_refunds (refund_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, order_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, reason TEXT NOT NULL, issued_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS local_subscription_credits (credit_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, customer_id TEXT NOT NULL, subscription_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, reason TEXT NOT NULL, issued_at TEXT NOT NULL, UNIQUE(tenant_id, provider_account_id, subscription_id, credit_id));
   CREATE TABLE IF NOT EXISTS local_knowledge (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, version TEXT NOT NULL, effective_at TEXT, expires_at TEXT, PRIMARY KEY(tenant_id, provider_account_id, source));
   CREATE TABLE IF NOT EXISTS local_deliveries (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, payload_fingerprint TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id, idempotency_key));
+  CREATE TABLE IF NOT EXISTS local_demo_seed_profiles (tenant_id TEXT NOT NULL, provider_account_id TEXT NOT NULL, profile TEXT NOT NULL, seeded_at TEXT NOT NULL, PRIMARY KEY(tenant_id, provider_account_id));
 `;
 
 export const localFixtureOrders = [
@@ -104,6 +110,7 @@ export async function initializeLocalFixtures(client: Client) {
     "ALTER TABLE local_subscriptions ADD COLUMN recurring_interval TEXT NOT NULL DEFAULT 'month'",
     "ALTER TABLE local_subscriptions ADD COLUMN recurring_interval_count INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE local_subscriptions ADD COLUMN quantity INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE local_subscriptions ADD COLUMN started_at TEXT",
   ])
     try {
       await client.execute(sql);
@@ -126,6 +133,13 @@ export async function seedLocalFixtures(
   requireLocalDatabaseUrl();
   await initializeLocalFixtures(client);
   const args = [binding.tenantId, binding.providerAccountId];
+  const profile = await client.execute({
+    sql: "SELECT profile FROM local_demo_seed_profiles WHERE tenant_id = ? AND provider_account_id = ?",
+    args,
+  });
+  // An interactive demo has intentionally distinct current-date commerce
+  // facts. Never add historical characterization rows to that same binding.
+  if (profile.rows[0]?.profile === "interactive-current") return;
   await client.batch(
     [
       ...localFixtureOrders.map((row) => ({
@@ -169,6 +183,71 @@ export async function seedLocalFixtures(
     ],
     "write",
   );
+}
+
+/** Seed the current interactive demo only into an empty binding. Existing
+ * commerce histories remain authoritative and are never rewritten. */
+export async function seedInteractiveLocalDemoFixtures(
+  client: Client,
+  binding: ProviderBinding,
+  seedAt = localDemoSeedInstant(),
+) {
+  if (!isLocalMode())
+    throw new Error("Interactive local commerce seed requires APP_MODE=local.");
+  requireLocalDatabaseUrl();
+  await initializeLocalFixtures(client);
+  const args = [binding.tenantId, binding.providerAccountId];
+  const transaction = await client.transaction("write");
+  try {
+    const existing = await transaction.execute({
+      sql: "SELECT (SELECT COUNT(*) FROM local_orders WHERE tenant_id = ? AND provider_account_id = ?) + (SELECT COUNT(*) FROM local_subscriptions WHERE tenant_id = ? AND provider_account_id = ?) AS total",
+      args: [...args, ...args],
+    });
+    const profile = await transaction.execute({
+      sql: "SELECT profile FROM local_demo_seed_profiles WHERE tenant_id = ? AND provider_account_id = ?",
+      args,
+    });
+    if (profile.rows[0]?.profile === "interactive-current") {
+      await transaction.rollback();
+      return;
+    }
+    if (Number(existing.rows[0]?.total ?? 0) > 0) {
+      await transaction.rollback();
+      return;
+    }
+    const commerce = interactiveLocalCommerce(seedAt);
+    const seededAt = new Date(seedAt).toISOString();
+    await transaction.batch([
+      {
+        sql: "INSERT INTO local_orders VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        args: [
+          ...args,
+          commerce.purchase.orderId,
+          "alex@example.com",
+          commerce.purchase.product,
+          commerce.purchase.amountMinor,
+          commerce.purchase.currency,
+          "fulfilled",
+          1,
+          commerce.purchase.purchasedAt,
+        ],
+      },
+      {
+        sql: "INSERT INTO local_demo_seed_profiles(tenant_id, provider_account_id, profile, seeded_at) VALUES (?, ?, 'interactive-current', ?)",
+        args: [...args, seededAt],
+      },
+      ...POLICY_DOCUMENTS.map((document) => ({
+        sql: "INSERT OR IGNORE INTO local_knowledge(tenant_id, provider_account_id, source, title, text, version, effective_at, expires_at) VALUES (?, ?, ?, ?, ?, 'local-v1', '2026-01-01T00:00:00.000Z', NULL)",
+        args: [...args, document.source, document.title, document.text],
+      })),
+    ]);
+    await transaction.commit();
+  } catch (error) {
+    try {
+      await transaction.rollback();
+    } catch {}
+    throw error;
+  }
 }
 
 export async function resetLocalFixtures(
@@ -217,6 +296,7 @@ export async function resetLocalFixtures(
         "local_refunds",
         "local_subscription_credits",
         "local_deliveries",
+        "local_demo_seed_profiles",
       ].map((table) => ({
         sql: `DELETE FROM ${table} WHERE tenant_id = ? AND provider_account_id = ?`,
         args,

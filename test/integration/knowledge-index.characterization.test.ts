@@ -24,7 +24,7 @@ describe("support knowledge index", () => {
       `${databasePath}-shm`,
       `${databasePath}-wal`,
     );
-    process.env.TURSO_DATABASE_URL = `file:${databasePath}`;
+    process.env.DATABASE_URL = `file:${databasePath}`;
     process.env.LOCAL_DEMO_DATABASE_URL = `file:${databasePath}`;
     process.env.SUPPORT_KNOWLEDGE_RETRIEVAL = "vector";
     vi.resetModules();

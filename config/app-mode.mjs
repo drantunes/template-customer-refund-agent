@@ -15,6 +15,22 @@ const externalClientDefault = "file:.data/northstar-demo.db";
 function value(environment, name) {
   return environment[name]?.trim() || undefined;
 }
+/**
+ * Resolve the external backend from the raw configuration captured before the
+ * preload changes DATABASE_URL for a local child process. DATABASE_URL is the
+ * canonical setting; TURSO_DATABASE_URL remains a fallback for existing
+ * environments while they migrate.
+ */
+export function externalDatabaseUrl(environment = process.env) {
+  const canonical = Object.hasOwn(environment, "ORIGINAL_DATABASE_URL")
+    ? value(environment, "ORIGINAL_DATABASE_URL")
+    : value(environment, "DATABASE_URL");
+  const legacy = Object.hasOwn(environment, "ORIGINAL_TURSO_DATABASE_URL")
+    ? value(environment, "ORIGINAL_TURSO_DATABASE_URL")
+    : value(environment, "TURSO_DATABASE_URL");
+  return canonical ?? legacy;
+}
+
 function externalValue(environment, name) {
   const original = `ORIGINAL_${name}`;
   return Object.hasOwn(environment, original)
@@ -49,6 +65,14 @@ export function isLocalMode(environment = process.env) {
 export function hasExplicitExternalMode(environment = process.env) {
   const explicit = value(environment, "APP_MODE")?.toLowerCase();
   return explicit === "staging" || explicit === "production";
+}
+
+export function hasExplicitStagingMode(environment = process.env) {
+  const mode = appMode(environment);
+  return (
+    mode === "staging" &&
+    value(environment, "APP_MODE")?.toLowerCase() === "staging"
+  );
 }
 
 function absoluteFileUrl(value, fallback, root = templateRoot) {
@@ -88,7 +112,7 @@ export function databaseProfile(environment = process.env) {
     backend: absoluteFileUrl(
       local
         ? value(environment, "LOCAL_DEMO_DATABASE_URL")
-        : externalValue(environment, "TURSO_DATABASE_URL"),
+        : externalDatabaseUrl(environment),
       local ? localBackendDefault : externalBackendDefault,
     ),
     client: local
@@ -114,7 +138,7 @@ export function assertDatabaseIsolation(environment = process.env) {
     localClientDefault,
   );
   const externalBackend = absoluteFileUrl(
-    externalValue(environment, "TURSO_DATABASE_URL"),
+    externalDatabaseUrl(environment),
     externalBackendDefault,
   );
   const externalClient = absoluteFileUrl(
@@ -161,11 +185,11 @@ export function assertDatabaseIsolation(environment = process.env) {
   }
   if (
     hasExplicitExternalMode(environment) &&
-    (!externalValue(environment, "TURSO_DATABASE_URL") ||
+    (!externalDatabaseUrl(environment) ||
       !externalValue(environment, "DEMO_DATABASE_URL"))
   )
     throw new Error(
-      "External APP_MODE requires TURSO_DATABASE_URL and DEMO_DATABASE_URL.",
+      "External APP_MODE requires DATABASE_URL and DEMO_DATABASE_URL.",
     );
   return selected;
 }

@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { defineConfig } from "vitest/config";
 
 const inheritedDatabaseSentinel = `file:${join(tmpdir(), `phase001-vitest-inherited-sentinel-${randomUUID()}.db`)}`;
+const inheritedLegacyDatabaseSentinel = `file:${join(tmpdir(), `phase001-vitest-inherited-legacy-sentinel-${randomUUID()}.db`)}`;
 const databaseIsolationSetup = ["test/support/database-isolation.setup.ts"];
 const webResolve = {
   alias: {
@@ -21,7 +22,8 @@ export default defineConfig({
           environment: "node",
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",
-            TURSO_DATABASE_URL: inheritedDatabaseSentinel,
+            DATABASE_URL: inheritedDatabaseSentinel,
+            TURSO_DATABASE_URL: inheritedLegacyDatabaseSentinel,
           },
           setupFiles: databaseIsolationSetup,
         },
@@ -34,7 +36,8 @@ export default defineConfig({
           fileParallelism: false,
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",
-            TURSO_DATABASE_URL: inheritedDatabaseSentinel,
+            DATABASE_URL: inheritedDatabaseSentinel,
+            TURSO_DATABASE_URL: inheritedLegacyDatabaseSentinel,
           },
           setupFiles: databaseIsolationSetup,
         },
@@ -46,7 +49,8 @@ export default defineConfig({
           environment: "node",
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",
-            TURSO_DATABASE_URL: inheritedDatabaseSentinel,
+            DATABASE_URL: inheritedDatabaseSentinel,
+            TURSO_DATABASE_URL: inheritedLegacyDatabaseSentinel,
           },
           setupFiles: databaseIsolationSetup,
         },
@@ -58,7 +62,8 @@ export default defineConfig({
           environment: "node",
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",
-            TURSO_DATABASE_URL: inheritedDatabaseSentinel,
+            DATABASE_URL: inheritedDatabaseSentinel,
+            TURSO_DATABASE_URL: inheritedLegacyDatabaseSentinel,
           },
           setupFiles: databaseIsolationSetup,
         },
@@ -71,7 +76,8 @@ export default defineConfig({
           environment: "node",
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",
-            TURSO_DATABASE_URL: inheritedDatabaseSentinel,
+            DATABASE_URL: inheritedDatabaseSentinel,
+            TURSO_DATABASE_URL: inheritedLegacyDatabaseSentinel,
           },
           setupFiles: databaseIsolationSetup,
         },
@@ -84,7 +90,8 @@ export default defineConfig({
           environment: "node",
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",
-            TURSO_DATABASE_URL: inheritedDatabaseSentinel,
+            DATABASE_URL: inheritedDatabaseSentinel,
+            TURSO_DATABASE_URL: inheritedLegacyDatabaseSentinel,
           },
           setupFiles: databaseIsolationSetup,
         },
@@ -97,7 +104,8 @@ export default defineConfig({
           environment: "node",
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",
-            TURSO_DATABASE_URL: inheritedDatabaseSentinel,
+            DATABASE_URL: inheritedDatabaseSentinel,
+            TURSO_DATABASE_URL: inheritedLegacyDatabaseSentinel,
           },
           setupFiles: databaseIsolationSetup,
         },
@@ -110,7 +118,8 @@ export default defineConfig({
           environment: "node",
           env: {
             TURSO_AUTH_TOKEN: "phase001-vitest-sentinel-token",
-            TURSO_DATABASE_URL: inheritedDatabaseSentinel,
+            DATABASE_URL: inheritedDatabaseSentinel,
+            TURSO_DATABASE_URL: inheritedLegacyDatabaseSentinel,
           },
           setupFiles: databaseIsolationSetup,
         },

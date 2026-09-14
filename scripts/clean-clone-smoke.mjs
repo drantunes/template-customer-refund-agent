@@ -247,6 +247,7 @@ try {
     ].join("\n"),
   );
   const env = syntheticEnvironment();
+  env.LOCAL_DEMO_FIXTURE_PROFILE = "characterization";
   const e2eApiPort = await unusedPort();
   const e2ePort = await unusedPort();
   env.E2E_API_PORT = String(e2eApiPort);

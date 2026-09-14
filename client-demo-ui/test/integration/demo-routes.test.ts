@@ -3,7 +3,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 process.env.VITEST = "true";
 // Preserve the Messenger regression suite under an explicit external mode.
 process.env.APP_MODE = "staging";
-process.env.TURSO_DATABASE_URL = "file:/tmp/src033-external-route-fixture.db";
+process.env.DATABASE_URL = "file:/tmp/src033-external-route-fixture.db";
 process.env.DEMO_DATABASE_URL = "file::memory:?cache=shared";
 const server = await import("../../src/server.js");
 const db = await import("../../src/db.js");
@@ -65,7 +65,11 @@ describe("Northstar demo routes", () => {
     });
     expect(account.status).toBe(200);
     const page = await account.text();
-    expect(page).toContain("Northstar Toolkit");
+    expect(page).toContain("Purchase");
+    expect(page).toContain(
+      "Purchase details are unavailable for this historical record.",
+    );
+    expect(page).not.toContain("Purchased ");
     expect(page).toContain("intercom_user_jwt");
     expect(page).toContain('language_override":"en"');
     expect(page).toContain('user_id":"customer-example"');

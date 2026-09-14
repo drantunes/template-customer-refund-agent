@@ -12,7 +12,7 @@ export default defineConfig({
   use: { baseURL: `http://127.0.0.1:${port}`, ...devices["Desktop Chrome"] },
   webServer: [
     {
-      command: `APP_MODE=staging TURSO_DATABASE_URL=file:${database}.backend DEMO_PORT=${port} DEMO_DATABASE_URL=file:${database} INTERCOM_APP_ID=app_e2e INTERCOM_MESSENGER_JWT_SECRET=widget-e2e-secret npm run e2e:serve`,
+      command: `APP_MODE=staging DATABASE_URL=file:${database}.backend DEMO_PORT=${port} DEMO_DATABASE_URL=file:${database} INTERCOM_APP_ID=app_e2e INTERCOM_MESSENGER_JWT_SECRET=widget-e2e-secret npm run e2e:serve`,
       url: `http://127.0.0.1:${port}`,
       reuseExistingServer: false,
     },

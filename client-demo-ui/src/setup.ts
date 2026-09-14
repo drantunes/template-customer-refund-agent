@@ -115,6 +115,22 @@ function id(value: Record<string, unknown>, kind: string) {
   return value.id;
 }
 
+function verifiedTimestamp(value: unknown, label: string) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throw new Error(`${label} has no verified provider timestamp.`);
+  return new Date(value * 1_000).toISOString();
+}
+
+function paidInvoiceTimestamp(invoice: Record<string, unknown>, label: string) {
+  const transitions = invoice.status_transitions;
+  if (!transitions || typeof transitions !== "object")
+    throw new Error(`${label} has no verified provider timestamp.`);
+  return verifiedTimestamp(
+    (transitions as Record<string, unknown>).paid_at,
+    label,
+  );
+}
+
 function form(fields: Record<string, string | number | boolean | undefined>) {
   const result = new URLSearchParams();
   for (const [key, value] of Object.entries(fields))
@@ -426,7 +442,7 @@ export async function runSetup({ fetchImpl = fetch } = {}) {
         customer: alex.stripeCustomerId,
         auto_advance: false,
         collection_method: "charge_automatically",
-        description: "Northstar Toolkit",
+        description: "API Credits",
         "metadata[demo_run]": run,
         "metadata[demo_id]": alex.id,
       }),
@@ -440,7 +456,7 @@ export async function runSetup({ fetchImpl = fetch } = {}) {
         invoice: alex.invoiceId,
         amount: 500,
         currency: "usd",
-        description: "Northstar Toolkit",
+        description: "API Credits",
       }),
       "alex:invoice-item",
     );
@@ -463,6 +479,12 @@ export async function runSetup({ fetchImpl = fetch } = {}) {
       throw new Error("Alex invoice is not a paid USD 5 test-mode purchase.");
     alex.paymentIntentId =
       typeof paid.payment_intent === "string" ? paid.payment_intent : undefined;
+    alex.purchase = {
+      product: "API Credits",
+      amountMinor: 500,
+      currency: "USD",
+      purchasedAt: paidInvoiceTimestamp(paid, "Alex invoice"),
+    };
     alex.paymentMethodId = alexPayment;
     alex.purchasePaid = true;
     await saveManifest(manifestPath, manifest);
@@ -474,7 +496,7 @@ export async function runSetup({ fetchImpl = fetch } = {}) {
     const product = await stripe(
       "/v1/products",
       form({
-        name: "Northstar Workspace",
+        name: "Workspace",
         "metadata[demo_run]": run,
       }),
       "jordan:product",
@@ -483,7 +505,7 @@ export async function runSetup({ fetchImpl = fetch } = {}) {
       "/v1/prices",
       form({
         product: id(product, "Jordan product"),
-        unit_amount: 500,
+        unit_amount: 4900,
         currency: "usd",
         "recurring[interval]": "month",
         "metadata[demo_run]": run,
@@ -515,15 +537,44 @@ export async function runSetup({ fetchImpl = fetch } = {}) {
     if (
       latestInvoice.livemode !== false ||
       !(latestInvoice.status === "paid" || latestInvoice.paid === true) ||
-      latestInvoice.amount_paid !== 500 ||
+      latestInvoice.amount_paid !== 4900 ||
       latestInvoice.currency !== "usd"
     )
-      throw new Error("Jordan subscription is not paid at USD 5 in test mode.");
+      throw new Error(
+        "Jordan subscription is not paid at USD 49 in test mode.",
+      );
     jordan.invoiceId = id(latestInvoice, "Jordan invoice");
     jordan.paymentIntentId =
       typeof latestInvoice.payment_intent === "string"
         ? latestInvoice.payment_intent
         : undefined;
+    const subscriptionItems = subscription.items;
+    const itemData =
+      subscriptionItems && typeof subscriptionItems === "object"
+        ? (subscriptionItems as Record<string, unknown>).data
+        : undefined;
+    if (
+      !Array.isArray(itemData) ||
+      itemData.length !== 1 ||
+      !itemData[0] ||
+      typeof itemData[0] !== "object"
+    )
+      throw new Error("Jordan subscription has no unambiguous billing period.");
+    const subscriptionItem = itemData[0] as Record<string, unknown>;
+    jordan.subscription = {
+      plan: "Workspace",
+      amountMinor: 4900,
+      currency: "USD",
+      interval: "month",
+      startedAt: verifiedTimestamp(
+        subscriptionItem.current_period_start,
+        "Jordan subscription start",
+      ),
+      renewsAt: verifiedTimestamp(
+        subscriptionItem.current_period_end,
+        "Jordan subscription renewal",
+      ),
+    };
     jordan.paymentMethodId = jordanPayment;
     await saveManifest(manifestPath, manifest);
   }

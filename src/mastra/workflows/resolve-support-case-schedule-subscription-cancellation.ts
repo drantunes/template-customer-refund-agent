@@ -1,5 +1,4 @@
 import { createStep } from "@mastra/core/workflows";
-import { createHash } from "node:crypto";
 import { triageEscalationReason } from "../domain/resolution-decision";
 import { caseStore } from "../lib/case-store";
 import { withTrustedCancellationScope } from "../providers/cancellation-execution";
@@ -7,16 +6,15 @@ import { resolveConfiguredBinding } from "../providers/registry";
 import { bindingsForPersistedCase } from "../runtime/provider-bindings";
 import { cancellationFingerprint } from "../tools/schedule-subscription-cancellation";
 import {
+  cancellationAuthority,
+  cancellationMessageHash,
+} from "./staging-cancellation-authority";
+import {
   getActiveCaseOrThrow,
   resolveSupportCaseInputSchema,
 } from "./resolve-support-case-context";
 
-export function explicitNoRefundCancellation(body: string) {
-  const normalized = body.trim().replace(/\s+/g, " ").toLowerCase();
-  return /^(?:please )?cancel(?: my)? subscription(?: at the end of (?:the )?(?:current )?(?:billing )?period)?[.!]? (?:i )?(?:do not|don't) want (?:a )?refund[.!]?$/.test(
-    normalized,
-  );
-}
+export { explicitNoRefundCancellation } from "./staging-cancellation-authority";
 
 export const scheduleCancellationStep = createStep({
   id: "schedule-subscription-cancellation",
@@ -43,7 +41,7 @@ export const scheduleCancellationStep = createStep({
       supportCase.draft?.requiresEscalation ||
       !subscription ||
       subscription.status !== "active" ||
-      !explicitNoRefundCancellation(turn.message!.body) ||
+      !cancellationAuthority(supportCase, turn) ||
       supportCase.draft?.recommendRefund
     ) {
       await caseStore.update(supportCase.id, {
@@ -69,9 +67,7 @@ export const scheduleCancellationStep = createStep({
       subscriptionId: subscription.subscriptionId,
       cancellationMode: "period_end" as const,
       sourceMessageId: turn.message!.id,
-      sourceMessageHash: createHash("sha256")
-        .update(turn.message!.body)
-        .digest("hex"),
+      sourceMessageHash: cancellationMessageHash(turn.message!.body),
       idempotencyKey: `cancel:${supportCase.id}:${inputData.turnId}`,
     };
     const fingerprint = cancellationFingerprint(raw);

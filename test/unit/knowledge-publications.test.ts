@@ -21,7 +21,7 @@ describe("knowledge publication generations", () => {
   afterEach(() => vi.useRealTimers());
   it("serves only the activated tenant generation, keeps failures and stale writers from replacing it, and rolls back", async () => {
     const store = new KnowledgePublicationStore(
-      createClient({ url: process.env.TURSO_DATABASE_URL! }),
+      createClient({ url: process.env.DATABASE_URL! }),
     );
     const first = await store.buildCandidate(binding, [
       document("refunds require approval", "v1"),
@@ -103,7 +103,7 @@ describe("knowledge publication generations", () => {
       providerAccountId: `offset-${crypto.randomUUID()}`,
     };
     const store = new KnowledgePublicationStore(
-      createClient({ url: process.env.TURSO_DATABASE_URL! }),
+      createClient({ url: process.env.DATABASE_URL! }),
     );
     const candidate = await store.buildCandidate(offsetBinding, [
       {
@@ -129,7 +129,7 @@ describe("knowledge publication generations", () => {
       providerAccountId: `identity-${crypto.randomUUID()}`,
     };
     const store = new KnowledgePublicationStore(
-      createClient({ url: process.env.TURSO_DATABASE_URL! }),
+      createClient({ url: process.env.DATABASE_URL! }),
     );
     const canonical = document("refunds require approval", "v1");
 
@@ -153,7 +153,7 @@ describe("knowledge publication generations", () => {
       providerAccountId: `expiry-${crypto.randomUUID()}`,
     };
     const store = new KnowledgePublicationStore(
-      createClient({ url: process.env.TURSO_DATABASE_URL! }),
+      createClient({ url: process.env.DATABASE_URL! }),
     );
     const knownGood = await store.buildCandidate(expiryBinding, [
       document("refunds require approval", "v1"),
@@ -223,7 +223,7 @@ describe("knowledge publication generations", () => {
       tenantId: `tamper-${crypto.randomUUID()}`,
       providerAccountId: `tamper-${crypto.randomUUID()}`,
     };
-    const client = createClient({ url: process.env.TURSO_DATABASE_URL! });
+    const client = createClient({ url: process.env.DATABASE_URL! });
     const store = new KnowledgePublicationStore(client);
     const knownGood = await store.buildCandidate(tamperBinding, [
       document("refunds require approval", "v1"),
@@ -313,7 +313,7 @@ describe("knowledge publication generations", () => {
       tenantId: `coordinated-${crypto.randomUUID()}`,
       providerAccountId: `coordinated-${crypto.randomUUID()}`,
     };
-    const client = createClient({ url: process.env.TURSO_DATABASE_URL! });
+    const client = createClient({ url: process.env.DATABASE_URL! });
     const store = new KnowledgePublicationStore(client);
     const knownGood = await store.buildCandidate(tamperBinding, [
       document("known good policy", "v1"),
@@ -411,7 +411,7 @@ describe("knowledge publication generations", () => {
       tenantId: `rollback-integrity-${crypto.randomUUID()}`,
       providerAccountId: `rollback-integrity-${crypto.randomUUID()}`,
     };
-    const client = createClient({ url: process.env.TURSO_DATABASE_URL! });
+    const client = createClient({ url: process.env.DATABASE_URL! });
     const store = new KnowledgePublicationStore(client);
     const historical = await store.buildCandidate(rollbackBinding, [
       document("historical refund policy", "v1"),

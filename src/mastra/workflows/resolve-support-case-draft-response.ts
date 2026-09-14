@@ -15,7 +15,7 @@ import {
   getActiveCaseOrThrow,
   resolveSupportCaseInputSchema,
 } from "./resolve-support-case-context";
-import { explicitNoRefundCancellation } from "./resolve-support-case-schedule-subscription-cancellation";
+import { cancellationAuthority } from "./staging-cancellation-authority";
 
 export const draftResponseStep = createStep({
   id: "draft-response",
@@ -107,7 +107,7 @@ export const draftResponseStep = createStep({
     // enough to create an external effect.
     const hasNoRefundCancellationAuthority =
       supportCase.triage?.intent === "cancellation" &&
-      explicitNoRefundCancellation(latestMessage.body);
+      cancellationAuthority(supportCase, turn);
     const policyMatches = supportCase.policyMatches ?? [];
     const validCitations = new Set(
       policyMatches.flatMap((entry) => [entry.title, entry.source]),

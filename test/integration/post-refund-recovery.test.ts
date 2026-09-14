@@ -23,7 +23,7 @@ describe("post-refund workflow recovery", () => {
       DISABLE_RUNTIME_SCORERS: "1",
       LOCAL_AUTH_SIGNING_KEY:
         "phase003-test-signing-key-must-be-at-least-32-chars",
-      TURSO_DATABASE_URL: `file:${databasePath}`,
+      DATABASE_URL: `file:${databasePath}`,
     };
     try {
       await build({
