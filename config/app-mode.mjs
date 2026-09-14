@@ -54,12 +54,7 @@ export function appMode(environment = process.env) {
 }
 
 export function isLocalMode(environment = process.env) {
-  const explicit = value(environment, "APP_MODE")?.toLowerCase();
-  if (explicit) return appMode(environment) === "local";
-  return !(
-    value(environment, "SUPPORT_SOURCE")?.toLowerCase() === "intercom" ||
-    value(environment, "COMMERCE_SOURCE")?.toLowerCase() === "stripe"
-  );
+  return appMode(environment) === "local";
 }
 
 export function hasExplicitExternalMode(environment = process.env) {
@@ -106,9 +101,10 @@ function sameFile(left, right) {
 }
 
 export function databaseProfile(environment = process.env) {
-  const local = isLocalMode(environment);
+  const mode = appMode(environment);
+  const local = mode === "local";
   return {
-    mode: appMode(environment),
+    mode,
     backend: absoluteFileUrl(
       local
         ? value(environment, "LOCAL_DEMO_DATABASE_URL")

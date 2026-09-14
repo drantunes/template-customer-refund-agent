@@ -18,7 +18,6 @@ export type RefundHistory = NonNullable<SupportCase["refundHistory"]>;
 export type DraftResolution = NonNullable<SupportCase["draft"]>;
 export type ApprovalDecision = NonNullable<SupportCase["approval"]>;
 export type RefundResult = NonNullable<SupportCase["refundResult"]>;
-export type CaseFeedback = NonNullable<SupportCase["feedback"]>;
 
 // Mirrors src/mastra/lib/monitoring.ts on the API side.
 
