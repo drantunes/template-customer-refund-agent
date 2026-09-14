@@ -7,6 +7,12 @@ import {
 import { caseStore } from "../lib/case-store";
 import { bindingsForPersistedCase } from "../runtime/provider-bindings";
 import {
+  cancellationMessageHash,
+  isStagingIntercomStripeCase,
+  stagingCancellationSystem,
+  stagingTriageSchema,
+} from "./staging-cancellation-authority";
+import {
   getActiveCaseOrThrow,
   resolveSupportCaseInputSchema,
 } from "./resolve-support-case-context";
@@ -34,6 +40,7 @@ export const classifyStep = createStep({
         workflowRunId: supportCase.workflowRunId,
       });
     }
+    const stagingCancellation = isStagingIntercomStripeCase(supportCase);
     const result = await mastra.getAgent("triageAgent").generate(
       [
         {
@@ -42,7 +49,12 @@ export const classifyStep = createStep({
         },
       ],
       {
-        structuredOutput: { schema: triageResultSchema },
+        structuredOutput: {
+          schema: stagingCancellation
+            ? stagingTriageSchema
+            : triageResultSchema,
+        },
+        ...(stagingCancellation ? { system: stagingCancellationSystem } : {}),
         memory: {
           thread: threadIdForCase(
             supportCase.id,
@@ -58,8 +70,33 @@ export const classifyStep = createStep({
       },
     );
     const triageUsage = result.usage;
+    const stagingStructured = stagingCancellation
+      ? stagingTriageSchema.parse(result.object)
+      : undefined;
+    const structured =
+      stagingStructured ?? triageResultSchema.parse(result.object);
+    const {
+      stagingCancellationInterpretation: _staleInterpretation,
+      ...metadataWithoutInterpretation
+    } = supportCase.metadata;
+    const metadata = stagingStructured
+      ? stagingStructured.cancellationInterpretation
+        ? {
+            ...metadataWithoutInterpretation,
+            stagingCancellationInterpretation: {
+              ...stagingStructured.cancellationInterpretation,
+              turnId: turn.id,
+              messageId: latestMessage.id,
+              messageHash: cancellationMessageHash(latestMessage.body),
+              binding: bindingsForPersistedCase(supportCase).transactions,
+              interpretedAt: new Date().toISOString(),
+            },
+          }
+        : metadataWithoutInterpretation
+      : supportCase.metadata;
     await caseStore.update(supportCase.id, {
-      triage: triageResultSchema.parse(result.object),
+      triage: triageResultSchema.parse(structured),
+      ...(stagingStructured ? { metadata } : {}),
       status: "processing",
       agentUsage: {
         inputTokens: triageUsage.inputTokens ?? 0,

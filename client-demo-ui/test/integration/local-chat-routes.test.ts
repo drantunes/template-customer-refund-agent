@@ -27,6 +27,23 @@ beforeAll(async () => {
       1,
     ],
   });
+  await server.client.execute({
+    sql: "UPDATE demo_customers SET subscription_id = ?, purchase_product = ?, purchase_amount_minor = ?, purchase_currency = ?, purchase_purchased_at = ?, subscription_plan = ?, subscription_amount_minor = ?, subscription_currency = ?, subscription_interval = ?, subscription_started_at = ?, subscription_renews_at = ? WHERE id = ?",
+    args: [
+      "DEMO-WORKSPACE-001",
+      "API Credits",
+      500,
+      "USD",
+      "2026-09-14T12:00:00.000Z",
+      "Workspace",
+      4900,
+      "USD",
+      "month",
+      "2026-09-14T12:00:00.000Z",
+      "2026-10-14T12:00:00.000Z",
+      "customer-alex",
+    ],
+  });
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -42,6 +59,20 @@ async function login() {
 }
 
 describe("local authenticated chat routes", () => {
+  it("renders persisted backend purchase and subscription facts for the authenticated customer", async () => {
+    const signedIn = await login();
+    const account = await server.app.request(`${localOrigin}/conta`, {
+      headers: { cookie: signedIn.headers.get("set-cookie")! },
+    });
+    const page = await account.text();
+    expect(page).toContain("API Credits");
+    expect(page).toContain("$5.00");
+    expect(page).toContain("Purchased Sep 14, 2026");
+    expect(page).toContain("Workspace");
+    expect(page).toContain("$49.00 per month");
+    expect(page).toContain("Renews Oct 14, 2026");
+  });
+
   it("rejects rebinding and forwarded requests before every local route", async () => {
     const attacker = "http://attacker.example";
     for (const [path, init] of [

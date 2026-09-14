@@ -1,3 +1,4 @@
+import { hasExplicitStagingMode } from "../../../config/app-mode.mjs";
 import { createStep } from "@mastra/core/workflows";
 import { z } from "zod";
 import {
@@ -327,6 +328,10 @@ export const resolveCaseStep = createStep({
       ? "escalated"
       : "resolved";
     let escalationReason = triageReason ?? draft.escalationReason;
+    if (hasExplicitStagingMode()) {
+      escalationReason =
+        escalationReason?.trim() || supportCase.escalationReason?.trim();
+    }
     if (triageReason) status = "escalated";
     const mustEscalate = Boolean(triageReason || draft.requiresEscalation);
 

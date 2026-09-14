@@ -67,6 +67,14 @@ export function hasExplicitExternalMode(environment = process.env) {
   return explicit === "staging" || explicit === "production";
 }
 
+export function hasExplicitStagingMode(environment = process.env) {
+  const mode = appMode(environment);
+  return (
+    mode === "staging" &&
+    value(environment, "APP_MODE")?.toLowerCase() === "staging"
+  );
+}
+
 function absoluteFileUrl(value, fallback, root = templateRoot) {
   const raw = value?.trim() || fallback;
   if (!raw.startsWith("file:") || raw.includes(":memory:")) return raw;

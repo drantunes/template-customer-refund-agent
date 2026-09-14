@@ -726,6 +726,7 @@ describe("Phase 002 persistent local runtime", () => {
       DATABASE_URL: `file:${path}`,
       LOCAL_DEMO_DATABASE_URL: `file:${path}`,
       ORIGINAL_DATABASE_URL: `file:${path}.external`,
+      LOCAL_DEMO_FIXTURE_PROFILE: "characterization",
       LOCAL_FIXTURE_TENANT: binding.tenantId,
       LOCAL_FIXTURE_ACCOUNT: binding.providerAccountId,
     };
@@ -831,6 +832,7 @@ describe("Phase 002 persistent local runtime", () => {
         DATABASE_URL: relative,
         LOCAL_DEMO_DATABASE_URL: relative,
         ORIGINAL_DATABASE_URL: `file:${join(tmpdir(), `phase002-external-${crypto.randomUUID()}.db`)}`,
+        LOCAL_DEMO_FIXTURE_PROFILE: "characterization",
         LOCAL_FIXTURE_TENANT: binding.tenantId,
         LOCAL_FIXTURE_ACCOUNT: binding.providerAccountId,
       },

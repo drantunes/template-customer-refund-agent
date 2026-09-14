@@ -260,7 +260,8 @@ export class IntercomSupportProvider implements SupportChannelProvider {
     ];
     if (input.status !== "escalated") return operations;
     const reason =
-      input.escalationReason ?? "Support escalation requires staff review.";
+      input.escalationReason?.trim() ||
+      "Support escalation requires staff review.";
     operations.unshift({
       operation: "note",
       body: reason,

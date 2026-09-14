@@ -21,6 +21,7 @@ const execFileAsync = promisify(execFile);
 // it with the run's own database.
 const baselineAppMode = process.env.APP_MODE;
 const baselineOriginalDatabaseUrl = process.env.ORIGINAL_DATABASE_URL;
+const baselineOriginalDemoDatabaseUrl = process.env.ORIGINAL_DEMO_DATABASE_URL;
 
 function jsonModel(
   value: Record<string, unknown>,
@@ -216,6 +217,7 @@ async function setup(
     databasePath?: string;
     existingCase?: boolean;
     credit?: boolean;
+    appMode?: "staging";
   },
 ) {
   const path =
@@ -231,8 +233,10 @@ async function setup(
     // composition root reads ORIGINAL_* after the database preload, so make
     // it point to this test's private database rather than the shared setup
     // sentinel.
-    delete process.env.APP_MODE;
+    if (options?.appMode) process.env.APP_MODE = options.appMode;
+    else delete process.env.APP_MODE;
     process.env.ORIGINAL_DATABASE_URL = `file:${path}`;
+    process.env.ORIGINAL_DEMO_DATABASE_URL = `file:${path}.client`;
   } else {
     process.env.APP_MODE = "local";
     process.env.LOCAL_DEMO_DATABASE_URL = `file:${path}`;
@@ -637,6 +641,9 @@ afterEach(async () => {
   if (baselineOriginalDatabaseUrl === undefined)
     delete process.env.ORIGINAL_DATABASE_URL;
   else process.env.ORIGINAL_DATABASE_URL = baselineOriginalDatabaseUrl;
+  if (baselineOriginalDemoDatabaseUrl === undefined)
+    delete process.env.ORIGINAL_DEMO_DATABASE_URL;
+  else process.env.ORIGINAL_DEMO_DATABASE_URL = baselineOriginalDemoDatabaseUrl;
   await Promise.all(files.splice(0).map((file) => rm(file, { force: true })));
 });
 
@@ -5317,6 +5324,77 @@ describe("native approval workflow recovery", () => {
       status: "escalated",
       escalationReason: "The writer needs a specialist to verify the plan.",
     });
+  });
+
+  it("schedules Jordan's structured staging cancellation without a refund", async () => {
+    const caseId = `staging-jordan-cancel-${crypto.randomUUID()}`;
+    enableSyntheticIntercom();
+    enableSyntheticStripe();
+    const observed = {
+      posts: 0,
+      refundPosts: 0,
+      gets: [] as string[],
+      keys: [] as string[],
+      scheduled: false,
+      loseFirstPost: false,
+    };
+    vi.stubGlobal("fetch", cancellationStripeTransport(observed));
+    const message =
+      "Hey, please cancel my subscription when it renews. I don’t want a refund; please keep access until then.";
+    const { caseStore } = await setup(caseId, undefined, undefined, undefined, {
+      appMode: "staging",
+      supportSource: "intercom",
+      source: "intercom-conversation",
+      providerBindings: syntheticIntercomStripeBindings(caseId),
+      message,
+      triage: {
+        intent: "cancellation",
+        urgency: "normal",
+        sentiment: "neutral",
+        requiresHumanReview: false,
+        confidence: 1,
+        rationale:
+          "Customer requested cancellation at renewal without a refund.",
+        cancellationInterpretation: {
+          directCancellationRequested: true,
+          atPeriodEnd: true,
+          explicitNoRefund: true,
+          hasNegationQuoteConflictOrAmbiguity: false,
+          evidenceVerbatim: [
+            "cancel my subscription when it renews",
+            "don’t want a refund",
+          ],
+          confidence: 0.95,
+        },
+      },
+      responseModel: jsonModel({
+        draftResponse: "draft",
+        citedSources: ["subscription-cancellation-policy"],
+        selectedPolicyExcerpts: [
+          {
+            source: "subscription-cancellation-policy",
+            excerpt:
+              "Customers can cancel a subscription at any time. Cancellation takes effect at the end of the current billing period.",
+          },
+        ],
+        recommendRefund: false,
+        requiresEscalation: false,
+      }) as never,
+      allowInitialWorkflowFailure: true,
+    });
+    expect(observed).toMatchObject({ posts: 1, refundPosts: 0 });
+    expect(await caseStore.get(caseId)).toMatchObject({
+      status: "resolved",
+      metadata: { cancellationEffect: { cancelAtPeriodEnd: true } },
+    });
+    expect(
+      (
+        await caseStore.getClient().execute({
+          sql: "SELECT COUNT(*) AS total FROM support_actions WHERE case_id = ? AND kind = 'subscription-cancellation-command'",
+          args: [caseId],
+        })
+      ).rows[0]?.total,
+    ).toBe(1);
   });
 
   it("schedules one explicit no-refund Stripe cancellation through the registered workflow and replays its durable command", async () => {

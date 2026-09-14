@@ -208,6 +208,7 @@ describe("demo setup transport", () => {
           amount_paid: 500,
           currency: "usd",
           payment_intent: "pi_alex",
+          status_transitions: { paid_at: 1_789_000_000 },
         });
       }
       if (url.pathname === "/v1/products")
@@ -221,6 +222,14 @@ describe("demo setup transport", () => {
           livemode: false,
           status: "active",
           latest_invoice: "in_jordan",
+          items: {
+            data: [
+              {
+                current_period_start: 1_789_000_000,
+                current_period_end: 1_791_678_400,
+              },
+            ],
+          },
         });
       }
       if (url.pathname === "/v1/invoices/in_jordan")
@@ -228,9 +237,10 @@ describe("demo setup transport", () => {
           id: "in_jordan",
           livemode: false,
           status: "paid",
-          amount_paid: 500,
+          amount_paid: 4900,
           currency: "usd",
           payment_intent: "pi_jordan",
+          status_transitions: { paid_at: 1_789_000_000 },
         });
       throw new Error(`unexpected ${request.method} ${url.pathname}`);
     };
@@ -255,6 +265,18 @@ describe("demo setup transport", () => {
     expect(
       new URLSearchParams(await invoice?.clone().text()).get("auto_advance"),
     ).toBe("false");
+    const invoiceItem = calls.find(
+      (request) => new URL(request.url).pathname === "/v1/invoiceitems",
+    );
+    expect(
+      new URLSearchParams(await invoiceItem?.clone().text()).get("description"),
+    ).toBe("API Credits");
+    const price = calls.find(
+      (request) => new URL(request.url).pathname === "/v1/prices",
+    );
+    expect(
+      new URLSearchParams(await price?.clone().text()).get("unit_amount"),
+    ).toBe("4900");
     const paymentMethod = calls.find(
       (request) => new URL(request.url).pathname === "/v1/payment_methods",
     );
@@ -268,6 +290,22 @@ describe("demo setup transport", () => {
     );
     expect(paidInvoices).toBe(1);
     expect(subscriptions).toBe(1);
+    const verifiedManifest = JSON.parse(
+      await readFile(
+        join(directory, "private", "demo-round-setup-test-001.json"),
+        "utf8",
+      ),
+    ) as {
+      customers: { jordan?: { subscription?: Record<string, unknown> } };
+    };
+    expect(verifiedManifest.customers.jordan?.subscription).toMatchObject({
+      plan: "Workspace",
+      amountMinor: 4900,
+      currency: "USD",
+      interval: "month",
+      startedAt: "2026-09-10T00:26:40.000Z",
+      renewsAt: "2026-10-11T00:26:40.000Z",
+    });
     expect(
       calls
         .filter(

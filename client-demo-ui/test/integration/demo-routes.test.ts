@@ -65,7 +65,11 @@ describe("Northstar demo routes", () => {
     });
     expect(account.status).toBe(200);
     const page = await account.text();
-    expect(page).toContain("Northstar Toolkit");
+    expect(page).toContain("Purchase");
+    expect(page).toContain(
+      "Purchase details are unavailable for this historical record.",
+    );
+    expect(page).not.toContain("Purchased ");
     expect(page).toContain("intercom_user_jwt");
     expect(page).toContain('language_override":"en"');
     expect(page).toContain('user_id":"customer-example"');

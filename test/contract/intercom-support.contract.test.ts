@@ -66,6 +66,25 @@ function conversationSnapshot(
 }
 
 describe("Intercom v2.16 support contract", () => {
+  it("uses a nonempty fallback note for blank escalation reasons", () => {
+    const support = new IntercomSupportProvider(
+      config,
+      new IntercomClient(config, async () => Response.json({})),
+    );
+    expect(
+      support.planFinalizationOutbox!({
+        status: "escalated",
+        subject: "Cancellation",
+        escalationReason: "  ",
+      }),
+    ).toContainEqual(
+      expect.objectContaining({
+        operation: "note",
+        body: "Support escalation requires staff review.",
+      }),
+    );
+  });
+
   it("uses the documented reply and conversation conversion schemas", async () => {
     const requests: Request[] = [];
     const fakeFetch: typeof fetch = async (input, init) => {

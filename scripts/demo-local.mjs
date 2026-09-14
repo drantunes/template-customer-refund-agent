@@ -1,12 +1,22 @@
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  realpath,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { spawn } from "node:child_process";
 import net from "node:net";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, dirname, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   assertDatabaseIsolation,
+  databaseProfile,
   isLocalMode,
   templateRoot,
 } from "../config/app-mode.mjs";
@@ -165,6 +175,141 @@ async function ready(url, child, name) {
   }
   throw new Error(`${name} did not become ready at ${url}.`);
 }
+const sqliteSidecars = ["", "-wal", "-shm", "-journal"];
+const sqliteHeader = Buffer.from("SQLite format 3\0");
+
+function sqliteArtifacts(url, label) {
+  if (!url.startsWith("file:") || url.includes(":memory:"))
+    throw new Error(`${label} must be a persistent SQLite file URL.`);
+  const main = resolve(fileURLToPath(url));
+  return sqliteSidecars.map((suffix) => `${main}${suffix}`);
+}
+
+function normalizedFileUrl(url, root) {
+  return new URL(url, pathToFileURL(`${root}/`)).href;
+}
+
+function configuredExternalArtifacts(environment) {
+  const external = databaseProfile({ ...environment, APP_MODE: "staging" });
+  const urls = [
+    [external.backend, templateRoot],
+    [external.client, resolve(templateRoot, "client-demo-ui")],
+  ];
+  return urls.flatMap(([url, root]) => {
+    if (!url.startsWith("file:") || url.includes(":memory:")) return [];
+    return sqliteArtifacts(normalizedFileUrl(url, root), "External database");
+  });
+}
+
+async function canonicalArtifactPath(path) {
+  try {
+    return resolve(await realpath(dirname(path)), basename(path));
+  } catch (error) {
+    if (error?.code === "ENOENT") return resolve(path);
+    throw error;
+  }
+}
+
+async function artifactDetails(path, followSymlink = false) {
+  try {
+    return await (followSymlink ? stat(path) : lstat(path));
+  } catch (error) {
+    if (error?.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function sameArtifact(left, right) {
+  return !!left && !!right && left.dev === right.dev && left.ino === right.ino;
+}
+
+async function validateSqliteMain(path, details) {
+  // SQLite can leave an empty main file before its first schema write. A
+  // non-empty selected main must identify itself before the launcher removes it.
+  if (!details || details.size === 0) return;
+  const handle = await open(path, "r");
+  try {
+    const header = Buffer.alloc(sqliteHeader.length);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    if (bytesRead !== sqliteHeader.length || !header.equals(sqliteHeader))
+      throw new Error(`Refusing to reset non-SQLite local database: ${path}`);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function resetLocalDatabases(profile, environment) {
+  const mainPaths = [
+    sqliteArtifacts(profile.backend, "Local backend database")[0],
+    sqliteArtifacts(profile.client, "Local client database")[0],
+  ];
+  const targets = [
+    ...sqliteArtifacts(profile.backend, "Local backend database"),
+    ...sqliteArtifacts(profile.client, "Local client database"),
+  ];
+  const external = configuredExternalArtifacts(environment);
+  const protectedArtifacts = [
+    resolve(templateRoot, ".env"),
+    resolve(templateRoot, ".data", "local-demo.env"),
+  ];
+  const [
+    targetPaths,
+    externalPaths,
+    protectedPaths,
+    targetDetails,
+    externalDetails,
+    protectedDetails,
+  ] = await Promise.all([
+    Promise.all(targets.map(canonicalArtifactPath)),
+    Promise.all(external.map(canonicalArtifactPath)),
+    Promise.all(protectedArtifacts.map(canonicalArtifactPath)),
+    Promise.all(targets.map(artifactDetails)),
+    Promise.all(external.map((path) => artifactDetails(path, true))),
+    Promise.all(protectedArtifacts.map((path) => artifactDetails(path, true))),
+  ]);
+  if (new Set(targetPaths).size !== targetPaths.length)
+    throw new Error("Local database reset targets must not overlap.");
+  for (const [index, target] of targets.entries()) {
+    const details = targetDetails[index];
+    if (details && (details.isSymbolicLink() || !details.isFile()))
+      throw new Error(
+        `Refusing to reset unsafe local database artifact: ${target}`,
+      );
+  }
+  await Promise.all(
+    mainPaths.map((path, index) =>
+      validateSqliteMain(path, targetDetails[index * 4]),
+    ),
+  );
+  for (const [index, target] of targets.entries()) {
+    const details = targetDetails[index];
+    if (
+      externalPaths.includes(targetPaths[index]) ||
+      externalDetails.some((other) => sameArtifact(details, other))
+    )
+      throw new Error(
+        "Local database reset targets must not overlap external databases.",
+      );
+    if (
+      protectedPaths.includes(targetPaths[index]) ||
+      protectedDetails.some((other) => sameArtifact(details, other))
+    )
+      throw new Error(
+        "Local database reset targets must not include configuration files.",
+      );
+  }
+  await Promise.all(
+    targets.map(async (target, index) => {
+      if (!targetDetails[index]) return;
+      try {
+        await unlink(target);
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+    }),
+  );
+}
+
 async function main() {
   if (!isLocalMode())
     throw new Error(
@@ -188,12 +333,15 @@ async function main() {
     LOCAL_DEMO_BACKEND_URL: `http://127.0.0.1:${ports.backend}`,
     DEMO_PORT: String(ports.client),
     E2E_API_PORT: String(ports.backend),
+    LOCAL_DEMO_SEED_AT:
+      process.env.LOCAL_DEMO_SEED_AT ?? new Date().toISOString(),
   };
   const profile = assertDatabaseIsolation(environment);
   await Promise.all(
     Object.entries(ports).map(([name, port]) => probe(port, name)),
   );
   Object.assign(environment, await secrets());
+  await resetLocalDatabases(profile, environment);
   for (const url of [profile.backend, profile.client])
     await mkdir(dirname(fileURLToPath(url)), { recursive: true });
   await start(["run", "local:seed"], environment).completion;

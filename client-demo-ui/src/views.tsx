@@ -1,6 +1,5 @@
 import type { Child } from "hono/jsx";
 import type { DemoCustomer } from "./types.js";
-import { isLocalMode } from "../../config/app-mode.mjs";
 
 export function Layout(props: {
   title: string;
@@ -143,6 +142,21 @@ type SupportCase = {
   currency: string;
   status: string;
 };
+function money(amountMinor: number, currency: string) {
+  return (amountMinor / 100).toLocaleString("en-US", {
+    style: "currency",
+    currency,
+  });
+}
+function calendarDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(date);
+}
 const labels: Record<string, string> = {
   pending_approval: "Awaiting approval",
   rejected: "Not approved",
@@ -159,26 +173,37 @@ export function Account(props: {
   widget?: string;
   chatUnavailable: boolean;
 }) {
-  const localTerms =
-    isLocalMode() && props.customer.email === "alex@example.com";
   const purchases = [
     props.customer.purchasePaid
       ? {
-          title: "Northstar Toolkit",
-          detail: localTerms
-            ? "Pro Plan · $49.00"
-            : "One-time purchase · $5.00",
+          title: props.customer.purchase?.product ?? "Purchase",
+          detail: props.customer.purchase
+            ? `One-time purchase · ${money(props.customer.purchase.amountMinor, props.customer.purchase.currency)}`
+            : "Purchase details are unavailable for this historical record.",
+          date: props.customer.purchase
+            ? calendarDate(props.customer.purchase.purchasedAt)
+            : undefined,
           state: "Payment confirmed",
         }
       : undefined,
     props.customer.subscriptionId
       ? {
-          title: "Northstar Workspace",
-          detail: localTerms ? "$49.00 per month" : "$5.00 per month",
+          title: props.customer.subscription?.plan ?? "Subscription",
+          detail: props.customer.subscription
+            ? `${money(props.customer.subscription.amountMinor, props.customer.subscription.currency)} per ${props.customer.subscription.interval}`
+            : "Subscription details are unavailable for this historical record.",
+          date: props.customer.subscription
+            ? calendarDate(props.customer.subscription.renewsAt)
+            : undefined,
           state: "Active subscription",
         }
       : undefined,
-  ].filter(Boolean) as Array<{ title: string; detail: string; state: string }>;
+  ].filter(Boolean) as Array<{
+    title: string;
+    detail: string;
+    date?: string;
+    state: string;
+  }>;
   return (
     <Layout
       title="My account"
@@ -213,6 +238,13 @@ export function Account(props: {
                   <div>
                     <h3>{purchase.title}</h3>
                     <p class="muted">{purchase.detail}</p>
+                    {purchase.date ? (
+                      <p class="muted">
+                        {purchase.state === "Payment confirmed"
+                          ? `Purchased ${purchase.date}`
+                          : `Renews ${purchase.date}`}
+                      </p>
+                    ) : null}
                   </div>
                   <span class="status">{purchase.state}</span>
                 </article>

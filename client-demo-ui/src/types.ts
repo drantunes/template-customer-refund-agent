@@ -10,6 +10,20 @@ export interface DemoCustomer {
   invoiceId?: string;
   paymentIntentId?: string;
   purchasePaid?: boolean;
+  purchase?: {
+    product: string;
+    amountMinor: number;
+    currency: string;
+    purchasedAt: string;
+  };
+  subscription?: {
+    plan: string;
+    amountMinor: number;
+    currency: string;
+    interval: string;
+    startedAt?: string;
+    renewsAt: string;
+  };
 }
 
 export interface DemoSession {
