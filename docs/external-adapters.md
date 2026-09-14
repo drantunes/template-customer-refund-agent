@@ -1,31 +1,35 @@
-# External adapter setup
+# External adapters
 
-The default local profile uses `SUPPORT_SOURCE=mock` and `COMMERCE_SOURCE=mock`. It has no provider account requirement and is the only profile used by the ordinary test suite. Interactive validation also requires `OPENAI_API_KEY`; use the explicit `--mode=deterministic` only for credential-free validation and tests.
+External adapters are for a development Intercom workspace and Stripe test sandbox. They are opt-in; local mode remains the default.
 
-## Intercom development workspace
+## Configure staging
 
-Use a separate development workspace and set `SUPPORT_SOURCE=intercom` plus `INTERCOM_DEVELOPMENT_ENABLED=true`. Supply `OPENAI_API_KEY`, `INTERCOM_TENANT_ID=local-demo`, `INTERCOM_APP_ID`, `INTERCOM_ACCESS_TOKEN`, `INTERCOM_CLIENT_SECRET`, and `INTERCOM_ADMIN_ID`, then run:
-
-```bash
-npm run check:env -- --profile=intercom
-```
-
-The adapter pins `Intercom-Version: 2.16` and accepts `https://api.intercom.io` or `https://api.eu.intercom.io` outside tests. Request conversation read/write and contact read permission. Add ticket read/write when `INTERCOM_TICKET_TYPE_ID` is set; `INTERCOM_TICKET_STATE_ID` is optional and cannot be set without the ticket type. Add article read/list permission only when `INTERCOM_KNOWLEDGE_ENABLED=true`.
-
-Expose `POST /support/webhooks/intercom` over HTTPS. It accepts only bounded raw `application/json` bytes, verifies the `X-Hub-Signature` HMAC-SHA1 before parsing, and checks the authenticated event timestamp. Subscribe only to `conversation.user.created` and `conversation.user.replied`; admin, note, and operator events are acknowledged but cannot loop into replies.
-
-A Conversation remains the durable canonical reference. Replies, escalation notes, status changes, and configured ticket conversion are fenced, ordered outbox operations. A timeout, connection loss, HTTP 408/5xx, malformed POST response, or crash after a send starts is stored as uncertain and escalated for manual reconciliation; it is never blindly replayed because Intercom does not document an idempotency header for these operations. Switching back to mock affects new local ingress only: existing Intercom bindings must be reconciled against their original development account.
-
-## Stripe test sandbox
-
-Use a test restricted key only. Set `OPENAI_API_KEY`, `COMMERCE_SOURCE=stripe`, `STRIPE_SANDBOX_ENABLED=true`, `STRIPE_TENANT_ID=local-demo`, `STRIPE_ACCOUNT_ID`, `STRIPE_RESTRICTED_API_KEY`, and `STRIPE_WEBHOOK_SECRET`, then run:
+Set `APP_MODE=staging`. This mode requires both providers: `SUPPORT_SOURCE=intercom`, `COMMERCE_SOURCE=stripe`, `DATABASE_URL`, and `DEMO_DATABASE_URL`. Also set `OPENAI_API_KEY`, `LOCAL_AUTH_SIGNING_KEY` (at least 32 characters), and `DEMO_AUTH_BRIDGE_SIGNING_KEY` (the shared backend/client key), plus the Intercom development and Stripe test values listed in `.env.example`, then verify them:
 
 ```bash
-npm run check:env -- --profile=stripe
+npm run check:env -- --profile=auto
 ```
 
-The adapter pins Stripe API `2026-08-26.dahlia`, uses `https://api.stripe.com` outside tests, rejects live resources, and requires an `rk_test_` restricted key. Grant read access to Account, Customers, Checkout Sessions, PaymentIntents, Subscriptions, Invoices, Invoice Payments, and Refunds. Grant write access to Refunds, Subscriptions, and the Dashboard **Customers: Write** resource. Customers: Write is used only to create the approved immutable customer balance transaction that credits the next invoice. Subscription writes remain limited to a verified owner's `cancel_at_period_end=true` request; immediate cancellation and proration are not performed.
+Use a separate development workspace and test account only. `DATABASE_URL` is the backend store; `DEMO_DATABASE_URL` is the customer-demo store. The template accepts `TURSO_DATABASE_URL` only as a temporary legacy backend alias when `DATABASE_URL` is blank.
 
-Expose `POST /support/webhooks/stripe` for `refund.created`, `refund.updated`, and `refund.failed`. The route verifies bounded raw JSON, Stripe HMAC/timestamp, test mode, configured account, and the pinned API version before parsing. An approved refund writes a leased attempt using a stable Stripe idempotency key. A created refund remains pending until a terminal webhook or retrieval result; an unknown POST outcome is not retried with a fresh key after Stripe's 24-hour idempotency window. Reconciliation retrieves the refund again, so a late failure can correct an earlier observation and escalate once.
+## Intercom
 
-A sandbox test requires separate human authorization and redacted evidence; this repository does not run it automatically.
+Set `INTERCOM_DEVELOPMENT_ENABLED=true`, `INTERCOM_TENANT_ID=local-demo`, `INTERCOM_APP_ID`, `INTERCOM_ACCESS_TOKEN`, `INTERCOM_CLIENT_SECRET`, and `INTERCOM_ADMIN_ID`. `INTERCOM_MESSENGER_JWT_SECRET` is required for the authenticated Messenger. Set `DEMO_PUBLIC_ORIGIN` to the HTTPS customer-demo origin, such as an ngrok URL for port 3000. Expose `POST /support/webhooks/intercom` over HTTPS and subscribe it to `conversation.user.created`, `conversation.user.replied`, and `conversation.admin.closed`.
+
+The runtime needs conversation read/write and contact read permissions; ticket read/write and article read/list are optional for the configured features. The adapter checks the signed, current event before processing it. A close event records intent only; it cannot close a case while a workflow or financial operation is active.
+
+## Stripe
+
+Set `STRIPE_SANDBOX_ENABLED=true`, `STRIPE_TENANT_ID=local-demo`, `STRIPE_ACCOUNT_ID`, `STRIPE_RESTRICTED_API_KEY`, and `STRIPE_WEBHOOK_SECRET`. Use an `rk_test_` restricted key. The adapter needs read access to Account, Customers, Checkout Sessions, PaymentIntents, Subscriptions, Invoices, Invoice Payments, and Refunds; write access to Refunds, Subscriptions, and **Customers: Write**. Customers: Write creates the approved **customer balance transaction** for a next-invoice credit.
+
+Subscribe `POST /support/webhooks/stripe` to `refund.created`, `refund.updated`, and `refund.failed`. The adapter rejects live resources and limits subscription writes to end-of-period cancellation.
+
+## Create an external demo round
+
+With both sandbox providers configured, run:
+
+```bash
+npm run demo:setup
+```
+
+It writes passwords and provider mappings to a private file outside the repository (the default is sibling `../demo-private`) and prints only that path. Start the three services with `npm run dev`, `npm run dev:client-demo`, and `npm run dev:support-demo`.

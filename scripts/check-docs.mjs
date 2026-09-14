@@ -1,14 +1,13 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve, dirname, relative } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const documentation = [
   "README.md",
-  "CONTRIBUTING.md",
   ".env.example",
-  "support-demo-ui/README.md",
-  "client-demo-ui/README.md",
-  ...walk(resolve(root, "docs")).map((path) => relative(root, path)),
+  "docs/policies-and-actions.md",
+  "docs/external-adapters.md",
+  "docs/local-demo.md",
 ];
 const errors = [];
 const packageScripts = {
@@ -38,14 +37,23 @@ for (const file of documentation) {
     /!?\[[^\]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)/g,
   )) {
     const target = match[1];
-    if (/^(https?:|mailto:)/.test(target)) continue;
+    if (/^mailto:/.test(target)) continue;
+    const githubTarget = sameRepositoryGithubTarget(target);
+    if (/^https?:/.test(target) && !githubTarget) continue;
+    if (file === "README.md" && !githubTarget) {
+      errors.push(`${file} must use absolute links, not ${target}.`);
+      continue;
+    }
     const [targetPath, targetAnchor] = target.split("#", 2);
-    const localPath = targetPath ? resolve(dirname(path), targetPath) : path;
+    const localPath =
+      githubTarget?.path ??
+      (targetPath ? resolve(dirname(path), targetPath) : path);
+    const anchor = githubTarget?.anchor ?? targetAnchor;
     if (!existsSync(localPath)) {
       errors.push(`${file} links to missing repository path ${target}.`);
       continue;
     }
-    if (targetAnchor && !hasAnchor(localPath, targetAnchor))
+    if (anchor && !hasAnchor(localPath, anchor))
       errors.push(`${file} links to missing anchor ${target}.`);
   }
   if (/\b(?:bun|pnpm|yarn)\s+(?:run|install|dev|build)\b/i.test(text))
@@ -77,7 +85,7 @@ for (const file of documentation) {
 }
 
 const syntheticExample = readFileSync(
-  resolve(root, "docs/examples.md"),
+  resolve(root, "docs/local-demo.md"),
   "utf8",
 );
 if (
@@ -85,28 +93,13 @@ if (
     syntheticExample,
   )
 )
-  errors.push("docs/examples.md must identify every example as synthetic.");
-for (const asset of ["docs/assets/local-demo-admin.png"])
-  if (!existsSync(resolve(root, asset)))
-    errors.push(`Missing documented asset ${asset}.`);
+  errors.push("docs/local-demo.md must identify every example as synthetic.");
 
 if (errors.length)
   throw new Error(`Documentation validation failed:\n- ${errors.join("\n- ")}`);
 console.log(
   `Documentation validation passed for ${documentation.length} files.`,
 );
-
-function walk(directory) {
-  if (!existsSync(directory)) return [];
-  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    const path = resolve(directory, entry.name);
-    return entry.isDirectory()
-      ? walk(path)
-      : entry.name.endsWith(".md")
-        ? [path]
-        : [];
-  });
-}
 
 function hasAnchor(path, anchor) {
   if (!path.endsWith(".md")) return false;
@@ -131,4 +124,27 @@ function headingId(heading) {
     .trim()
     .replace(/[^a-z0-9\s-]/g, "")
     .replace(/\s+/g, "-");
+}
+
+function sameRepositoryGithubTarget(target) {
+  let url;
+  try {
+    url = new URL(target);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "https:" || url.hostname !== "github.com")
+    return undefined;
+  const match =
+    /^\/drantunes\/template-customer-refund-agent\/(?:blob|tree)\/main\/(.+)$/.exec(
+      url.pathname,
+    );
+  if (!match) return undefined;
+  const path = resolve(root, decodeURIComponent(match[1]));
+  const pathFromRoot = relative(root, path);
+  if (pathFromRoot === ".." || pathFromRoot.startsWith("../")) return undefined;
+  return {
+    path,
+    anchor: url.hash ? decodeURIComponent(url.hash.slice(1)) : undefined,
+  };
 }

@@ -221,17 +221,28 @@ describe("PHASE-007 documentation validation", () => {
       0,
     );
 
-    await writeFile(join(repository, "README.md"), "[missing](missing.md)\n");
+    await writeFile(
+      join(repository, "README.md"),
+      "[missing](https://github.com/drantunes/template-customer-refund-agent/blob/main/docs/missing.md)\n",
+    );
     expect(run(join(repository, "scripts/check-docs.mjs")).output).toContain(
-      "links to missing repository path missing.md",
+      "links to missing repository path https://github.com/drantunes/template-customer-refund-agent/blob/main/docs/missing.md",
     );
 
     await writeFile(
       join(repository, "README.md"),
-      "[bad](docs/examples.md#missing-anchor)\n",
+      "[bad](https://github.com/drantunes/template-customer-refund-agent/blob/main/docs/local-demo.md#missing-anchor)\n",
     );
     expect(run(join(repository, "scripts/check-docs.mjs")).output).toContain(
-      "links to missing anchor docs/examples.md#missing-anchor",
+      "links to missing anchor https://github.com/drantunes/template-customer-refund-agent/blob/main/docs/local-demo.md#missing-anchor",
+    );
+
+    await writeFile(
+      join(repository, "README.md"),
+      "[relative](docs/local-demo.md)\n",
+    );
+    expect(run(join(repository, "scripts/check-docs.mjs")).output).toContain(
+      "README.md must use absolute links, not docs/local-demo.md",
     );
 
     await writeFile(join(repository, "README.md"), "npm run obsolete\n");
@@ -249,7 +260,7 @@ describe("PHASE-007 documentation validation", () => {
 
     await writeFile(join(repository, "README.md"), "# Valid\n");
     await writeFile(
-      join(repository, "docs/examples.md"),
+      join(repository, "docs/local-demo.md"),
       "# Example\nalex@example.com\n",
     );
     expect(run(join(repository, "scripts/check-docs.mjs")).output).toContain(
@@ -270,7 +281,7 @@ async function documentationFixture() {
     mkdir(join(repository, "scripts"), { recursive: true }),
     mkdir(join(repository, "support-demo-ui"), { recursive: true }),
     mkdir(join(repository, "client-demo-ui"), { recursive: true }),
-    mkdir(join(repository, "docs/assets"), { recursive: true }),
+    mkdir(join(repository, "docs"), { recursive: true }),
   ]);
   await cp(checkDocs, join(repository, "scripts/check-docs.mjs"));
   await Promise.all([
@@ -284,27 +295,19 @@ async function documentationFixture() {
     ),
     writeFile(
       join(repository, "README.md"),
-      "# Valid\n[Example](docs/examples.md#example)\nnpm run check\n",
+      "# Valid\n[Example](https://github.com/drantunes/template-customer-refund-agent/blob/main/docs/local-demo.md#local-demo)\nnpm run check\n",
     ),
-    writeFile(join(repository, "CONTRIBUTING.md"), "# Contributing\n"),
     writeFile(join(repository, ".env.example"), "LOCAL_AUTH_SIGNING_KEY=\n"),
-    writeFile(
-      join(repository, "support-demo-ui/README.md"),
-      "# Web\nnpm run --workspace support-demo-ui dev\n",
-    ),
-    writeFile(join(repository, "client-demo-ui/README.md"), "# Demo\n"),
     writeFile(
       join(repository, "client-demo-ui/package.json"),
       JSON.stringify({ scripts: { dev: "tsx src/server.tsx" } }),
     ),
     writeFile(
-      join(repository, "docs/examples.md"),
-      "# Example\nEvery identity, message, order, and result below is synthetic.\n",
+      join(repository, "docs/local-demo.md"),
+      "# Local demo\nEvery identity, message, order, and result below is synthetic.\n",
     ),
-    writeFile(
-      join(repository, "docs/assets/local-demo-admin.png"),
-      "synthetic",
-    ),
+    writeFile(join(repository, "docs/policies-and-actions.md"), "# Policies\n"),
+    writeFile(join(repository, "docs/external-adapters.md"), "# Adapters\n"),
   ]);
   return repository;
 }
