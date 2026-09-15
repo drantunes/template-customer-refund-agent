@@ -7,13 +7,17 @@ import {
   rename,
   writeFile,
 } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import { seedCustomers, type Seed } from "./seed.js";
 import {
   appMode,
   assertDatabaseIsolation,
   hasExplicitExternalMode,
 } from "../../config/app-mode.mjs";
+import {
+  isInside,
+  privateDirectoryConfiguration,
+} from "./private-directory.js";
 
 const STRIPE_VERSION = "2026-08-26.dahlia";
 const INTERCOM_VERSION = "2.16";
@@ -206,32 +210,14 @@ export async function runSetup({ fetchImpl = fetch } = {}) {
   const run = runId();
   if (!/^[a-zA-Z0-9-]{6,80}$/.test(run))
     throw new Error("--run must contain 6-80 letters, numbers, or hyphens.");
-  const repository = await realpath(resolve(import.meta.dirname, "../.."));
-  const requestedPrivateDirectory = resolve(
-    process.env.DEMO_PRIVATE_DIR ??
-      resolve(import.meta.dirname, "../../..", "demo-private"),
-  );
-  const requestedRelativePath = relative(repository, requestedPrivateDirectory);
-  if (
-    !requestedRelativePath ||
-    (requestedRelativePath !== ".." &&
-      !requestedRelativePath.startsWith(
-        `..${process.platform === "win32" ? "\\" : "/"}`,
-      ) &&
-      !isAbsolute(requestedRelativePath))
-  )
-    throw new Error("DEMO_PRIVATE_DIR must be outside the Git repository.");
+  const { repository, requested: requestedPrivateDirectory } =
+    await privateDirectoryConfiguration({
+      templateRoot: resolve(import.meta.dirname, "../.."),
+      requestedDirectory: process.env.DEMO_PRIVATE_DIR,
+    });
   await mkdir(requestedPrivateDirectory, { recursive: true, mode: 0o700 });
   const privateDirectory = await realpath(requestedPrivateDirectory);
-  const privateRelativePath = relative(repository, privateDirectory);
-  if (
-    !privateRelativePath ||
-    (privateRelativePath !== ".." &&
-      !privateRelativePath.startsWith(
-        `..${process.platform === "win32" ? "\\" : "/"}`,
-      ) &&
-      !isAbsolute(privateRelativePath))
-  )
+  if (isInside(repository, privateDirectory))
     throw new Error("DEMO_PRIVATE_DIR must be outside the Git repository.");
   await chmod(privateDirectory, 0o700);
   const manifestPath = resolve(privateDirectory, `demo-round-${run}.json`);
