@@ -14,6 +14,16 @@ describe("APP_MODE profile selection", () => {
     expect(appMode({ SUPPORT_SOURCE: "intercom" })).toBe("staging");
     expect(isLocalMode({ SUPPORT_SOURCE: "intercom" })).toBe(false);
   });
+  it("derives local mode directly from the resolved mode for every profile", () => {
+    for (const [environment, expected] of [
+      [{ APP_MODE: "local" }, true],
+      [{ APP_MODE: "staging" }, false],
+      [{ APP_MODE: "production" }, false],
+      [{ COMMERCE_SOURCE: "stripe" }, false],
+      [{ SUPPORT_SOURCE: "mock", COMMERCE_SOURCE: "mock" }, true],
+    ] as const)
+      expect(isLocalMode(environment)).toBe(expected);
+  });
   it("lets explicit local override external credentials and requires distinct persistent stores", () => {
     const env = {
       APP_MODE: "local",

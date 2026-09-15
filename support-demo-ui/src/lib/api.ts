@@ -247,23 +247,6 @@ export function reindexKnowledge(
   return request("/support/knowledge/reindex", { method: "POST" }, session);
 }
 
-export function submitCaseFeedback(
-  caseId: string,
-  rating: "up" | "down",
-  responseMessageId: string,
-  comment?: string,
-  session?: SupportSession,
-): Promise<SupportCase> {
-  return request(
-    `/support/cases/${caseId}/feedback`,
-    {
-      method: "POST",
-      body: JSON.stringify({ rating, responseMessageId, comment }),
-    },
-    session,
-  );
-}
-
 export function getMonitoringSummary(
   session?: SupportSession,
 ): Promise<MonitoringSummary> {

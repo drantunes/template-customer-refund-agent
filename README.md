@@ -1,24 +1,20 @@
 # Customer support and refund review
 
-Turn a support message into a policy-grounded answer or a refund proposal for human review. The template accepts synthetic local support and order data, keeps a case history, and returns an auditable response in Mastra Studio.
+Turn a customer support message into a policy-grounded answer or a refund proposal for human review. The local demo accepts synthetic support and order data, keeps an auditable case history, and runs the workflow with Mastra.
 
 ## Why we built this
 
-A duplicate-charge complaint looks simple until someone has to connect the customer's message, payment history, refund policy, and final response. Support teams need that context in one place, with a clear decision when money is involved.
-
-This template gathers the evidence and prepares the next step. A person reviews each refund before it is executed, and uncertain cases go to a support specialist.
+Refund requests need the customer message, purchase evidence, policy, and a clear human decision in one place. This template prepares that evidence so support staff can respond consistently without automating financial approval.
 
 ## Features
 
-- Answers support questions using published policies and the customer's order records.
-- Lets staff investigate a sample order in Mastra Studio.
-- Keeps customer messages and follow-ups together in a support case.
-- Presents proposed refunds and subscription credits for authenticated approval or rejection.
-- Includes synthetic local data and optional Intercom development and Stripe sandbox adapters.
+- Answers support questions with published policies and order records.
+- Creates refund or next-invoice credit proposals for authenticated human approval.
+- Includes a local customer chat, support queue, and persisted synthetic data.
 
 ## Quick start
 
-Use Node.js 24.20.0 and npm 11.19.0, as pinned in the repository. Interactive responses require an OpenAI API key.
+Use Node.js 24.20.0 and npm 11.19.0.
 
 ### 1. Clone the template
 
@@ -34,7 +30,7 @@ npm ci
 cp .env.example .env
 ```
 
-Set `OPENAI_API_KEY` in `.env`. A new `.env.example` selects `APP_MODE=local`; `npm run demo:local` creates isolated local signing keys in the ignored `.data/` directory without replacing values you already configured.
+Set `OPENAI_API_KEY` in `.env`.
 
 ### 3. Start the dev server
 
@@ -42,20 +38,16 @@ Set `OPENAI_API_KEY` in `.env`. A new `.env.example` selects `APP_MODE=local`; `
 npm run demo:local
 ```
 
-Open [the customer demo](http://localhost:3000), sign in as `alex@example.com` with `local-customer-alex`, and send a support message from the floating chat. The message is processed by the real OpenAI-backed workflow and any refund or credit still waits for staff approval in [the support panel](http://localhost:5173), where `approver@local.test` / `local-approver` can approve it. The local loopback Studio opens without a login; support APIs and financial approvals still require their normal Bearer authorization.
+Open [customer demo](http://127.0.0.1:3000), sign in as Alex with `alex@example.com` / `local-customer-alex`, and ask: “I bought API Credits for USD 5 on order ORD-1001 five days ago. I have no subscription. Can I get a refund?” Review any proposal at [support](http://127.0.0.1:5173) as `approver@local.test` / `local-approver`; [Studio](http://127.0.0.1:4111) is also available locally.
+
+The launcher resets only the selected local backend and client SQLite files, including their SQLite sidecars, before each run.
 
 ## Making it yours
 
-- Change the policies and review limits to match your support process.
-- Read [how policies differ from executable support actions](docs/policies-and-actions.md) before adding a new offer or account operation.
-- Connect the optional [Intercom development or Stripe sandbox adapter](docs/external-adapters.md) to try the same flow with a representative integration.
-
-Set `APP_MODE=staging` or `APP_MODE=production` only when both existing Intercom and Stripe configurations are complete. Environments created before `APP_MODE` retain their explicit `SUPPORT_SOURCE=intercom` or `COMMERCE_SOURCE=stripe` choices.
-
-See [local troubleshooting](docs/troubleshooting.md) for setup help, [synthetic examples](docs/examples.md) for the local flow, and [CONTRIBUTING.md](CONTRIBUTING.md) for verification commands.
+Configure your policies in [the policy guide](https://github.com/drantunes/template-customer-refund-agent/blob/main/docs/policies-and-actions.md), learn the [local demo details](https://github.com/drantunes/template-customer-refund-agent/blob/main/docs/local-demo.md), or connect development Intercom and Stripe sandboxes with [the provider guide](https://github.com/drantunes/template-customer-refund-agent/blob/main/docs/external-adapters.md).
 
 ## About Mastra templates
 
 Mastra templates are ready-to-use projects that show what you can build with Mastra. Clone one, try it in Studio, and adapt it to your use case.
 
-Want to contribute? See [CONTRIBUTING.md](CONTRIBUTING.md).
+Want to contribute? Visit [the repository](https://github.com/drantunes/template-customer-refund-agent).
