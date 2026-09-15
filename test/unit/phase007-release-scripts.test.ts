@@ -44,17 +44,12 @@ function localEnvironment(overrides: Record<string, string> = {}) {
 }
 
 describe("PHASE-007 environment validation", () => {
-  it("keeps the CI preflight deterministic without an OpenAI key", async () => {
-    const workflow = await readFile(
-      resolve(root, ".github/workflows/ci.yml"),
-      "utf8",
-    );
-    const preflight = workflow.match(
-      /- name: Environment and documentation checks\n        run: \|\n          export LOCAL_AUTH_SIGNING_KEY=ci-local-signing-key-at-least-32-characters\n          npm run check:env -- (?<arguments>.+)\n/,
-    );
-
-    expect(preflight?.groups?.arguments).toBe(
-      "--profile=local --mode=deterministic",
+  it("keeps the local pre-push preflight deterministic without an OpenAI key", async () => {
+    const manifest = JSON.parse(
+      await readFile(resolve(root, "package.json"), "utf8"),
+    ) as { scripts: Record<string, string> };
+    expect(manifest.scripts["verify:pre-push"]).toBe(
+      "node scripts/verify-pre-push.mjs",
     );
 
     const keyFreeEnvironment = localEnvironment();
@@ -62,7 +57,7 @@ describe("PHASE-007 environment validation", () => {
 
     const result = run(
       checkEnv,
-      preflight!.groups!.arguments.split(" "),
+      ["--profile=local", "--mode=deterministic"],
       keyFreeEnvironment,
     );
 
@@ -202,11 +197,11 @@ describe("PHASE-007 environment validation", () => {
 
 describe("PHASE-007 documentation validation", () => {
   it("documents the restricted Customers: Write capability required for approved credits", async () => {
-    const [environment, adapters] = await Promise.all([
-      readFile(resolve(root, ".env.example"), "utf8"),
+    const [environmentReference, adapters] = await Promise.all([
+      readFile(resolve(root, "docs/env-variables.md"), "utf8"),
       readFile(resolve(root, "docs/external-adapters.md"), "utf8"),
     ]);
-    for (const document of [environment, adapters]) {
+    for (const document of [environmentReference, adapters]) {
       expect(document).toContain("Customers: Write");
       expect(document).toContain("customer balance transaction");
       expect(document).not.toContain(
@@ -223,18 +218,18 @@ describe("PHASE-007 documentation validation", () => {
 
     await writeFile(
       join(repository, "README.md"),
-      "[missing](https://github.com/drantunes/template-customer-refund-agent/blob/main/docs/missing.md)\n",
+      "[missing](https://github.com/mastra-ai/mastra/blob/main/templates/template-customer-refund-agent/docs/missing.md)\n",
     );
     expect(run(join(repository, "scripts/check-docs.mjs")).output).toContain(
-      "links to missing repository path https://github.com/drantunes/template-customer-refund-agent/blob/main/docs/missing.md",
+      "links to missing repository path https://github.com/mastra-ai/mastra/blob/main/templates/template-customer-refund-agent/docs/missing.md",
     );
 
     await writeFile(
       join(repository, "README.md"),
-      "[bad](https://github.com/drantunes/template-customer-refund-agent/blob/main/docs/local-demo.md#missing-anchor)\n",
+      "[bad](https://github.com/mastra-ai/mastra/blob/main/templates/template-customer-refund-agent/docs/local-demo.md#missing-anchor)\n",
     );
     expect(run(join(repository, "scripts/check-docs.mjs")).output).toContain(
-      "links to missing anchor https://github.com/drantunes/template-customer-refund-agent/blob/main/docs/local-demo.md#missing-anchor",
+      "links to missing anchor https://github.com/mastra-ai/mastra/blob/main/templates/template-customer-refund-agent/docs/local-demo.md#missing-anchor",
     );
 
     await writeFile(
@@ -264,7 +259,7 @@ describe("PHASE-007 documentation validation", () => {
       "# Example\nalex@example.com\n",
     );
     expect(run(join(repository, "scripts/check-docs.mjs")).output).toContain(
-      "must identify every example as synthetic",
+      "must identify every example as mock data or synthetic",
     );
   });
 });
@@ -295,19 +290,24 @@ async function documentationFixture() {
     ),
     writeFile(
       join(repository, "README.md"),
-      "# Valid\n[Example](https://github.com/drantunes/template-customer-refund-agent/blob/main/docs/local-demo.md#local-demo)\nnpm run check\n",
+      "# Valid\n[Example](https://github.com/mastra-ai/mastra/blob/main/templates/template-customer-refund-agent/docs/local-demo.md#local-demo)\nnpm run check\n",
     ),
     writeFile(join(repository, ".env.example"), "LOCAL_AUTH_SIGNING_KEY=\n"),
+    writeFile(join(repository, "CONTRIBUTING.md"), "# Contributing\n"),
     writeFile(
       join(repository, "client-demo-ui/package.json"),
       JSON.stringify({ scripts: { dev: "tsx src/server.tsx" } }),
     ),
     writeFile(
       join(repository, "docs/local-demo.md"),
-      "# Local demo\nEvery identity, message, order, and result below is synthetic.\n",
+      "# Local demo\nEvery identity, message, order, and result below uses mock data.\n",
     ),
     writeFile(join(repository, "docs/policies-and-actions.md"), "# Policies\n"),
     writeFile(join(repository, "docs/external-adapters.md"), "# Adapters\n"),
+    writeFile(
+      join(repository, "docs/env-variables.md"),
+      "# Environment variables\n",
+    ),
   ]);
   return repository;
 }

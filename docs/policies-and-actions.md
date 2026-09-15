@@ -22,7 +22,16 @@ export const billingPolicy: PolicyDocument = {
 
 ## Optional Intercom Articles
 
-Set `INTERCOM_KNOWLEDGE_ENABLED=true` in a configured development Intercom environment to use published Articles. Give the adapter article read/list permission, publish the Article, then reindex with the same admin action or endpoint. Local documents do not automatically update Intercom Articles.
+Published Intercom Articles are already supported as a policy source:
+
+1. Configure the [Intercom development integration](./external-adapters.md#configure-staging) and give its token article read/list permission.
+2. Add `INTERCOM_KNOWLEDGE_ENABLED=true` to `.env` and restart the backend.
+3. Create or update an Article in Intercom and publish it. Draft articles are excluded.
+4. Sign in as an admin and choose **Reindex knowledge**, or call the authenticated `POST /support/knowledge/reindex` endpoint.
+
+Reindex after publishing or changing an Article; there is no background Articles sync. When enabled, the Intercom integration selects Articles as its knowledge source instead of the local policy documents. Existing cases retain their knowledge binding. Local documents are not uploaded to Intercom.
+
+`APP_MODE=local` continues to use local documents. See the [environment reference](./env-variables.md#intercom) for the optional Articles setting.
 
 ## Supported actions
 

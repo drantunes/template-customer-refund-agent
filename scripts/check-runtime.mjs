@@ -1,8 +1,10 @@
-const expectedNode = "v24.20.0";
-const expectedNpm = "11.19.0";
+import { supportsNode, supportsNpm } from "./runtime-range.mjs";
+
+const expectedNode = "^22.22.0 || >=24.15.0";
+const expectedNpm = ">=10.9.0";
 const npmUserAgent = process.env.npm_config_user_agent ?? "";
 
-if (process.version !== expectedNode) {
+if (!supportsNode(process.version)) {
   throw new Error(
     `Expected Node.js ${expectedNode}, received ${process.version}.`,
   );
@@ -16,10 +18,12 @@ if (!npmMatch) {
     "npm_config_user_agent is missing the npm and Node.js versions.",
   );
 }
-if (npmMatch[1] !== expectedNpm || npmMatch[2] !== expectedNode) {
+if (!supportsNpm(npmMatch[1]) || !supportsNode(npmMatch[2])) {
   throw new Error(
     `Expected npm ${expectedNpm} on Node.js ${expectedNode}, received ${npmMatch[1]} on ${npmMatch[2]}.`,
   );
 }
 
-console.log(`Runtime verified: Node.js ${expectedNode}, npm ${expectedNpm}.`);
+console.log(
+  `Runtime verified: Node.js ${process.version}, npm ${npmMatch[1]}.`,
+);

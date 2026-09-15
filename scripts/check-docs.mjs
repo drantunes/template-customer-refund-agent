@@ -4,10 +4,12 @@ import { resolve, dirname, relative } from "node:path";
 const root = resolve(import.meta.dirname, "..");
 const documentation = [
   "README.md",
+  "CONTRIBUTING.md",
   ".env.example",
   "docs/policies-and-actions.md",
   "docs/external-adapters.md",
   "docs/local-demo.md",
+  "docs/env-variables.md",
 ];
 const errors = [];
 const packageScripts = {
@@ -84,16 +86,15 @@ for (const file of documentation) {
   }
 }
 
-const syntheticExample = readFileSync(
-  resolve(root, "docs/local-demo.md"),
-  "utf8",
-);
+const demoExample = readFileSync(resolve(root, "docs/local-demo.md"), "utf8");
 if (
-  !/every\s+(?:identity|message|order|result|example)[\s\S]{0,120}\bsynthetic\b/i.test(
-    syntheticExample,
+  !/every\s+(?:identity|message|order|result|example)[\s\S]{0,120}\b(?:synthetic|mock(?:ed)? data)\b/i.test(
+    demoExample,
   )
 )
-  errors.push("docs/local-demo.md must identify every example as synthetic.");
+  errors.push(
+    "docs/local-demo.md must identify every example as mock data or synthetic.",
+  );
 
 if (errors.length)
   throw new Error(`Documentation validation failed:\n- ${errors.join("\n- ")}`);
@@ -136,7 +137,7 @@ function sameRepositoryGithubTarget(target) {
   if (url.protocol !== "https:" || url.hostname !== "github.com")
     return undefined;
   const match =
-    /^\/drantunes\/template-customer-refund-agent\/(?:blob|tree)\/main\/(.+)$/.exec(
+    /^\/mastra-ai\/mastra\/(?:blob|tree)\/main\/templates\/template-customer-refund-agent\/(.+)$/.exec(
       url.pathname,
     );
   if (!match) return undefined;

@@ -4,7 +4,7 @@ External adapters are for a development Intercom workspace and Stripe test sandb
 
 ## Configure staging
 
-Set `APP_MODE=staging`. This mode requires both providers: `SUPPORT_SOURCE=intercom`, `COMMERCE_SOURCE=stripe`, `DATABASE_URL`, and `DEMO_DATABASE_URL`. Also set `OPENAI_API_KEY`, `LOCAL_AUTH_SIGNING_KEY` (at least 32 characters), and `DEMO_AUTH_BRIDGE_SIGNING_KEY` (the shared backend/client key), plus the Intercom development and Stripe test values listed in `.env.example`, then verify them:
+Set `APP_MODE=staging`. This mode selects Intercom and Stripe automatically, overriding any `SUPPORT_SOURCE` or `COMMERCE_SOURCE` values. Configure both integrations and set `DATABASE_URL` and `DEMO_DATABASE_URL`. Also set `OPENAI_API_KEY`, `LOCAL_AUTH_SIGNING_KEY` (at least 32 characters), and `DEMO_AUTH_BRIDGE_SIGNING_KEY` (the shared backend/client key), plus the Intercom development and Stripe test values in [environment variables](./env-variables.md#external-integrations), then verify them:
 
 ```bash
 npm run check:env -- --profile=auto
@@ -32,4 +32,4 @@ With both sandbox providers configured, run:
 npm run demo:setup
 ```
 
-It writes passwords and provider mappings to a private file outside the repository (the default is sibling `../demo-private`) and prints only that path. Start the three services with `npm run dev`, `npm run dev:client-demo`, and `npm run dev:support-demo`.
+It writes passwords and provider mappings to a private file outside the enclosing Git repository (the default is a `demo-private` sibling of that repository) and prints only that path. This also rejects a path that reaches the repository through a symlink. Start the three services with `npm run dev`, `npm run dev:client-demo`, and `npm run dev:support-demo`.

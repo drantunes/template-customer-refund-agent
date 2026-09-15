@@ -1,21 +1,15 @@
-import {
-  access,
-  copyFile,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { access, copyFile, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium } from "playwright";
+import { createDistributableSnapshot } from "./distributable-snapshot.mjs";
 
 const source = resolve(process.argv[2] || process.cwd());
-const destination = await mkdtemp(
-  join(tmpdir(), "support-refund-clean-clone-"),
+const { destination, fingerprint } = await createDistributableSnapshot(
+  source,
+  "support-refund-clean-snapshot-",
 );
 const localSigningKey = "clean-clone-smoke-signing-key-at-least-32-characters";
 const firstPrompt = "Check ORD-1001 and summarize the evidence.";
@@ -24,11 +18,15 @@ const firstAnswer =
 const followUpPrompt = "Confirm the safe outcome.";
 const followUpAnswer = "Follow-up completed with the same read-only case.";
 const childDatabaseCandidates = [
+  "mastra.db",
+  "src/mastra/public/.data/local-demo.db",
+  ".mastra/output/.data/local-demo.db",
   "src/mastra/public/mastra.db",
   ".mastra/output/mastra.db",
 ];
 
 const run = (command, args, cwd, env) => {
+  console.log(`[smoke] ${command} ${args.join(" ")}`);
   const result = spawnSync(command, args, {
     cwd,
     env,
@@ -64,10 +62,12 @@ async function exists(path) {
     .catch(() => false);
 }
 
-async function assertDefaultRootDatabase() {
-  const databasePath = join(destination, "mastra.db");
+async function assertLocalProfileDatabase() {
+  const databasePath = join(destination, ".data", "local-demo.db");
   if (!(await exists(databasePath)))
-    throw new Error("local:seed did not create the default root mastra.db.");
+    throw new Error(
+      "local:seed did not create the default local .data/local-demo.db.",
+    );
   for (const childPath of childDatabaseCandidates)
     if (await exists(join(destination, childPath)))
       throw new Error(`Unexpected child-cwd database: ${childPath}.`);
@@ -82,7 +82,7 @@ async function assertDefaultRootDatabase() {
     const order = result.rows[0];
     if (order?.order_id !== "ORD-1001" || order.status !== "fulfilled")
       throw new Error(
-        "Root mastra.db does not contain the fulfilled ORD-1001 fixture.",
+        "Local .data/local-demo.db does not contain the fulfilled ORD-1001 fixture.",
       );
   } finally {
     client.close();
@@ -111,16 +111,11 @@ async function waitForCompletedRun(page, answer) {
   await page
     .getByPlaceholder("Enter your message...")
     .waitFor({ state: "visible", timeout: 20_000 });
-  await page.waitForFunction(
-    (expected) =>
-      document.body.innerText.includes(expected) &&
-      [...document.querySelectorAll("button")].every(
-        (button) => button.textContent?.trim() !== "Stop",
-      ) &&
-      document.body.innerText.includes("Idle"),
-    answer,
-    { timeout: 20_000 },
-  );
+  // Current Studio exposes the agent's isRunning state on the composer ring;
+  // the previous visible "Idle" label is no longer part of the agent chat.
+  await page
+    .locator('[data-slot="composer-ring"][data-busy="false"]')
+    .waitFor({ state: "visible", timeout: 20_000 });
 }
 
 async function runStudioJourney(port) {
@@ -132,6 +127,11 @@ async function runStudioJourney(port) {
   const expectedDeniedStudioPaths = new Set([
     "/api/processors",
     "/api/mcp/v0/servers",
+    // New Studio navigation fetches these global panels. The local demo
+    // intentionally exposes only scoped support history and supervision.
+    "/api/observability/feedback",
+    "/api/experiments/review-summary",
+    "/api/channels/platforms",
   ]);
   const isSupervisorExecution = (path, method) =>
     method === "POST" &&
@@ -226,18 +226,6 @@ async function runStudioJourney(port) {
 let server;
 let serverOutput = "";
 try {
-  run(
-    "git",
-    ["clone", "--no-local", "--no-hardlinks", source, destination],
-    source,
-    syntheticEnvironment(),
-  );
-  const sha = run(
-    "git",
-    ["rev-parse", "HEAD"],
-    destination,
-    syntheticEnvironment(),
-  );
   await writeFile(
     join(destination, ".env"),
     [
@@ -260,7 +248,7 @@ try {
     ["run", "local:seed"],
   ])
     run("npm", command, destination, env);
-  await assertDefaultRootDatabase();
+  await assertLocalProfileDatabase();
   for (const command of [
     ["run", "build"],
     ["run", "build:web"],
@@ -268,10 +256,10 @@ try {
     ["run", "test:e2e"],
   ])
     run("npm", command, destination, env);
-  await assertDefaultRootDatabase();
+  await assertLocalProfileDatabase();
 
   const port = await unusedPort();
-  env.PORT = String(port);
+  env.LOCAL_DEMO_BACKEND_PORT = String(port);
   server = spawn("npm", ["run", "dev"], {
     cwd: destination,
     env,
@@ -301,7 +289,7 @@ try {
   if (!ready)
     throw new Error(`Local server did not become ready.\n${serverOutput}`);
   await runStudioJourney(port);
-  await assertDefaultRootDatabase();
+  await assertLocalProfileDatabase();
 
   const login = await fetch(`http://127.0.0.1:${port}/support/auth/login`, {
     method: "POST",
@@ -329,8 +317,8 @@ try {
   console.log(
     JSON.stringify({
       status: "passed",
-      sha,
-      database: "mastra.db",
+      fingerprint,
+      database: ".data/local-demo.db",
       studio: {
         firstPrompt,
         tool: "lookup_order",
